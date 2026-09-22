@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, ObserveEntityBinding, OfflineBindingRequest, RegisterEntityBinding, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, SessionResponse, TargetKind, TargetSummary}};
+use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, ClaimCodeRequest, ClaimCodeResponse, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, ScopedIdentityBindingSummary, SessionResponse, TargetKind, TargetSummary}};
 
 #[derive(Clone)]
 pub struct CloudStore {
@@ -126,6 +126,35 @@ impl CloudStore {
                  role TEXT NOT NULL,
                  PRIMARY KEY(target_id, account_id)
              );
+             CREATE TABLE IF NOT EXISTS scoped_identity_bindings (
+                 binding_id TEXT PRIMARY KEY,
+                 account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                 identity_id TEXT NOT NULL REFERENCES identities(identity_id),
+                 target_id TEXT NOT NULL REFERENCES targets(target_id),
+                 scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+                 world_epoch TEXT NOT NULL,
+                 entity_uuid TEXT NOT NULL,
+                 verification_method TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 approved_by TEXT,
+                 revision INTEGER NOT NULL DEFAULT 0,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS claim_codes (
+                 code_hash TEXT PRIMARY KEY,
+                 scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+                 world_epoch TEXT NOT NULL,
+                 target_id TEXT NOT NULL REFERENCES targets(target_id),
+                 entity_uuid TEXT NOT NULL,
+                 issued_by TEXT NOT NULL REFERENCES accounts(account_id),
+                 expires_at INTEGER NOT NULL,
+                 attempts INTEGER NOT NULL DEFAULT 0,
+                 max_attempts INTEGER NOT NULL DEFAULT 5,
+                 consumed INTEGER NOT NULL DEFAULT 0,
+                 revoked INTEGER NOT NULL DEFAULT 0,
+                 created_at TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS entity_bindings (
                  binding_id TEXT PRIMARY KEY,
                  scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
@@ -191,6 +220,8 @@ impl CloudStore {
              );
              CREATE INDEX IF NOT EXISTS idx_targets_scope ON targets(scope_id);
              CREATE INDEX IF NOT EXISTS idx_entity_bindings_scope ON entity_bindings(scope_id);
+             CREATE INDEX IF NOT EXISTS idx_scoped_identity_bindings_scope ON scoped_identity_bindings(scope_id, world_epoch);
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_scoped_identity_active ON scoped_identity_bindings(scope_id, world_epoch, entity_uuid) WHERE status = 'APPROVED';
              CREATE INDEX IF NOT EXISTS idx_asset_revisions_sha ON asset_revisions(raw_sha256);
              INSERT OR IGNORE INTO scope_acl(scope_id, account_id, role)
                  SELECT scope_id, tenant_id, 'manage' FROM scopes;
@@ -372,13 +403,65 @@ impl CloudStore {
         validate_slug(&input.scope_id, "scope_id")?;
         validate_slug(&input.world_epoch, "world_epoch")?;
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let identity: Option<(String, Option<String>, i64)> = conn.query_row("SELECT identity_kind, scope_id, verified FROM identities WHERE identity_id = ?1 AND account_id = ?2", params![input.identity_id, account_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
-        let Some((kind, identity_scope, verified)) = identity else { return Err(CloudError::NotFound); };
+        let identity: Option<(String, Option<String>, String)> = conn.query_row("SELECT identity_kind, scope_id, profile_uuid FROM identities WHERE identity_id = ?1 AND account_id = ?2", params![input.identity_id, account_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        let Some((kind, identity_scope, profile_uuid)) = identity else { return Err(CloudError::NotFound); };
         if kind != "offline" || identity_scope.as_deref() != Some(input.scope_id.as_str()) { return Err(CloudError::AccessDenied); }
-        if verified != 1 { return Err(CloudError::IdentityNotVerified); }
-        let scope_exists: Option<String> = conn.query_row("SELECT scope_id FROM scopes WHERE scope_id = ?1 AND tenant_id = ?2 AND world_epoch = ?3", params![input.scope_id, account_id, input.world_epoch], |row| row.get(0)).optional()?;
+        let scope_exists: Option<String> = conn.query_row("SELECT scope_id FROM scopes WHERE scope_id = ?1 AND world_epoch = ?2", params![input.scope_id, input.world_epoch], |row| row.get(0)).optional()?;
         if scope_exists.is_none() { return Err(CloudError::NotFound); }
-        Ok(serde_json::json!({"identity_id": input.identity_id, "scope_id": input.scope_id, "world_epoch": input.world_epoch, "status": "PENDING_APPROVAL"}))
+        let target_scope: Option<String> = conn.query_row("SELECT scope_id FROM targets WHERE target_id = ?1 AND target_kind = 'PLAYER'", [&input.target_id], |row| row.get(0)).optional()?;
+        if target_scope.as_deref() != Some(input.scope_id.as_str()) { return Err(CloudError::NotFound); }
+        if conn.query_row("SELECT 1 FROM scoped_identity_bindings WHERE scope_id = ?1 AND world_epoch = ?2 AND entity_uuid = ?3 AND status = 'APPROVED'", params![input.scope_id, input.world_epoch, profile_uuid], |_| Ok(())).optional()?.is_some() {
+            return Err(CloudError::RevisionConflict);
+        }
+        let binding_id = format!("offline_binding_{}", uuid::Uuid::new_v4().simple());
+        conn.execute("INSERT INTO scoped_identity_bindings(binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, revision, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'STRICT_APPROVAL', 'PENDING_APPROVAL', 0, datetime('now'), datetime('now'))", params![binding_id, account_id, input.identity_id, input.target_id, input.scope_id, input.world_epoch, profile_uuid])?;
+        Ok(serde_json::json!({"binding_id": binding_id, "identity_id": input.identity_id, "target_id": input.target_id, "scope_id": input.scope_id, "world_epoch": input.world_epoch, "entity_uuid": profile_uuid, "verification_method": "STRICT_APPROVAL", "status": "PENDING_APPROVAL", "revision": 0}))
+    }
+
+    pub fn create_claim_code(&self, account_id: &str, target_id: &str, input: &ClaimCodeRequest) -> Result<ClaimCodeResponse, CloudError> {
+        if uuid::Uuid::parse_str(&input.entity_uuid).is_err() { return Err(CloudError::invalid_metadata("entity_uuid must be a UUID")); }
+        let expires_in_seconds = input.expires_in_seconds.unwrap_or(600).clamp(60, 86_400);
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let target: Option<(String, String)> = conn.query_row("SELECT scope_id, target_kind FROM targets WHERE target_id = ?1", [target_id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+        let Some((scope_id, target_kind)) = target else { return Err(CloudError::NotFound); };
+        if target_kind != "PLAYER" { return Err(CloudError::invalid_metadata("claim codes require PLAYER targets")); }
+        if scope_role(&conn, &scope_id, account_id)?.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
+        let stored_epoch: String = conn.query_row("SELECT world_epoch FROM scopes WHERE scope_id = ?1", [&scope_id], |row| row.get(0))?;
+        if stored_epoch != input.world_epoch { return Err(CloudError::RevisionConflict); }
+        let code = format!("spm_claim_{}", uuid::Uuid::new_v4().simple());
+        conn.execute("INSERT INTO claim_codes(code_hash, scope_id, world_epoch, target_id, entity_uuid, issued_by, expires_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))", params![hash_token(&code), scope_id, input.world_epoch, target_id, input.entity_uuid, account_id, now_seconds() + expires_in_seconds as i64])?;
+        Ok(ClaimCodeResponse { code, scope_id, world_epoch: input.world_epoch.clone(), target_id: target_id.to_owned(), entity_uuid: input.entity_uuid.clone(), expires_in_seconds })
+    }
+
+    pub fn redeem_claim_code(&self, account_id: &str, input: &RedeemClaimCode) -> Result<ScopedIdentityBindingSummary, CloudError> {
+        if input.code.is_empty() || input.code.len() > 256 { return Err(CloudError::invalid_metadata("invalid claim code")); }
+        let mut conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let tx = conn.transaction()?;
+        let claim: Option<(String, String, String, String, i64, i64, i64, i64)> = tx.query_row("SELECT scope_id, world_epoch, target_id, entity_uuid, expires_at, attempts, max_attempts, consumed FROM claim_codes WHERE code_hash = ?1 AND revoked = 0", [hash_token(&input.code)], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))).optional()?;
+        let Some((scope_id, world_epoch, target_id, entity_uuid, expires_at, attempts, max_attempts, consumed)) = claim else { return Err(CloudError::NotFound); };
+        if consumed != 0 || expires_at <= now_seconds() || attempts >= max_attempts { return Err(CloudError::AccessDenied); }
+        tx.execute("UPDATE claim_codes SET attempts = attempts + 1 WHERE code_hash = ?1", [hash_token(&input.code)])?;
+        let identity: Option<(String, Option<String>, String)> = tx.query_row("SELECT identity_kind, scope_id, profile_uuid FROM identities WHERE identity_id = ?1 AND account_id = ?2", params![input.identity_id, account_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        let Some((kind, identity_scope, profile_uuid)) = identity else { return Err(CloudError::NotFound); };
+        if kind != "offline" || identity_scope.as_deref() != Some(scope_id.as_str()) || profile_uuid != entity_uuid { return Err(CloudError::AccessDenied); }
+        if tx.query_row("SELECT 1 FROM scoped_identity_bindings WHERE scope_id = ?1 AND world_epoch = ?2 AND entity_uuid = ?3 AND status = 'APPROVED'", params![scope_id, world_epoch, entity_uuid], |_| Ok(())).optional()?.is_some() { return Err(CloudError::RevisionConflict); }
+        let binding_id = format!("offline_binding_{}", uuid::Uuid::new_v4().simple());
+        tx.execute("INSERT INTO scoped_identity_bindings(binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, revision, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'CLAIM_CODE', 'APPROVED', 1, datetime('now'), datetime('now'))", params![binding_id, account_id, input.identity_id, target_id, scope_id, world_epoch, entity_uuid])?;
+        tx.execute("UPDATE claim_codes SET consumed = 1 WHERE code_hash = ?1", [hash_token(&input.code)])?;
+        let summary = tx.query_row("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE binding_id = ?1", [&binding_id], |row| Ok(ScopedIdentityBindingSummary { binding_id: row.get(0)?, account_id: row.get(1)?, identity_id: row.get(2)?, target_id: row.get(3)?, scope_id: row.get(4)?, world_epoch: row.get(5)?, entity_uuid: row.get(6)?, verification_method: row.get(7)?, status: row.get(8)?, approved_by: row.get(9)?, revision: row.get::<_, i64>(10)? as u64 }))?;
+        tx.commit()?;
+        Ok(summary)
+    }
+
+    pub fn approve_offline_binding(&self, account_id: &str, binding_id: &str, input: &OfflineBindingApproval) -> Result<ScopedIdentityBindingSummary, CloudError> {
+        if !matches!(input.status.as_str(), "APPROVED" | "REJECTED") { return Err(CloudError::invalid_metadata("invalid offline binding status")); }
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let binding: Option<(String, String, String, String, String, String)> = conn.query_row("SELECT account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid FROM scoped_identity_bindings WHERE binding_id = ?1", [binding_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))).optional()?;
+        let Some((_owner, _identity_id, _target_id, scope_id, _world_epoch, _entity_uuid)) = binding else { return Err(CloudError::NotFound); };
+        if scope_role(&conn, &scope_id, account_id)?.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
+        if input.status == "APPROVED" && conn.query_row("SELECT 1 FROM scoped_identity_bindings WHERE scope_id = ?1 AND world_epoch = (SELECT world_epoch FROM scoped_identity_bindings WHERE binding_id = ?2) AND entity_uuid = (SELECT entity_uuid FROM scoped_identity_bindings WHERE binding_id = ?2) AND status = 'APPROVED' AND binding_id <> ?2", params![scope_id, binding_id], |_| Ok(())).optional()?.is_some() { return Err(CloudError::RevisionConflict); }
+        conn.execute("UPDATE scoped_identity_bindings SET status = ?1, approved_by = ?2, revision = revision + 1, updated_at = datetime('now') WHERE binding_id = ?3", params![input.status, account_id, binding_id])?;
+        conn.query_row("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE binding_id = ?1", [binding_id], |row| Ok(ScopedIdentityBindingSummary { binding_id: row.get(0)?, account_id: row.get(1)?, identity_id: row.get(2)?, target_id: row.get(3)?, scope_id: row.get(4)?, world_epoch: row.get(5)?, entity_uuid: row.get(6)?, verification_method: row.get(7)?, status: row.get(8)?, approved_by: row.get(9)?, revision: row.get::<_, i64>(10)? as u64 })).map_err(CloudError::from)
     }
 
     pub fn create_scope(&self, account_id: &str, input: &CreateScope) -> Result<ScopeSummary, CloudError> {
@@ -745,6 +828,15 @@ mod tests {
         let observed = store.observe_binding("account_local", &binding.binding_id, &crate::models::ObserveEntityBinding { world_epoch: "epoch-1".into(), observation_state: "ACTIVE".into() }).unwrap();
         assert_eq!(observed.observation_state, "ACTIVE");
         assert!(store.register_binding("account_local", "scope", &crate::models::RegisterEntityBinding { world_epoch: "old-epoch".into(), entity_uuid: "12345678-1234-1234-1234-1234567890ab".into(), entity_kind: "PLAYER".into(), target_id: "target".into() }).is_err());
+        let offline_identity = store.create_identity("account_editor", &crate::models::CreateIdentity { identity: "offline:scope:12345678-1234-1234-1234-1234567890ac".into(), display_name: "Offline Player".into() }).unwrap();
+        let pending = store.create_offline_binding("account_editor", &crate::models::OfflineBindingRequest { scope_id: "scope".into(), world_epoch: "epoch-1".into(), identity_id: offline_identity.identity_id.clone(), target_id: "target".into() }).unwrap();
+        assert_eq!(pending["status"], "PENDING_APPROVAL");
+        let approved = store.approve_offline_binding("account_local", pending["binding_id"].as_str().unwrap(), &crate::models::OfflineBindingApproval { status: "APPROVED".into() }).unwrap();
+        assert_eq!(approved.status, "APPROVED");
+        let claim = store.create_claim_code("account_local", "target", &crate::models::ClaimCodeRequest { world_epoch: "epoch-1".into(), entity_uuid: "12345678-1234-1234-1234-1234567890ad".into(), expires_in_seconds: Some(600) }).unwrap();
+        let claim_identity = store.create_identity("account_editor", &crate::models::CreateIdentity { identity: "offline:scope:12345678-1234-1234-1234-1234567890ad".into(), display_name: "Claimed Player".into() }).unwrap();
+        let redeemed = store.redeem_claim_code("account_editor", &crate::models::RedeemClaimCode { code: claim.code, identity_id: claim_identity.identity_id }).unwrap();
+        assert_eq!(redeemed.verification_method, "CLAIM_CODE");
         let first = store.get_appearance("account_local", "target").unwrap();
         assert_eq!(first.revision, 0);
         let update = crate::models::AppearanceUpdate { request_id: "req".into(), expected_revision: 0, asset_id: None, asset_revision: None, raw_sha256: None, texture_id: Some("texture".into()), scale: Some(1.0), disabled: false };

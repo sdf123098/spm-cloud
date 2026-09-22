@@ -7,7 +7,7 @@ use subtle::ConstantTimeEq;
 use tokio::{io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, net::lookup_host, sync::broadcast, fs};
 use uuid::Uuid;
 
-use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, InstanceResponse, Limits, LoginRequest, ObserveEntityBinding, OfflineBindingRequest, RegisterEntityBinding, ScopeAclUpdate, VerifyIdentityChallenge}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
+use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, ClaimCodeRequest, CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, InstanceResponse, Limits, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, ScopeAclUpdate, VerifyIdentityChallenge}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -44,6 +44,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/challenges/{challenge_id}/complete", post(verify_identity_challenge))
         .route("/v1/identities", get(list_identities).post(create_identity))
         .route("/v1/identities/{identity_id}/offline-bindings", post(create_offline_binding))
+        .route("/v1/claim-codes/redeem", post(redeem_claim_code))
+        .route("/v1/targets/{target_id}/claim-codes", post(create_claim_code))
+        .route("/v1/scoped-identity-bindings/{binding_id}", put(approve_offline_binding))
         .route("/v1/scopes", get(list_scopes).post(create_scope))
         .route("/v1/scopes/{scope_id}/acl", get(list_scope_acl).put(set_scope_acl))
         .route("/v1/assets", get(list_assets).post(upload_asset))
@@ -144,6 +147,21 @@ async fn create_offline_binding(State(state): State<AppState>, headers: HeaderMa
     let account = authenticate(&state, &headers)?;
     input.identity_id = identity_id;
     Ok(Json(state.store.create_offline_binding(&account, &input)?))
+}
+
+async fn create_claim_code(State(state): State<AppState>, headers: HeaderMap, Path(target_id): Path<String>, Json(input): Json<ClaimCodeRequest>) -> Result<(StatusCode, Json<crate::models::ClaimCodeResponse>), CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok((StatusCode::CREATED, Json(state.store.create_claim_code(&account, &target_id, &input)?)))
+}
+
+async fn redeem_claim_code(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<RedeemClaimCode>) -> Result<Json<crate::models::ScopedIdentityBindingSummary>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.redeem_claim_code(&account, &input)?))
+}
+
+async fn approve_offline_binding(State(state): State<AppState>, headers: HeaderMap, Path(binding_id): Path<String>, Json(input): Json<OfflineBindingApproval>) -> Result<Json<crate::models::ScopedIdentityBindingSummary>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.approve_offline_binding(&account, &binding_id, &input)?))
 }
 
 async fn list_scopes(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<crate::models::ScopeSummary>>, CloudError> {

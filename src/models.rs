@@ -131,6 +131,50 @@ pub struct OfflineBindingRequest {
     pub scope_id: String,
     pub world_epoch: String,
     pub identity_id: String,
+    pub target_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScopedIdentityBindingSummary {
+    pub binding_id: String,
+    pub account_id: String,
+    pub identity_id: String,
+    pub target_id: String,
+    pub scope_id: String,
+    pub world_epoch: String,
+    pub entity_uuid: String,
+    pub verification_method: String,
+    pub status: String,
+    pub approved_by: Option<String>,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ClaimCodeRequest {
+    pub world_epoch: String,
+    pub entity_uuid: String,
+    pub expires_in_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ClaimCodeResponse {
+    pub code: String,
+    pub scope_id: String,
+    pub world_epoch: String,
+    pub target_id: String,
+    pub entity_uuid: String,
+    pub expires_in_seconds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RedeemClaimCode {
+    pub code: String,
+    pub identity_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct OfflineBindingApproval {
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
