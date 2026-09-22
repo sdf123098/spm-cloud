@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
 axum = { version = "0.8", features = ["ws", "json", "multipart"] }
 base64 = "0.22"
 bytes = "1"

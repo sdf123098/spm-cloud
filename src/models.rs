@@ -51,6 +51,20 @@ pub struct AccountSummary {
     pub account_id: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct LoginRequest {
+    pub account_id: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionResponse {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub access_expires_in_seconds: u64,
+    pub refresh_expires_in_seconds: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct IdentitySummary {
     pub identity_id: String,

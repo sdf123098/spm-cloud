@@ -1,13 +1,13 @@
 use std::{sync::Arc, time::SystemTime};
 
-use axum::{body::Body, extract::{Path, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::Response, routing::{get, post}, Json, Router};
+use axum::{body::Body, extract::{Path, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::Response, routing::{delete, get, post}, Json, Router};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::{io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, fs};
 use uuid::Uuid;
 
-use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateIdentity, CreateScope, CreateTarget, InstanceResponse, Limits, OfflineBindingRequest}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
+use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateIdentity, CreateScope, CreateTarget, InstanceResponse, Limits, LoginRequest, OfflineBindingRequest}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,6 +24,9 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/v1/instance", get(instance))
         .route("/v1/accounts", post(create_account))
+        .route("/v1/sessions", post(login))
+        .route("/v1/sessions/refresh", post(refresh_session))
+        .route("/v1/sessions/current", delete(logout))
         .route("/v1/identity-providers", get(identity_providers))
         .route("/v1/identities", get(list_identities).post(create_identity))
         .route("/v1/identities/{identity_id}/offline-bindings", post(create_offline_binding))
@@ -55,6 +58,23 @@ async fn identity_providers(State(state): State<AppState>) -> Result<Json<Vec<se
 async fn create_account(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<AccountSummary>) -> Result<(StatusCode, Json<AccountSummary>), CloudError> {
     authenticate(&state, &headers)?;
     Ok((StatusCode::CREATED, Json(state.store.create_account(&input.account_id)?)))
+}
+
+async fn login(State(state): State<AppState>, Json(input): Json<LoginRequest>) -> Result<Json<crate::models::SessionResponse>, CloudError> {
+    Ok(Json(state.store.issue_session(&input)?))
+}
+
+#[derive(serde::Deserialize)]
+struct RefreshRequest { refresh_token: String }
+
+async fn refresh_session(State(state): State<AppState>, Json(input): Json<RefreshRequest>) -> Result<Json<crate::models::SessionResponse>, CloudError> {
+    Ok(Json(state.store.refresh_session(&input.refresh_token)?))
+}
+
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<StatusCode, CloudError> {
+    let token = bearer_token(&headers)?;
+    state.store.revoke_access_token(token)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_identities(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<crate::models::IdentitySummary>>, CloudError> {
@@ -193,11 +213,18 @@ fn parse_range(value: Option<&HeaderValue>, total: u64) -> Result<(u64, u64, boo
 }
 
 pub fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<String, CloudError> {
-    let Some(configured) = state.config.access_token.as_deref() else { return Err(CloudError::Unauthenticated); };
+    let token = bearer_token(headers)?;
+    if let Some(configured) = state.config.access_token.as_deref() {
+        if configured.as_bytes().ct_eq(token.as_bytes()).unwrap_u8() == 1 {
+            return Ok(state.config.bootstrap_account_id.clone());
+        }
+    }
+    state.store.authenticate_access_token(token)
+}
+
+fn bearer_token(headers: &HeaderMap) -> Result<&str, CloudError> {
     let Some(value) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else { return Err(CloudError::Unauthenticated); };
-    let Some(token) = value.strip_prefix("Bearer ") else { return Err(CloudError::Unauthenticated); };
-    if configured.as_bytes().ct_eq(token.as_bytes()).unwrap_u8() != 1 { return Err(CloudError::Unauthenticated); }
-    Ok(state.config.bootstrap_account_id.clone())
+    value.strip_prefix("Bearer ").filter(|token| !token.is_empty()).ok_or(CloudError::Unauthenticated)
 }
 
 fn header_string(headers: &HeaderMap, name: &str) -> Result<Option<String>, CloudError> {

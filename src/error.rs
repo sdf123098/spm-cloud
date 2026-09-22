@@ -8,6 +8,10 @@ pub enum CloudError {
     Configuration(String),
     #[error("unauthenticated")]
     Unauthenticated,
+    #[error("session expired")]
+    SessionExpired,
+    #[error("refresh token reused")]
+    RefreshReused,
     #[error("not found")]
     NotFound,
     #[error("access denied")]
@@ -45,6 +49,8 @@ impl CloudError {
         match self {
             Self::Configuration(_) => "INTERNAL",
             Self::Unauthenticated => "UNAUTHENTICATED",
+            Self::SessionExpired => "SESSION_EXPIRED",
+            Self::RefreshReused => "REFRESH_REUSED",
             Self::NotFound => "ASSET_NOT_FOUND",
             Self::AccessDenied => "ASSET_ACCESS_DENIED",
             Self::InvalidMetadata(_) => "INVALID_METADATA",
@@ -62,6 +68,7 @@ impl CloudError {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
+            Self::SessionExpired | Self::RefreshReused => StatusCode::UNAUTHORIZED,
             Self::AccessDenied => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::AssetRangeInvalid => StatusCode::RANGE_NOT_SATISFIABLE,

@@ -1,9 +1,11 @@
 use std::{path::{Path, PathBuf}, sync::{Arc, Mutex}};
 
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, CreateIdentity, CreateScope, CreateTarget, IdentitySummary, OfflineBindingRequest, ScopeSummary, TargetKind, TargetSummary}};
+use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, CreateIdentity, CreateScope, CreateTarget, IdentitySummary, LoginRequest, OfflineBindingRequest, ScopeSummary, SessionResponse, TargetKind, TargetSummary}};
 
 #[derive(Clone)]
 pub struct CloudStore {
@@ -30,7 +32,7 @@ impl CloudStore {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         Self::migrate(&connection)?;
         let store = Self { connection: Arc::new(Mutex::new(connection)), object_dir: Arc::new(config.object_dir.clone()) };
-        store.seed_official_provider()?;
+        store.seed_bootstrap(&config.bootstrap_account_id, config.bootstrap_password_hash.as_deref())?;
         Ok(store)
     }
 
@@ -40,6 +42,19 @@ impl CloudStore {
              CREATE TABLE IF NOT EXISTS accounts (
                  account_id TEXT PRIMARY KEY,
                  created_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS account_credentials (
+                 account_id TEXT PRIMARY KEY REFERENCES accounts(account_id),
+                 password_hash TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS sessions (
+                 session_id TEXT PRIMARY KEY,
+                 account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                 access_hash TEXT NOT NULL UNIQUE,
+                 refresh_hash TEXT NOT NULL UNIQUE,
+                 access_expires_at INTEGER NOT NULL,
+                 refresh_expires_at INTEGER NOT NULL,
+                 revoked INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE IF NOT EXISTS identity_providers (
                  provider_id TEXT PRIMARY KEY,
@@ -120,10 +135,53 @@ impl CloudStore {
         Ok(())
     }
 
-    fn seed_official_provider(&self) -> Result<(), CloudError> {
+    fn seed_bootstrap(&self, account_id: &str, password_hash: Option<&str>) -> Result<(), CloudError> {
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
         conn.execute("INSERT OR IGNORE INTO identity_providers(provider_id, display_name, base_url, enabled) VALUES ('official', 'Minecraft official', 'https://sessionserver.mojang.com', 1)", [])?;
-        conn.execute("INSERT OR IGNORE INTO accounts(account_id, created_at) VALUES (?1, datetime('now'))", ["account_local"])?;
+        conn.execute("INSERT OR IGNORE INTO accounts(account_id, created_at) VALUES (?1, datetime('now'))", [account_id])?;
+        if let Some(password_hash) = password_hash {
+            PasswordHash::new(password_hash).map_err(|_| CloudError::configuration("invalid bootstrap Argon2id password hash"))?;
+            conn.execute("INSERT INTO account_credentials(account_id, password_hash) VALUES (?1, ?2) ON CONFLICT(account_id) DO UPDATE SET password_hash = excluded.password_hash", params![account_id, password_hash])?;
+        }
+        Ok(())
+    }
+
+    pub fn authenticate_access_token(&self, token: &str) -> Result<String, CloudError> {
+        let access_hash = hash_token(token);
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let session: Option<(String, i64, i64)> = conn.query_row("SELECT account_id, access_expires_at, revoked FROM sessions WHERE access_hash = ?1", [&access_hash], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        let Some((account_id, expires_at, revoked)) = session else { return Err(CloudError::Unauthenticated); };
+        if revoked != 0 || expires_at <= now_seconds() { return Err(CloudError::SessionExpired); }
+        Ok(account_id)
+    }
+
+    pub fn issue_session(&self, login: &LoginRequest) -> Result<SessionResponse, CloudError> {
+        validate_slug(&login.account_id, "account_id")?;
+        if login.password.is_empty() || login.password.len() > 1024 { return Err(CloudError::Unauthenticated); }
+        let mut conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let password_hash: Option<String> = conn.query_row("SELECT password_hash FROM account_credentials WHERE account_id = ?1", [&login.account_id], |row| row.get(0)).optional()?;
+        let Some(password_hash) = password_hash else { return Err(CloudError::Unauthenticated); };
+        let parsed = PasswordHash::new(&password_hash).map_err(|_| CloudError::Internal(anyhow::anyhow!("stored password hash is invalid")))?;
+        Argon2::default().verify_password(login.password.as_bytes(), &parsed).map_err(|_| CloudError::Unauthenticated)?;
+        issue_session_in_transaction(&mut conn, &login.account_id)
+    }
+
+    pub fn refresh_session(&self, refresh_token: &str) -> Result<SessionResponse, CloudError> {
+        if refresh_token.is_empty() || refresh_token.len() > 512 { return Err(CloudError::RefreshReused); }
+        let mut conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let refresh_hash = hash_token(refresh_token);
+        let session: Option<(String, i64, i64)> = conn.query_row("SELECT account_id, refresh_expires_at, revoked FROM sessions WHERE refresh_hash = ?1", [&refresh_hash], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        let Some((account_id, expires_at, revoked)) = session else { return Err(CloudError::RefreshReused); };
+        if revoked != 0 { return Err(CloudError::RefreshReused); }
+        if expires_at <= now_seconds() { return Err(CloudError::SessionExpired); }
+        conn.execute("UPDATE sessions SET revoked = 1 WHERE refresh_hash = ?1", [&refresh_hash])?;
+        issue_session_in_transaction(&mut conn, &account_id)
+    }
+
+    pub fn revoke_access_token(&self, access_token: &str) -> Result<(), CloudError> {
+        let access_hash = hash_token(access_token);
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        conn.execute("UPDATE sessions SET revoked = 1 WHERE access_hash = ?1", [&access_hash])?;
         Ok(())
     }
 
@@ -312,6 +370,28 @@ impl CloudStore {
     pub fn object_path_for_sha(&self, sha256: &str) -> PathBuf { self.object_dir.join(&sha256[0..2.min(sha256.len())]).join(sha256) }
 }
 
+fn now_seconds() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+}
+
+fn hash_token(token: &str) -> String {
+    hex::encode(sha2::Sha256::digest(token.as_bytes()))
+}
+
+fn issue_session_in_transaction(conn: &mut Connection, account_id: &str) -> Result<SessionResponse, CloudError> {
+    const ACCESS_EXPIRES_IN: u64 = 15 * 60;
+    const REFRESH_EXPIRES_IN: u64 = 30 * 24 * 60 * 60;
+    let access_token = format!("spm_access_{}", uuid::Uuid::new_v4().simple());
+    let refresh_token = format!("spm_refresh_{}", uuid::Uuid::new_v4().simple());
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO sessions(session_id, account_id, access_hash, refresh_hash, access_expires_at, refresh_expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![uuid::Uuid::new_v4().to_string(), account_id, hash_token(&access_token), hash_token(&refresh_token), now_seconds() + ACCESS_EXPIRES_IN as i64, now_seconds() + REFRESH_EXPIRES_IN as i64]
+    )?;
+    tx.commit()?;
+    Ok(SessionResponse { access_token, refresh_token, access_expires_in_seconds: ACCESS_EXPIRES_IN, refresh_expires_in_seconds: REFRESH_EXPIRES_IN })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,7 +400,7 @@ mod tests {
     #[test]
     fn sqlite_wal_and_cas_revision_are_atomic() {
         let dir = tempdir().unwrap();
-        let config = CloudConfig { instance_id: "test".into(), origin: "https://localhost".into(), bind_addr: "127.0.0.1:0".parse().unwrap(), database_path: dir.path().join("test.db"), object_dir: dir.path().join("objects"), access_token: Some("secret".into()), bootstrap_account_id: "account_local".into(), max_asset_bytes: 128 * 1024 * 1024, max_message_bytes: 64 * 1024 };
+        let config = CloudConfig { instance_id: "test".into(), origin: "https://localhost".into(), bind_addr: "127.0.0.1:0".parse().unwrap(), database_path: dir.path().join("test.db"), object_dir: dir.path().join("objects"), access_token: Some("secret".into()), bootstrap_account_id: "account_local".into(), bootstrap_password_hash: None, max_asset_bytes: 128 * 1024 * 1024, max_message_bytes: 64 * 1024 };
         let store = CloudStore::open(&config).unwrap();
         let scope = store.create_scope("account_local", &CreateScope { scope_id: "scope".into(), name: "Scope".into(), world_epoch: "epoch-1".into() }).unwrap();
         assert_eq!(scope.scope_id, "scope");

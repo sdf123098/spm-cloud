@@ -11,6 +11,7 @@ pub struct CloudConfig {
     pub object_dir: PathBuf,
     pub access_token: Option<String>,
     pub bootstrap_account_id: String,
+    pub bootstrap_password_hash: Option<String>,
     pub max_asset_bytes: u64,
     pub max_message_bytes: usize,
 }
@@ -30,7 +31,8 @@ impl CloudConfig {
         let access_token = env::var("SPM_CLOUD_ACCESS_TOKEN").ok().filter(|v| !v.is_empty());
         let bootstrap_account_id = env::var("SPM_CLOUD_BOOTSTRAP_ACCOUNT").unwrap_or_else(|_| "account_local".to_owned());
         validate_slug(&bootstrap_account_id, "bootstrap_account_id")?;
-        Ok(Self { instance_id, origin, bind_addr, database_path, object_dir, access_token, bootstrap_account_id, max_asset_bytes: 128 * 1024 * 1024, max_message_bytes: 64 * 1024 })
+        let bootstrap_password_hash = env::var("SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH").ok().filter(|v| !v.is_empty());
+        Ok(Self { instance_id, origin, bind_addr, database_path, object_dir, access_token, bootstrap_account_id, bootstrap_password_hash, max_asset_bytes: 128 * 1024 * 1024, max_message_bytes: 64 * 1024 })
     }
 }
 
