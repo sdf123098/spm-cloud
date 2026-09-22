@@ -13,11 +13,25 @@
 
 ## 本地运行
 
-需要 Rust 1.85+。默认监听 `127.0.0.1:8787`，数据写入 `./data`。生产环境必须显式设置访问令牌和反向代理 TLS：
+需要 Rust 1.85+。服务支持 Windows、Linux 和 macOS；默认监听 `127.0.0.1:8787`，数据写入当前目录下的 `data`。路径由 `SPM_CLOUD_DATA_DIR`、`SPM_CLOUD_DATABASE` 和 `SPM_CLOUD_OBJECT_DIR` 控制，不依赖固定的 Unix 路径。生产环境必须显式设置访问令牌和反向代理 TLS：
 
 ```powershell
 $env:SPM_CLOUD_ACCESS_TOKEN = "replace-with-a-secret"
 cargo run
+```
+
+Windows PowerShell、Linux/macOS shell 均可直接运行同一个 Cargo 项目：
+
+```powershell
+$env:SPM_CLOUD_BIND = "127.0.0.1:8787"
+$env:SPM_CLOUD_DATA_DIR = (Join-Path (Get-Location) "data")
+cargo run --release
+```
+
+```bash
+export SPM_CLOUD_BIND=127.0.0.1:8787
+export SPM_CLOUD_DATA_DIR="$PWD/data"
+cargo run --release
 ```
 
 当前 `SPM_CLOUD_ACCESS_TOKEN` 是本地/受控部署的 bootstrap bearer；它不是最终的 Cloud 登录协议。游戏身份写入后默认是 `PENDING_VERIFICATION`，未完成 Session Service challenge 不能获得 Offline binding。
@@ -50,6 +64,13 @@ python -m unittest tools/test_migrate_legacy.py
 ## 当前边界
 
 这是独立后端的本地/自托管实现基线：已提供 provider registry 管理、官方/可信 Yggdrasil challenge 验证、外观 outbox 与 WebSocket 恢复接口，以及只读迁移盘点工具。它仍不宣称 Cloudflare 公共实例、完整管理 GUI 或迁移导入已经完成。协议模型与数据库边界先固定，后续 Cloudflare 适配必须复用这些领域语义。
+
+## 跨平台交付
+
+- 原生运行：在 Windows x64、Linux x64/arm64、macOS x64/Apple Silicon 上用 Rust 编译；SQLite 使用 `bundled`，TLS 使用 Rustls，避免依赖系统 SQLite/OpenSSL。
+- 容器运行：`Dockerfile` 是 Linux 容器镜像，Windows/macOS 使用 Docker Desktop 运行同一 `docker compose` 文件；持久化 volume 和 Caddy TLS 语义保持一致。
+- CI：`.github/workflows/platforms.yml` 对 Ubuntu、Windows、macOS 执行 check/test/release build；发布时再按目标平台签名和打包二进制。
+- 不把 `bash`、`systemd`、Linux 文件锁、Unix socket 或 `/var/lib` 路径写入服务核心；这些只允许出现在部署示例中。
 
 ## 单服务器部署
 

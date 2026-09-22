@@ -180,6 +180,18 @@ pub struct RevokeClaimCode {
     pub code: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct AuditEntry {
+    pub event_id: String,
+    pub actor_account_id: String,
+    pub action: String,
+    pub scope_id: Option<String>,
+    pub target_id: Option<String>,
+    pub subject_id: Option<String>,
+    pub details: serde_json::Value,
+    pub created_at: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct OfflineBindingApproval {
     pub status: String,

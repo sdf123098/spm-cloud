@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, ClaimCodeRequest, ClaimCodeResponse, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, RevokeClaimCode, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, ScopedIdentityBindingSummary, SessionResponse, TargetKind, TargetSummary}};
+use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, AuditEntry, ClaimCodeRequest, ClaimCodeResponse, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, RevokeClaimCode, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, ScopedIdentityBindingSummary, SessionResponse, TargetKind, TargetSummary}};
 
 #[derive(Clone)]
 pub struct CloudStore {
@@ -219,6 +219,16 @@ impl CloudStore {
                  payload_json TEXT NOT NULL,
                  created_at TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS audit_events (
+                 event_id TEXT PRIMARY KEY,
+                 actor_account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                 action TEXT NOT NULL,
+                 scope_id TEXT,
+                 target_id TEXT,
+                 subject_id TEXT,
+                 details_json TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
              CREATE INDEX IF NOT EXISTS idx_targets_scope ON targets(scope_id);
              CREATE INDEX IF NOT EXISTS idx_entity_bindings_scope ON entity_bindings(scope_id);
              CREATE INDEX IF NOT EXISTS idx_scoped_identity_bindings_scope ON scoped_identity_bindings(scope_id, world_epoch);
@@ -421,6 +431,7 @@ impl CloudStore {
         }
         let binding_id = format!("offline_binding_{}", uuid::Uuid::new_v4().simple());
         conn.execute("INSERT INTO scoped_identity_bindings(binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, revision, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'STRICT_APPROVAL', 'PENDING_APPROVAL', 0, datetime('now'), datetime('now'))", params![binding_id, account_id, input.identity_id, input.target_id, input.scope_id, input.world_epoch, profile_uuid])?;
+        write_audit(&conn, account_id, "offline_binding.requested", Some(&input.scope_id), Some(&input.target_id), Some(&binding_id), serde_json::json!({"identity_id": input.identity_id, "entity_uuid": profile_uuid}))?;
         Ok(serde_json::json!({"binding_id": binding_id, "identity_id": input.identity_id, "target_id": input.target_id, "scope_id": input.scope_id, "world_epoch": input.world_epoch, "entity_uuid": profile_uuid, "verification_method": "STRICT_APPROVAL", "status": "PENDING_APPROVAL", "revision": 0}))
     }
 
@@ -438,6 +449,7 @@ impl CloudStore {
         if offline_policy == "FIRST_CLAIM" && conn.query_row("SELECT 1 FROM scoped_identity_bindings WHERE scope_id = ?1 AND world_epoch = ?2 AND entity_uuid = ?3 AND status = 'APPROVED'", params![scope_id, input.world_epoch, input.entity_uuid], |_| Ok(())).optional()?.is_some() { return Err(CloudError::RevisionConflict); }
         let code = format!("spm_claim_{}", uuid::Uuid::new_v4().simple());
         conn.execute("INSERT INTO claim_codes(code_hash, scope_id, world_epoch, target_id, entity_uuid, issued_by, expires_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))", params![hash_token(&code), scope_id, input.world_epoch, target_id, input.entity_uuid, account_id, now_seconds() + expires_in_seconds as i64])?;
+        write_audit(&conn, account_id, "claim_code.issued", Some(&scope_id), Some(target_id), None, serde_json::json!({"world_epoch": input.world_epoch, "entity_uuid": input.entity_uuid, "expires_in_seconds": expires_in_seconds}))?;
         Ok(ClaimCodeResponse { code, scope_id, world_epoch: input.world_epoch.clone(), target_id: target_id.to_owned(), entity_uuid: input.entity_uuid.clone(), expires_in_seconds })
     }
 
@@ -461,6 +473,7 @@ impl CloudStore {
         tx.execute("UPDATE claim_codes SET consumed = 1 WHERE code_hash = ?1", [&code_hash])?;
         let summary = tx.query_row("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE binding_id = ?1", [&binding_id], |row| Ok(ScopedIdentityBindingSummary { binding_id: row.get(0)?, account_id: row.get(1)?, identity_id: row.get(2)?, target_id: row.get(3)?, scope_id: row.get(4)?, world_epoch: row.get(5)?, entity_uuid: row.get(6)?, verification_method: row.get(7)?, status: row.get(8)?, approved_by: row.get(9)?, revision: row.get::<_, i64>(10)? as u64 }))?;
         tx.commit()?;
+        write_audit(&conn, account_id, "claim_code.redeemed", Some(&scope_id), Some(&target_id), Some(&binding_id), serde_json::json!({"identity_id": input.identity_id, "entity_uuid": entity_uuid}))?;
         Ok(summary)
     }
 
@@ -472,6 +485,7 @@ impl CloudStore {
         let Some(scope_id) = scope_id else { return Err(CloudError::NotFound); };
         if scope_role(&conn, &scope_id, account_id)?.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
         conn.execute("UPDATE claim_codes SET revoked = 1 WHERE code_hash = ?1 AND consumed = 0", [&code_hash])?;
+        write_audit(&conn, account_id, "claim_code.revoked", Some(&scope_id), None, None, serde_json::json!({"code_hash": code_hash}))?;
         Ok(())
     }
 
@@ -487,6 +501,7 @@ impl CloudStore {
         if revision as u64 != input.expected_revision { return Err(CloudError::RevisionConflict); }
         if input.status == "APPROVED" && conn.query_row("SELECT 1 FROM scoped_identity_bindings WHERE scope_id = ?1 AND world_epoch = (SELECT world_epoch FROM scoped_identity_bindings WHERE binding_id = ?2) AND entity_uuid = (SELECT entity_uuid FROM scoped_identity_bindings WHERE binding_id = ?2) AND status = 'APPROVED' AND binding_id <> ?2", params![scope_id, binding_id], |_| Ok(())).optional()?.is_some() { return Err(CloudError::RevisionConflict); }
         conn.execute("UPDATE scoped_identity_bindings SET status = ?1, approved_by = ?2, revision = revision + 1, updated_at = datetime('now') WHERE binding_id = ?3", params![input.status, account_id, binding_id])?;
+        write_audit(&conn, account_id, "offline_binding.status_changed", Some(&scope_id), None, Some(binding_id), serde_json::json!({"status": input.status, "expected_revision": input.expected_revision}))?;
         conn.query_row("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE binding_id = ?1", [binding_id], |row| Ok(ScopedIdentityBindingSummary { binding_id: row.get(0)?, account_id: row.get(1)?, identity_id: row.get(2)?, target_id: row.get(3)?, scope_id: row.get(4)?, world_epoch: row.get(5)?, entity_uuid: row.get(6)?, verification_method: row.get(7)?, status: row.get(8)?, approved_by: row.get(9)?, revision: row.get::<_, i64>(10)? as u64 })).map_err(CloudError::from)
     }
 
@@ -515,6 +530,18 @@ impl CloudStore {
         if scope_role(&conn, scope_id, account_id)?.is_none() { return Err(CloudError::AccessDenied); }
         let mut stmt = conn.prepare("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE scope_id = ?1 ORDER BY binding_id")?;
         let rows = stmt.query_map([scope_id], |row| Ok(ScopedIdentityBindingSummary { binding_id: row.get(0)?, account_id: row.get(1)?, identity_id: row.get(2)?, target_id: row.get(3)?, scope_id: row.get(4)?, world_epoch: row.get(5)?, entity_uuid: row.get(6)?, verification_method: row.get(7)?, status: row.get(8)?, approved_by: row.get(9)?, revision: row.get::<_, i64>(10)? as u64 }))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn list_audit(&self, account_id: &str, scope_id: &str, limit: u64) -> Result<Vec<AuditEntry>, CloudError> {
+        let limit = limit.clamp(1, 500) as i64;
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if scope_role(&conn, scope_id, account_id)?.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
+        let mut stmt = conn.prepare("SELECT event_id, actor_account_id, action, scope_id, target_id, subject_id, details_json, created_at FROM audit_events WHERE scope_id = ?1 ORDER BY created_at DESC, event_id DESC LIMIT ?2")?;
+        let rows = stmt.query_map(params![scope_id, limit], |row| {
+            let details: String = row.get(6)?;
+            Ok(AuditEntry { event_id: row.get(0)?, actor_account_id: row.get(1)?, action: row.get(2)?, scope_id: row.get(3)?, target_id: row.get(4)?, subject_id: row.get(5)?, details: serde_json::from_str(&details).unwrap_or(serde_json::Value::Null), created_at: row.get(7)? })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -781,6 +808,11 @@ impl CloudStore {
     pub fn object_path_for_sha(&self, sha256: &str) -> PathBuf { self.object_dir.join(&sha256[0..2.min(sha256.len())]).join(sha256) }
 }
 
+fn write_audit(conn: &Connection, actor_account_id: &str, action: &str, scope_id: Option<&str>, target_id: Option<&str>, subject_id: Option<&str>, details: serde_json::Value) -> Result<(), CloudError> {
+    conn.execute("INSERT INTO audit_events(event_id, actor_account_id, action, scope_id, target_id, subject_id, details_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))", params![format!("audit_{}", uuid::Uuid::new_v4().simple()), actor_account_id, action, scope_id, target_id, subject_id, details.to_string()])?;
+    Ok(())
+}
+
 fn scope_role(conn: &Connection, scope_id: &str, account_id: &str) -> Result<Option<String>, CloudError> {
     conn.query_row("SELECT role FROM scope_acl WHERE scope_id = ?1 AND account_id = ?2", params![scope_id, account_id], |row| row.get(0)).optional().map_err(CloudError::from)
 }
@@ -876,6 +908,8 @@ mod tests {
         let claim_identity = store.create_identity("account_editor", &crate::models::CreateIdentity { identity: "offline:claim-scope:12345678-1234-1234-1234-1234567890ad".into(), display_name: "Claimed Player".into() }).unwrap();
         let redeemed = store.redeem_claim_code("account_editor", &crate::models::RedeemClaimCode { code: claim.code, identity_id: claim_identity.identity_id }).unwrap();
         assert_eq!(redeemed.verification_method, "CLAIM_CODE");
+        assert!(store.list_audit("account_local", "scope", 100).unwrap().iter().any(|entry| entry.action == "offline_binding.status_changed"));
+        assert!(store.list_audit("account_local", "claim-scope", 100).unwrap().iter().any(|entry| entry.action == "claim_code.redeemed"));
         let first = store.get_appearance("account_local", "target").unwrap();
         assert_eq!(first.revision, 0);
         let update = crate::models::AppearanceUpdate { request_id: "req".into(), expected_revision: 0, asset_id: None, asset_revision: None, raw_sha256: None, texture_id: Some("texture".into()), scale: Some(1.0), disabled: false };
