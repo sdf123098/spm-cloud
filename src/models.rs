@@ -36,6 +36,8 @@ pub struct CreateScope {
     pub scope_id: String,
     pub name: String,
     pub world_epoch: String,
+    #[serde(default)]
+    pub offline_policy: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -44,6 +46,7 @@ pub struct ScopeSummary {
     pub tenant_id: String,
     pub name: String,
     pub world_epoch: String,
+    pub offline_policy: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -175,6 +178,7 @@ pub struct RedeemClaimCode {
 #[derive(Clone, Debug, Deserialize)]
 pub struct OfflineBindingApproval {
     pub status: String,
+    pub expected_revision: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

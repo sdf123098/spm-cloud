@@ -55,6 +55,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/targets", post(create_target))
         .route("/v1/scopes/{scope_id}/targets", get(list_targets))
         .route("/v1/scopes/{scope_id}/bindings", get(list_bindings).post(register_binding))
+        .route("/v1/scopes/{scope_id}/offline-bindings", get(list_offline_bindings))
         .route("/v1/bindings/{binding_id}/observation", put(observe_binding))
         .route("/v1/scopes/{scope_id}/events/recovery", get(outbox_recovery))
         .route("/v1/targets/{target_id}/appearance", get(get_appearance).put(update_appearance))
@@ -197,6 +198,11 @@ async fn list_targets(State(state): State<AppState>, headers: HeaderMap, Path(sc
 async fn list_bindings(State(state): State<AppState>, headers: HeaderMap, Path(scope_id): Path<String>) -> Result<Json<Vec<crate::models::EntityBindingSummary>>, CloudError> {
     let account = authenticate(&state, &headers)?;
     Ok(Json(state.store.list_bindings(&account, &scope_id)?))
+}
+
+async fn list_offline_bindings(State(state): State<AppState>, headers: HeaderMap, Path(scope_id): Path<String>) -> Result<Json<Vec<crate::models::ScopedIdentityBindingSummary>>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.list_offline_bindings(&account, &scope_id)?))
 }
 
 async fn register_binding(State(state): State<AppState>, headers: HeaderMap, Path(scope_id): Path<String>, Json(input): Json<RegisterEntityBinding>) -> Result<(StatusCode, Json<crate::models::EntityBindingSummary>), CloudError> {
