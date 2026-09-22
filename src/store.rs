@@ -1,6 +1,6 @@
 use std::{path::{Path, PathBuf}, sync::{Arc, Mutex}};
 
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use argon2::{password_hash::{PasswordHasher, SaltString}, Argon2, PasswordHash, PasswordVerifier};
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -207,10 +207,15 @@ impl CloudStore {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn create_account(&self, account_id: &str) -> Result<AccountSummary, CloudError> {
+    pub fn create_account(&self, account_id: &str, password: &str) -> Result<AccountSummary, CloudError> {
         validate_slug(account_id, "account_id")?;
+        if password.len() < 8 || password.len() > 1024 { return Err(CloudError::invalid_metadata("password must be between 8 and 1024 bytes")); }
+        let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+        let password_hash = Argon2::default().hash_password(password.as_bytes(), &salt).map_err(|_| CloudError::Internal(anyhow::anyhow!("failed to hash account password")))?.to_string();
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
         conn.execute("INSERT INTO accounts(account_id, created_at) VALUES (?1, datetime('now')) ON CONFLICT(account_id) DO NOTHING", [account_id])?;
+        let inserted = conn.execute("INSERT INTO account_credentials(account_id, password_hash) VALUES (?1, ?2) ON CONFLICT(account_id) DO NOTHING", params![account_id, password_hash])?;
+        if inserted == 0 { return Err(CloudError::AccessDenied); }
         Ok(AccountSummary { account_id: account_id.to_owned() })
     }
 
@@ -494,6 +499,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = CloudConfig { instance_id: "test".into(), origin: "https://localhost".into(), bind_addr: "127.0.0.1:0".parse().unwrap(), database_path: dir.path().join("test.db"), object_dir: dir.path().join("objects"), access_token: Some("secret".into()), bootstrap_account_id: "account_local".into(), bootstrap_password_hash: None, max_asset_bytes: 128 * 1024 * 1024, max_message_bytes: 64 * 1024 };
         let store = CloudStore::open(&config).unwrap();
+        assert_eq!(store.create_account("account_editor", "correct horse battery staple").unwrap().account_id, "account_editor");
+        assert!(store.issue_session(&LoginRequest { account_id: "account_editor".into(), password: "correct horse battery staple" }).is_ok());
         let scope = store.create_scope("account_local", &CreateScope { scope_id: "scope".into(), name: "Scope".into(), world_epoch: "epoch-1".into() }).unwrap();
         assert_eq!(scope.scope_id, "scope");
         store.set_scope_acl("account_local", "scope", &ScopeAclUpdate { account_id: "account_editor".into(), role: "viewer".into() }).unwrap();

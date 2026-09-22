@@ -64,6 +64,12 @@ pub struct AccountSummary {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct CreateAccount {
+    pub account_id: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct LoginRequest {
     pub account_id: String,
     pub password: String,

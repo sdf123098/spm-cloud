@@ -7,7 +7,7 @@ use subtle::ConstantTimeEq;
 use tokio::{io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, fs};
 use uuid::Uuid;
 
-use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateIdentity, CreateScope, CreateTarget, InstanceResponse, Limits, LoginRequest, OfflineBindingRequest, ScopeAclUpdate}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
+use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateAccount, CreateIdentity, CreateScope, CreateTarget, InstanceResponse, Limits, LoginRequest, OfflineBindingRequest, ScopeAclUpdate}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -56,9 +56,9 @@ async fn instance(State(state): State<AppState>) -> Json<InstanceResponse> {
 
 async fn identity_providers(State(state): State<AppState>) -> Result<Json<Vec<serde_json::Value>>, CloudError> { Ok(Json(state.store.list_providers()?)) }
 
-async fn create_account(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<AccountSummary>) -> Result<(StatusCode, Json<AccountSummary>), CloudError> {
+async fn create_account(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<CreateAccount>) -> Result<(StatusCode, Json<AccountSummary>), CloudError> {
     authenticate(&state, &headers)?;
-    Ok((StatusCode::CREATED, Json(state.store.create_account(&input.account_id)?)))
+    Ok((StatusCode::CREATED, Json(state.store.create_account(&input.account_id, &input.password)?)))
 }
 
 async fn login(State(state): State<AppState>, Json(input): Json<LoginRequest>) -> Result<Json<crate::models::SessionResponse>, CloudError> {

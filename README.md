@@ -29,6 +29,15 @@ GET http://127.0.0.1:8787/health
 GET http://127.0.0.1:8787/v1/instance
 ```
 
+受 bootstrap bearer 保护的独立账号创建接口：
+
+```powershell
+$headers = @{ Authorization = "Bearer $env:SPM_CLOUD_ACCESS_TOKEN" }
+Invoke-RestMethod http://127.0.0.1:8787/v1/accounts -Method Post -Headers $headers -ContentType 'application/json' -Body '{"account_id":"alice","password":"change-this-password"}'
+```
+
+密码只以 Argon2id 摘要写入 SQLite；登录使用 `POST /v1/sessions`，返回的 access/refresh token 只保存摘要。生产部署应通过反向代理提供 HTTPS，并把 bootstrap bearer 和数据库目录纳入密钥/备份管理。
+
 ## 当前边界
 
 这是独立后端的第一批实现，不宣称 Cloudflare 公共实例、第三方 provider 的远程认证、完整管理 GUI 或迁移导入已经完成。协议模型与数据库边界先固定，后续 Cloudflare 适配必须复用这些领域语义。
