@@ -942,7 +942,11 @@ mod tests {
 
         let asset = store.register_asset("account_local", "asset", "model.ysm", "application/octet-stream", &"a".repeat(64), 1, &dir.path().join("asset")).unwrap();
         assert_eq!(asset.revision, 1);
+        let idem = store.register_asset_with_idempotency("account_local", "idem-asset", "model.ysm", "application/octet-stream", &"b".repeat(64), 1, &dir.path().join("idem-asset"), Some(("upload-1", "request-hash"))).unwrap();
+        let idem_retry = store.register_asset_with_idempotency("account_local", "idem-asset", "model.ysm", "application/octet-stream", &"b".repeat(64), 1, &dir.path().join("idem-asset"), Some(("upload-1", "request-hash"))).unwrap();
+        assert_eq!(idem.revision, idem_retry.revision);
+        assert!(matches!(store.register_asset_with_idempotency("account_local", "idem-asset", "model.ysm", "application/octet-stream", &"b".repeat(64), 1, &dir.path().join("idem-asset"), Some(("upload-1", "different-hash"))), Err(CloudError::IdempotencyConflict)));
         let catalog = store.catalog_recovery("account_local", 0, 10).unwrap();
-        assert_eq!(catalog["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(catalog["entries"].as_array().unwrap().len(), 2);
     }
 }
