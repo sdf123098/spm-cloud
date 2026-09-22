@@ -1,11 +1,10 @@
-# Project-local Windows GNU toolchain configuration.
+# Project-local Windows GNU linker configuration.
 #
 # Keep this configuration in the repository so contributors do not need to
-# modify their global Cargo/Rust settings. The command environment should add
-# C:\\msys64\\ucrt64\\bin to PATH when invoking Cargo.
-
-[build]
-target = "x86_64-pc-windows-gnu"
+# modify their global Cargo/Rust settings. Windows contributors should pass
+# --target x86_64-pc-windows-gnu; the command environment should add
+# C:\\msys64\\ucrt64\\bin to PATH when invoking Cargo. Leaving the default
+# target unset keeps Linux/macOS CI and native builds on their own platforms.
 
 [target.x86_64-pc-windows-gnu]
 linker = "C:\\msys64\\ucrt64\\bin\\gcc.exe"

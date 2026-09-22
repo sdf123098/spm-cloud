@@ -43,9 +43,10 @@ cargo run --release
 ```powershell
 $env:Path = "C:\Users\$env:USERNAME\.cargo\bin;C:\msys64\ucrt64\bin;$env:Path"
 rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-rustup run stable-x86_64-pc-windows-gnu cargo check
-rustup run stable-x86_64-pc-windows-gnu cargo test
-rustup run stable-x86_64-pc-windows-gnu cargo build --release
+rustup target add --toolchain stable-x86_64-pc-windows-gnu x86_64-pc-windows-gnu
+rustup run stable-x86_64-pc-windows-gnu cargo check --target x86_64-pc-windows-gnu
+rustup run stable-x86_64-pc-windows-gnu cargo test --target x86_64-pc-windows-gnu
+rustup run stable-x86_64-pc-windows-gnu cargo build --target x86_64-pc-windows-gnu --release
 ```
 
 如果 GNU 工具链已安装，可省略安装命令。Linux/macOS 仍使用同一 Cargo 项目和各自原生 target；Windows GNU 配置只对这个仓库生效。
