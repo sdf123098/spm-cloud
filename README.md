@@ -38,6 +38,15 @@ Invoke-RestMethod http://127.0.0.1:8787/v1/accounts -Method Post -Headers $heade
 
 密码只以 Argon2id 摘要写入 SQLite；登录使用 `POST /v1/sessions`，返回的 access/refresh token 只保存摘要。生产部署应通过反向代理提供 HTTPS，并把 bootstrap bearer 和数据库目录纳入密钥/备份管理。
 
+迁移旧 `custom/auth/built` 资源时，先生成只读审计清单：
+
+```powershell
+python tools/migrate_legacy.py C:\path\to\legacy\custom --output migration.json --scope-id scope-main --world-epoch epoch-1
+python -m unittest tools/test_migrate_legacy.py
+```
+
+清单只记录相对路径、格式、大小和 SHA-256；不会上传、删除源文件或授予 Cloud 权限。导入前必须人工确认 identity、target kind、scope/world epoch 和 ACL。
+
 ## 当前边界
 
 这是独立后端的第一批实现，不宣称 Cloudflare 公共实例、第三方 provider 的远程认证、完整管理 GUI 或迁移导入已经完成。协议模型与数据库边界先固定，后续 Cloudflare 适配必须复用这些领域语义。
