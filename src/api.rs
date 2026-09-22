@@ -1,13 +1,13 @@
 use std::{sync::Arc, time::SystemTime};
 
-use axum::{body::Body, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::Response, routing::{delete, get, post}, Json, Router};
+use axum::{body::Body, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::Response, routing::{delete, get, post, put}, Json, Router};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::{io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, net::lookup_host, sync::broadcast, fs};
 use uuid::Uuid;
 
-use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, InstanceResponse, Limits, LoginRequest, OfflineBindingRequest, ScopeAclUpdate, VerifyIdentityChallenge}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
+use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, InstanceResponse, Limits, LoginRequest, ObserveEntityBinding, OfflineBindingRequest, RegisterEntityBinding, ScopeAclUpdate, VerifyIdentityChallenge}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -51,6 +51,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/assets/{asset_id}/revisions/{revision}/content", get(download_asset))
         .route("/v1/targets", post(create_target))
         .route("/v1/scopes/{scope_id}/targets", get(list_targets))
+        .route("/v1/scopes/{scope_id}/bindings", get(list_bindings).post(register_binding))
+        .route("/v1/bindings/{binding_id}/observation", put(observe_binding))
         .route("/v1/scopes/{scope_id}/events/recovery", get(outbox_recovery))
         .route("/v1/targets/{target_id}/appearance", get(get_appearance).put(update_appearance))
         .route("/v1/targets/{target_id}/acl", get(list_acl).put(set_acl))
@@ -172,6 +174,21 @@ async fn create_target(State(state): State<AppState>, headers: HeaderMap, Json(i
 async fn list_targets(State(state): State<AppState>, headers: HeaderMap, Path(scope_id): Path<String>) -> Result<Json<Vec<crate::models::TargetSummary>>, CloudError> {
     let account = authenticate(&state, &headers)?;
     Ok(Json(state.store.list_targets(&account, &scope_id)?))
+}
+
+async fn list_bindings(State(state): State<AppState>, headers: HeaderMap, Path(scope_id): Path<String>) -> Result<Json<Vec<crate::models::EntityBindingSummary>>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.list_bindings(&account, &scope_id)?))
+}
+
+async fn register_binding(State(state): State<AppState>, headers: HeaderMap, Path(scope_id): Path<String>, Json(input): Json<RegisterEntityBinding>) -> Result<(StatusCode, Json<crate::models::EntityBindingSummary>), CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok((StatusCode::CREATED, Json(state.store.register_binding(&account, &scope_id, &input)?)))
+}
+
+async fn observe_binding(State(state): State<AppState>, headers: HeaderMap, Path(binding_id): Path<String>, Json(input): Json<ObserveEntityBinding>) -> Result<Json<crate::models::EntityBindingSummary>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.observe_binding(&account, &binding_id, &input)?))
 }
 
 async fn outbox_recovery(State(state): State<AppState>, headers: HeaderMap, Path(scope_id): Path<String>, Query(query): Query<CatalogQuery>) -> Result<Json<serde_json::Value>, CloudError> {

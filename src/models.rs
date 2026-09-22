@@ -175,6 +175,33 @@ pub struct TargetSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct EntityBindingSummary {
+    pub binding_id: String,
+    pub scope_id: String,
+    pub world_epoch: String,
+    pub entity_uuid: String,
+    pub entity_kind: String,
+    pub target_id: String,
+    pub observation_state: String,
+    pub last_seen_at: Option<String>,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RegisterEntityBinding {
+    pub world_epoch: String,
+    pub entity_uuid: String,
+    pub entity_kind: String,
+    pub target_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ObserveEntityBinding {
+    pub world_epoch: String,
+    pub observation_state: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct AclEntry {
     pub account_id: String,
     pub role: String,

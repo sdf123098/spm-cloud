@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, OfflineBindingRequest, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, SessionResponse, TargetKind, TargetSummary}};
+use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, ObserveEntityBinding, OfflineBindingRequest, RegisterEntityBinding, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, SessionResponse, TargetKind, TargetSummary}};
 
 #[derive(Clone)]
 pub struct CloudStore {
@@ -126,6 +126,18 @@ impl CloudStore {
                  role TEXT NOT NULL,
                  PRIMARY KEY(target_id, account_id)
              );
+             CREATE TABLE IF NOT EXISTS entity_bindings (
+                 binding_id TEXT PRIMARY KEY,
+                 scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+                 world_epoch TEXT NOT NULL,
+                 entity_uuid TEXT NOT NULL,
+                 entity_kind TEXT NOT NULL,
+                 target_id TEXT NOT NULL REFERENCES targets(target_id),
+                 observation_state TEXT NOT NULL DEFAULT 'REGISTERED',
+                 last_seen_at TEXT,
+                 revision INTEGER NOT NULL DEFAULT 0,
+                 UNIQUE(scope_id, world_epoch, entity_uuid)
+             );
              CREATE TABLE IF NOT EXISTS appearances (
                  target_id TEXT PRIMARY KEY REFERENCES targets(target_id),
                  revision INTEGER NOT NULL DEFAULT 0,
@@ -178,6 +190,7 @@ impl CloudStore {
                  created_at TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_targets_scope ON targets(scope_id);
+             CREATE INDEX IF NOT EXISTS idx_entity_bindings_scope ON entity_bindings(scope_id);
              CREATE INDEX IF NOT EXISTS idx_asset_revisions_sha ON asset_revisions(raw_sha256);
              INSERT OR IGNORE INTO scope_acl(scope_id, account_id, role)
                  SELECT scope_id, tenant_id, 'manage' FROM scopes;
@@ -434,6 +447,62 @@ impl CloudStore {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn list_bindings(&self, account_id: &str, scope_id: &str) -> Result<Vec<EntityBindingSummary>, CloudError> {
+        validate_slug(scope_id, "scope_id")?;
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if scope_role(&conn, scope_id, account_id)?.is_none() { return Err(CloudError::AccessDenied); }
+        let mut stmt = conn.prepare("SELECT binding_id, scope_id, world_epoch, entity_uuid, entity_kind, target_id, observation_state, last_seen_at, revision FROM entity_bindings WHERE scope_id = ?1 ORDER BY binding_id")?;
+        let rows = stmt.query_map([scope_id], |row| Ok(EntityBindingSummary {
+            binding_id: row.get(0)?,
+            scope_id: row.get(1)?,
+            world_epoch: row.get(2)?,
+            entity_uuid: row.get(3)?,
+            entity_kind: row.get(4)?,
+            target_id: row.get(5)?,
+            observation_state: row.get(6)?,
+            last_seen_at: row.get(7)?,
+            revision: row.get::<_, i64>(8)? as u64,
+        }))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn register_binding(&self, account_id: &str, scope_id: &str, input: &RegisterEntityBinding) -> Result<EntityBindingSummary, CloudError> {
+        validate_slug(scope_id, "scope_id")?;
+        if input.world_epoch.trim().is_empty() || input.world_epoch.len() > 256 { return Err(CloudError::invalid_metadata("invalid world_epoch")); }
+        if uuid::Uuid::parse_str(&input.entity_uuid).is_err() { return Err(CloudError::invalid_metadata("entity_uuid must be a UUID")); }
+        if input.entity_kind.trim().is_empty() || input.entity_kind.len() > 64 { return Err(CloudError::invalid_metadata("invalid entity_kind")); }
+        validate_slug(&input.target_id, "target_id")?;
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if !matches!(scope_role(&conn, scope_id, account_id)?.as_deref(), Some("manage") | Some("edit")) { return Err(CloudError::AccessDenied); }
+        let stored_epoch: Option<String> = conn.query_row("SELECT world_epoch FROM scopes WHERE scope_id = ?1", [scope_id], |row| row.get(0)).optional()?;
+        if stored_epoch.as_deref() != Some(input.world_epoch.as_str()) { return Err(CloudError::RevisionConflict); }
+        let target_scope: Option<String> = conn.query_row("SELECT scope_id FROM targets WHERE target_id = ?1", [&input.target_id], |row| row.get(0)).optional()?;
+        if target_scope.as_deref() != Some(scope_id) { return Err(CloudError::NotFound); }
+        let binding_id: Option<String> = conn.query_row("SELECT binding_id FROM entity_bindings WHERE scope_id = ?1 AND world_epoch = ?2 AND entity_uuid = ?3", params![scope_id, input.world_epoch, input.entity_uuid], |row| row.get(0)).optional()?;
+        let binding_id = binding_id.unwrap_or_else(|| format!("binding_{}", uuid::Uuid::new_v4().simple()));
+        conn.execute(
+            "INSERT INTO entity_bindings(binding_id, scope_id, world_epoch, entity_uuid, entity_kind, target_id, observation_state, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'REGISTERED', 0) ON CONFLICT(scope_id, world_epoch, entity_uuid) DO UPDATE SET target_id = excluded.target_id, entity_kind = excluded.entity_kind, observation_state = 'REGISTERED', revision = entity_bindings.revision + 1",
+            params![binding_id, scope_id, input.world_epoch, input.entity_uuid, input.entity_kind, input.target_id]
+        )?;
+        conn.query_row("SELECT binding_id, scope_id, world_epoch, entity_uuid, entity_kind, target_id, observation_state, last_seen_at, revision FROM entity_bindings WHERE binding_id = ?1", [&binding_id], |row| Ok(EntityBindingSummary {
+            binding_id: row.get(0)?, scope_id: row.get(1)?, world_epoch: row.get(2)?, entity_uuid: row.get(3)?, entity_kind: row.get(4)?, target_id: row.get(5)?, observation_state: row.get(6)?, last_seen_at: row.get(7)?, revision: row.get::<_, i64>(8)? as u64,
+        })).map_err(CloudError::from)
+    }
+
+    pub fn observe_binding(&self, account_id: &str, binding_id: &str, input: &ObserveEntityBinding) -> Result<EntityBindingSummary, CloudError> {
+        if input.world_epoch.trim().is_empty() || input.world_epoch.len() > 256 { return Err(CloudError::invalid_metadata("invalid world_epoch")); }
+        if !matches!(input.observation_state.as_str(), "ACTIVE" | "STALE" | "OFFLINE") { return Err(CloudError::invalid_metadata("invalid observation_state")); }
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let binding: Option<(String, String)> = conn.query_row("SELECT scope_id, world_epoch FROM entity_bindings WHERE binding_id = ?1", [binding_id], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+        let Some((scope_id, world_epoch)) = binding else { return Err(CloudError::NotFound); };
+        if world_epoch != input.world_epoch { return Err(CloudError::RevisionConflict); }
+        if scope_role(&conn, &scope_id, account_id)?.is_none() { return Err(CloudError::AccessDenied); }
+        conn.execute("UPDATE entity_bindings SET observation_state = ?1, last_seen_at = datetime('now'), revision = revision + 1 WHERE binding_id = ?2", params![input.observation_state, binding_id])?;
+        conn.query_row("SELECT binding_id, scope_id, world_epoch, entity_uuid, entity_kind, target_id, observation_state, last_seen_at, revision FROM entity_bindings WHERE binding_id = ?1", [binding_id], |row| Ok(EntityBindingSummary {
+            binding_id: row.get(0)?, scope_id: row.get(1)?, world_epoch: row.get(2)?, entity_uuid: row.get(3)?, entity_kind: row.get(4)?, target_id: row.get(5)?, observation_state: row.get(6)?, last_seen_at: row.get(7)?, revision: row.get::<_, i64>(8)? as u64,
+        })).map_err(CloudError::from)
+    }
+
     pub fn join_scope(&self, account_id: &str, scope_id: &str, world_epoch: &str) -> Result<Vec<TargetSummary>, CloudError> {
         validate_slug(scope_id, "scope_id")?;
         validate_slug(world_epoch, "world_epoch")?;
@@ -671,6 +740,11 @@ mod tests {
         assert_eq!(store.list_scopes("account_editor").unwrap().len(), 1);
         let target = CreateTarget { scope_id: "scope".into(), target_id: Some("target".into()), kind: crate::models::TargetKind::Player, display_name: "Player".into() };
         store.create_target("account_local", &target).unwrap();
+        let binding = store.register_binding("account_local", "scope", &crate::models::RegisterEntityBinding { world_epoch: "epoch-1".into(), entity_uuid: "12345678-1234-1234-1234-1234567890ab".into(), entity_kind: "PLAYER".into(), target_id: "target".into() }).unwrap();
+        assert_eq!(binding.observation_state, "REGISTERED");
+        let observed = store.observe_binding("account_local", &binding.binding_id, &crate::models::ObserveEntityBinding { world_epoch: "epoch-1".into(), observation_state: "ACTIVE".into() }).unwrap();
+        assert_eq!(observed.observation_state, "ACTIVE");
+        assert!(store.register_binding("account_local", "scope", &crate::models::RegisterEntityBinding { world_epoch: "old-epoch".into(), entity_uuid: "12345678-1234-1234-1234-1234567890ab".into(), entity_kind: "PLAYER".into(), target_id: "target".into() }).is_err());
         let first = store.get_appearance("account_local", "target").unwrap();
         assert_eq!(first.revision, 0);
         let update = crate::models::AppearanceUpdate { request_id: "req".into(), expected_revision: 0, asset_id: None, asset_revision: None, raw_sha256: None, texture_id: Some("texture".into()), scale: Some(1.0), disabled: false };
