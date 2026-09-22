@@ -78,7 +78,9 @@ python -m unittest tools/test_migrate_legacy.py
 
 ## 当前边界
 
-这是独立后端的本地/自托管实现基线：已提供 provider registry 管理、官方/可信 Yggdrasil challenge 验证、外观 outbox 与 WebSocket 恢复接口，以及只读迁移盘点工具。它仍不宣称 Cloudflare 公共实例、完整管理 GUI 或迁移导入已经完成。协议模型与数据库边界先固定，后续 Cloudflare 适配必须复用这些领域语义。
+这是独立后端的本地/自托管实现基线：已提供 provider registry 管理、官方/可信 Yggdrasil challenge 验证、外观 outbox 与 WebSocket 恢复接口，以及只读迁移盘点工具。仓库现在另有 `cloudflare/` 官方部署原型，验证 Worker + D1 + R2 + Durable Object 的边界；它仍不宣称完整管理 GUI 或迁移导入已经完成。协议模型与数据库边界必须由两种部署复用。
+
+Cloudflare 原型的配置、迁移、secret 和部署命令见 [`cloudflare/README.md`](cloudflare/README.md)。原型明确保留 bootstrap bearer 和有界缓冲上传限制，不能直接当作正式公共 Cloud；正式上线前必须接入完整账户/身份/ACL、上传 lease/operation 和后台校验流水线。
 
 ## 跨平台交付
 

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
+  "name": "spm-cloud-official",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-22",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "SPM_CLOUD_INSTANCE_ID": "official",
+    "SPM_CLOUD_ORIGIN": "https://cloud.example.com"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "spm-cloud",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ASSETS",
+      "bucket_name": "spm-cloud-assets"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SCOPE_ROOMS",
+        "class_name": "ScopeRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ScopeRoom"]
+    }
+  ]
+}
