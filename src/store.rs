@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, CreateIdentity, CreateScope, CreateTarget, IdentitySummary, LoginRequest, OfflineBindingRequest, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, SessionResponse, TargetKind, TargetSummary}};
+use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, OfflineBindingRequest, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, SessionResponse, TargetKind, TargetSummary}};
 
 #[derive(Clone)]
 pub struct CloudStore {
@@ -20,6 +20,22 @@ pub struct AssetContent {
     pub raw_sha256: String,
     pub name: String,
     pub format: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProviderChallenge {
+    pub provider_id: String,
+    pub username: String,
+    pub expected_profile_uuid: Option<String>,
+    pub server_id: String,
+    pub expires_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct AppearanceMutation {
+    pub appearance: AppearanceState,
+    pub event_id: String,
+    pub scope_id: String,
 }
 
 impl CloudStore {
@@ -72,6 +88,16 @@ impl CloudStore {
                  display_name TEXT NOT NULL,
                  verified INTEGER NOT NULL DEFAULT 0,
                  UNIQUE(identity_kind, provider_id, scope_id, profile_uuid)
+             );
+             CREATE TABLE IF NOT EXISTS identity_challenges (
+                 challenge_hash TEXT PRIMARY KEY,
+                 account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                 provider_id TEXT NOT NULL REFERENCES identity_providers(provider_id),
+                 username TEXT NOT NULL,
+                 expected_profile_uuid TEXT,
+                 server_id TEXT NOT NULL,
+                 expires_at INTEGER NOT NULL,
+                 consumed INTEGER NOT NULL DEFAULT 0
              );
              CREATE TABLE IF NOT EXISTS scopes (
                  scope_id TEXT PRIMARY KEY,
@@ -141,6 +167,16 @@ impl CloudStore {
                  revision INTEGER NOT NULL,
                  created_at TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS outbox_events (
+                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                 event_id TEXT NOT NULL UNIQUE,
+                 tenant_id TEXT NOT NULL,
+                 scope_id TEXT NOT NULL,
+                 target_id TEXT NOT NULL,
+                 kind TEXT NOT NULL,
+                 payload_json TEXT NOT NULL,
+                 created_at TEXT NOT NULL
+             );
              CREATE INDEX IF NOT EXISTS idx_targets_scope ON targets(scope_id);
              CREATE INDEX IF NOT EXISTS idx_asset_revisions_sha ON asset_revisions(raw_sha256);
              INSERT OR IGNORE INTO scope_acl(scope_id, account_id, role)
@@ -205,6 +241,67 @@ impl CloudStore {
         let mut stmt = conn.prepare("SELECT provider_id, display_name, base_url, enabled FROM identity_providers ORDER BY provider_id")?;
         let rows = stmt.query_map([], |row| Ok(serde_json::json!({"provider_id": row.get::<_, String>(0)?, "display_name": row.get::<_, String>(1)?, "base_url": row.get::<_, String>(2)?, "enabled": row.get::<_, i64>(3)? != 0})))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn configure_provider(&self, input: &IdentityProviderUpdate) -> Result<serde_json::Value, CloudError> {
+        validate_slug(&input.provider_id, "provider_id")?;
+        if input.provider_id == "official" { return Err(CloudError::InvalidMetadata("official provider is immutable".to_owned())); }
+        if input.display_name.trim().is_empty() || input.display_name.len() > 256 { return Err(CloudError::invalid_metadata("invalid provider display name")); }
+        validate_provider_base_url(&input.base_url)?;
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        conn.execute("INSERT INTO identity_providers(provider_id, display_name, base_url, enabled) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(provider_id) DO UPDATE SET display_name = excluded.display_name, base_url = excluded.base_url, enabled = excluded.enabled", params![input.provider_id, input.display_name, input.base_url, i64::from(input.enabled)])?;
+        Ok(serde_json::json!({"provider_id": input.provider_id, "display_name": input.display_name, "base_url": input.base_url, "enabled": input.enabled}))
+    }
+
+    pub fn create_identity_challenge(&self, account_id: &str, input: &CreateIdentityChallenge) -> Result<IdentityChallengeResponse, CloudError> {
+        validate_slug(&input.provider_id, "provider_id")?;
+        if input.username.trim().is_empty() || input.username.len() > 256 { return Err(CloudError::invalid_metadata("invalid provider username")); }
+        let expected_profile_uuid = input.profile_uuid.as_deref().map(normalize_profile_uuid).transpose()?;
+        let challenge_id = format!("challenge_{}", uuid::Uuid::new_v4().simple());
+        let server_id = uuid::Uuid::new_v4().simple().to_string();
+        let expires_at = now_seconds() + 120;
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let enabled: Option<i64> = conn.query_row("SELECT enabled FROM identity_providers WHERE provider_id = ?1", [&input.provider_id], |row| row.get(0)).optional()?;
+        if enabled != Some(1) { return Err(CloudError::IdentityProviderUntrusted); }
+        conn.execute("INSERT INTO identity_challenges(challenge_hash, account_id, provider_id, username, expected_profile_uuid, server_id, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![hash_token(&challenge_id), account_id, input.provider_id, input.username, expected_profile_uuid, server_id, expires_at])?;
+        Ok(IdentityChallengeResponse { challenge_id, provider_id: input.provider_id.clone(), server_id, expires_in_seconds: 120 })
+    }
+
+    pub fn provider_challenge(&self, account_id: &str, challenge_id: &str) -> Result<ProviderChallenge, CloudError> {
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let challenge: Option<(String, String, Option<String>, String, i64, i64)> = conn.query_row("SELECT c.provider_id, c.username, c.expected_profile_uuid, c.server_id, c.expires_at, c.consumed FROM identity_challenges c WHERE c.challenge_hash = ?1 AND c.account_id = ?2", params![hash_token(challenge_id), account_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))).optional()?;
+        let Some((provider_id, username, expected_profile_uuid, server_id, expires_at, consumed)) = challenge else { return Err(CloudError::NotFound); };
+        if consumed != 0 { return Err(CloudError::IdentityChallengeReplayed); }
+        if expires_at <= now_seconds() { return Err(CloudError::IdentityChallengeExpired); }
+        let enabled: Option<i64> = conn.query_row("SELECT enabled FROM identity_providers WHERE provider_id = ?1", [&provider_id], |row| row.get(0)).optional()?;
+        if enabled != Some(1) { return Err(CloudError::IdentityProviderUntrusted); }
+        Ok(ProviderChallenge { provider_id, username, expected_profile_uuid, server_id, expires_at })
+    }
+
+    pub fn provider_base_url(&self, provider_id: &str) -> Result<String, CloudError> {
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let (base_url, enabled): (String, i64) = conn.query_row("SELECT base_url, enabled FROM identity_providers WHERE provider_id = ?1", [provider_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        if enabled == 0 { return Err(CloudError::IdentityProviderUntrusted); }
+        validate_provider_base_url(&base_url)?;
+        Ok(base_url)
+    }
+
+    pub fn complete_identity_challenge(&self, account_id: &str, challenge_id: &str, profile_uuid: &str, display_name: &str) -> Result<IdentitySummary, CloudError> {
+        let profile_uuid = normalize_profile_uuid(profile_uuid)?;
+        if display_name.trim().is_empty() || display_name.len() > 16 * 1024 { return Err(CloudError::invalid_metadata("invalid verified profile name")); }
+        let mut conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let tx = conn.transaction()?;
+        let challenge: (String, Option<String>, i64, i64) = tx.query_row("SELECT provider_id, expected_profile_uuid, expires_at, consumed FROM identity_challenges WHERE challenge_hash = ?1 AND account_id = ?2", params![hash_token(challenge_id), account_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional()?.ok_or(CloudError::NotFound)?;
+        if challenge.3 != 0 { return Err(CloudError::IdentityChallengeReplayed); }
+        if challenge.2 <= now_seconds() { return Err(CloudError::IdentityChallengeExpired); }
+        if challenge.1.as_deref().is_some_and(|expected| expected != profile_uuid) { return Err(CloudError::IdentityProfileMismatch); }
+        let (kind, provider_id) = if challenge.0 == "official" { ("official", None) } else { ("yggdrasil", Some(challenge.0.clone())) };
+        let identity_id = format!("identity_{}", uuid::Uuid::new_v4().simple());
+        tx.execute("UPDATE identity_challenges SET consumed = 1 WHERE challenge_hash = ?1", [hash_token(challenge_id)])?;
+        tx.execute("INSERT INTO identities(identity_id, account_id, identity_kind, provider_id, scope_id, profile_uuid, display_name, verified) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 1)", params![identity_id, account_id, kind, provider_id, profile_uuid, display_name])?;
+        tx.commit()?;
+        let identity = if kind == "official" { format!("official:{profile_uuid}") } else { format!("yggdrasil:{}:{profile_uuid}", challenge.0) };
+        Ok(IdentitySummary { identity_id, account_id: account_id.to_owned(), identity, display_name: display_name.to_owned(), verification_status: "VERIFIED".to_owned() })
     }
 
     pub fn create_account(&self, account_id: &str, password: &str) -> Result<AccountSummary, CloudError> {
@@ -381,7 +478,7 @@ impl CloudStore {
         conn.query_row("SELECT a.target_id, a.revision, a.asset_id, a.asset_revision, a.raw_sha256, a.texture_id, a.scale, a.disabled FROM appearances a WHERE a.target_id = ?1", [target_id], |row| Ok(AppearanceState { target_id: row.get(0)?, revision: row.get(1)?, asset_id: row.get(2)?, asset_revision: row.get(3)?, raw_sha256: row.get(4)?, texture_id: row.get(5)?, scale: row.get(6)?, disabled: row.get::<_, i64>(7)? != 0 })).optional()?.ok_or(CloudError::NotFound)
     }
 
-    pub fn update_appearance(&self, account_id: &str, target_id: &str, update: &crate::models::AppearanceUpdate) -> Result<AppearanceState, CloudError> {
+    pub fn update_appearance(&self, account_id: &str, target_id: &str, update: &crate::models::AppearanceUpdate) -> Result<AppearanceMutation, CloudError> {
         if update.request_id.is_empty() || update.request_id.len() > 128 { return Err(CloudError::invalid_metadata("invalid request_id")); }
         if let Some(scale) = update.scale { if !scale.is_finite() || !(0.01..=100.0).contains(&scale) { return Err(CloudError::invalid_metadata("invalid scale")); } }
         let mut conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
@@ -399,8 +496,45 @@ impl CloudStore {
         let state = AppearanceState { target_id: target_id.to_owned(), revision: next_revision, asset_id: update.asset_id.clone(), asset_revision: update.asset_revision, raw_sha256: update.raw_sha256.clone(), texture_id: update.texture_id.clone(), scale: update.scale, disabled: update.disabled };
         let response_json = serde_json::to_string(&state).map_err(|_| CloudError::Internal(anyhow::anyhow!("failed to encode idempotency response")))?;
         tx.execute("INSERT INTO idempotency(account_id, request_id, request_hash, response_json) VALUES (?1, ?2, ?3, ?4)", params![account_id, update.request_id, request_hash, response_json])?;
+        let scope_id: String = tx.query_row("SELECT scope_id FROM targets WHERE target_id = ?1", [target_id], |row| row.get(0))?;
+        let event_id = format!("event_{}", uuid::Uuid::new_v4().simple());
+        tx.execute("INSERT INTO outbox_events(event_id, tenant_id, scope_id, target_id, kind, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, 'APPEARANCE_UPDATED', ?5, datetime('now'))", params![event_id, account_id, scope_id, target_id, response_json])?;
         tx.commit()?;
-        Ok(state)
+        Ok(AppearanceMutation { appearance: state, event_id, scope_id })
+    }
+
+    pub fn scope_id_for_target(&self, account_id: &str, target_id: &str) -> Result<Option<String>, CloudError> {
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if target_role(&conn, target_id, account_id)?.is_none() { return Ok(None); }
+        conn.query_row("SELECT scope_id FROM targets WHERE target_id = ?1", [target_id], |row| row.get(0)).optional().map_err(CloudError::from)
+    }
+
+    pub fn outbox_recovery(&self, account_id: &str, scope_id: &str, after: u64, requested_limit: usize) -> Result<serde_json::Value, CloudError> {
+        let limit = requested_limit.clamp(1, 256);
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if scope_role(&conn, scope_id, account_id)?.is_none() { return Err(CloudError::AccessDenied); }
+        let mut stmt = conn.prepare("SELECT sequence, event_id, target_id, kind, payload_json FROM outbox_events WHERE scope_id = ?1 AND sequence > ?2 ORDER BY sequence LIMIT ?3")?;
+        let rows = stmt.query_map(params![scope_id, after as i64, limit as i64], |row| {
+            let payload: String = row.get(4)?;
+            let payload = serde_json::from_str::<serde_json::Value>(&payload).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            Ok(serde_json::json!({
+                "sequence": row.get::<_, i64>(0)?,
+                "event_id": row.get::<_, String>(1)?,
+                "target_id": row.get::<_, String>(2)?,
+                "kind": row.get::<_, String>(3)?,
+                "payload": payload
+            }))
+        })?;
+        let entries = rows.collect::<Result<Vec<_>, _>>()?;
+        let to_cursor = entries.last().and_then(|entry| entry.get("sequence")).and_then(serde_json::Value::as_i64).unwrap_or(after as i64).max(0) as u64;
+        let has_more = entries.len() == limit;
+        Ok(serde_json::json!({
+            "scope_id": scope_id,
+            "from_cursor": after,
+            "to_cursor": to_cursor,
+            "entries": entries,
+            "has_more": has_more
+        }))
     }
 
     pub fn list_assets(&self, account_id: &str) -> Result<Vec<AssetSummary>, CloudError> {
@@ -467,6 +601,30 @@ fn target_role(conn: &Connection, target_id: &str, account_id: &str) -> Result<O
     conn.query_row("SELECT role FROM target_acl WHERE target_id = ?1 AND account_id = ?2", params![target_id, account_id], |row| row.get(0)).optional().map_err(CloudError::from)
 }
 
+fn normalize_profile_uuid(value: &str) -> Result<String, CloudError> {
+    let compact = value.trim().replace('-', "").to_ascii_lowercase();
+    if compact.len() != 32 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err(CloudError::IdentityProfileMismatch); }
+    let canonical = format!("{}-{}-{}-{}-{}", &compact[0..8], &compact[8..12], &compact[12..16], &compact[16..20], &compact[20..32]);
+    uuid::Uuid::parse_str(&canonical).map(|uuid| uuid.to_string()).map_err(|_| CloudError::IdentityProfileMismatch)
+}
+
+fn validate_provider_base_url(value: &str) -> Result<(), CloudError> {
+    let url = reqwest::Url::parse(value).map_err(|_| CloudError::IdentityProviderUntrusted)?;
+    if url.scheme() != "https" || url.host_str().is_none() || url.username() != "" || url.password().is_some() || (url.path() != "" && url.path() != "/") || url.query().is_some() || url.fragment().is_some() {
+        return Err(CloudError::IdentityProviderUntrusted);
+    }
+    if let Some(host) = url.host_str() {
+        if let Ok(address) = host.parse::<std::net::IpAddr>() {
+            let private = match address {
+                std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified(),
+                std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local(),
+            };
+            if private { return Err(CloudError::IdentityProviderUntrusted); }
+        }
+    }
+    Ok(())
+}
+
 fn now_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
 }
@@ -501,6 +659,12 @@ mod tests {
         let store = CloudStore::open(&config).unwrap();
         assert_eq!(store.create_account("account_editor", "correct horse battery staple").unwrap().account_id, "account_editor");
         assert!(store.issue_session(&LoginRequest { account_id: "account_editor".into(), password: "correct horse battery staple" }).is_ok());
+        let challenge = store.create_identity_challenge("account_local", &crate::models::CreateIdentityChallenge { provider_id: "official".into(), username: "Player".into(), profile_uuid: None }).unwrap();
+        assert_eq!(store.provider_challenge("account_local", &challenge.challenge_id).unwrap().server_id, challenge.server_id);
+        let verified = store.complete_identity_challenge("account_local", &challenge.challenge_id, "123456781234123412341234567890ab", "Player").unwrap();
+        assert_eq!(verified.verification_status, "VERIFIED");
+        assert!(matches!(store.provider_challenge("account_local", &challenge.challenge_id), Err(CloudError::IdentityChallengeReplayed)));
+        assert!(matches!(store.configure_provider(&crate::models::IdentityProviderUpdate { provider_id: "private".into(), display_name: "Private".into(), base_url: "https://127.0.0.1".into(), enabled: true }), Err(CloudError::IdentityProviderUntrusted)));
         let scope = store.create_scope("account_local", &CreateScope { scope_id: "scope".into(), name: "Scope".into(), world_epoch: "epoch-1".into() }).unwrap();
         assert_eq!(scope.scope_id, "scope");
         store.set_scope_acl("account_local", "scope", &ScopeAclUpdate { account_id: "account_editor".into(), role: "viewer".into() }).unwrap();
@@ -511,8 +675,10 @@ mod tests {
         assert_eq!(first.revision, 0);
         let update = crate::models::AppearanceUpdate { request_id: "req".into(), expected_revision: 0, asset_id: None, asset_revision: None, raw_sha256: None, texture_id: Some("texture".into()), scale: Some(1.0), disabled: false };
         let second = store.update_appearance("account_local", "target", &update).unwrap();
-        assert_eq!(second.revision, 1);
-        assert_eq!(store.update_appearance("account_local", "target", &update).unwrap().revision, 1);
+        assert_eq!(second.appearance.revision, 1);
+        let outbox = store.outbox_recovery("account_local", "scope", 0, 10).unwrap();
+        assert_eq!(outbox["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(store.update_appearance("account_local", "target", &update).unwrap().appearance.revision, 1);
         let mut conflicting_request = update.clone();
         conflicting_request.texture_id = Some("different".into());
         assert!(matches!(store.update_appearance("account_local", "target", &conflicting_request), Err(CloudError::IdempotencyConflict)));

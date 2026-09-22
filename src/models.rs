@@ -99,6 +99,34 @@ pub struct CreateIdentity {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct CreateIdentityChallenge {
+    pub provider_id: String,
+    pub username: String,
+    pub profile_uuid: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IdentityChallengeResponse {
+    pub challenge_id: String,
+    pub provider_id: String,
+    pub server_id: String,
+    pub expires_in_seconds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct VerifyIdentityChallenge {
+    pub challenge_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct IdentityProviderUpdate {
+    pub provider_id: String,
+    pub display_name: String,
+    pub base_url: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct OfflineBindingRequest {
     pub scope_id: String,
     pub world_epoch: String,

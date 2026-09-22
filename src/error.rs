@@ -34,6 +34,14 @@ pub enum CloudError {
     ProtocolUnsupported,
     #[error("identity is not verified")]
     IdentityNotVerified,
+    #[error("identity challenge expired")]
+    IdentityChallengeExpired,
+    #[error("identity challenge was already consumed")]
+    IdentityChallengeReplayed,
+    #[error("identity provider is not trusted")]
+    IdentityProviderUntrusted,
+    #[error("identity profile mismatch")]
+    IdentityProfileMismatch,
     #[error("internal error")]
     Internal(#[source] anyhow::Error),
     #[error(transparent)]
@@ -62,6 +70,10 @@ impl CloudError {
             Self::MessageTooLarge => "MESSAGE_TOO_LARGE",
             Self::ProtocolUnsupported => "PROTOCOL_UNSUPPORTED",
             Self::IdentityNotVerified => "IDENTITY_PROFILE_MISMATCH",
+            Self::IdentityChallengeExpired => "IDENTITY_CHALLENGE_EXPIRED",
+            Self::IdentityChallengeReplayed => "IDENTITY_CHALLENGE_REPLAYED",
+            Self::IdentityProviderUntrusted => "IDENTITY_PROVIDER_UNTRUSTED",
+            Self::IdentityProfileMismatch => "IDENTITY_PROFILE_MISMATCH",
             Self::Internal(_) | Self::Io(_) | Self::Sqlite(_) => "INTERNAL",
         }
     }
@@ -76,6 +88,8 @@ impl CloudError {
             Self::AssetTooLarge | Self::MessageTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::InvalidMetadata(_) | Self::ProtocolUnsupported => StatusCode::BAD_REQUEST,
             Self::IdentityNotVerified => StatusCode::FORBIDDEN,
+            Self::IdentityChallengeExpired | Self::IdentityChallengeReplayed => StatusCode::UNAUTHORIZED,
+            Self::IdentityProviderUntrusted | Self::IdentityProfileMismatch => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

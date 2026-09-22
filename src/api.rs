@@ -4,19 +4,30 @@ use axum::{body::Body, extract::{Path, Query, State}, http::{header, HeaderMap, 
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::{io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, fs};
+use tokio::{io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, net::lookup_host, sync::broadcast, fs};
 use uuid::Uuid;
 
-use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateAccount, CreateIdentity, CreateScope, CreateTarget, InstanceResponse, Limits, LoginRequest, OfflineBindingRequest, ScopeAclUpdate}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
+use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, InstanceResponse, Limits, LoginRequest, OfflineBindingRequest, ScopeAclUpdate, VerifyIdentityChallenge}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<CloudConfig>,
     pub store: CloudStore,
+    pub events: broadcast::Sender<CloudEvent>,
+}
+
+#[derive(Clone)]
+pub struct CloudEvent {
+    pub event_id: String,
+    pub scope_id: String,
+    pub appearance: crate::models::AppearanceState,
 }
 
 impl AppState {
-    pub fn new(config: CloudConfig, store: CloudStore) -> Self { Self { config: Arc::new(config), store } }
+    pub fn new(config: CloudConfig, store: CloudStore) -> Self {
+        let (events, _) = broadcast::channel(512);
+        Self { config: Arc::new(config), store, events }
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -27,7 +38,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sessions", post(login))
         .route("/v1/sessions/refresh", post(refresh_session))
         .route("/v1/sessions/current", delete(logout))
-        .route("/v1/identity-providers", get(identity_providers))
+        .route("/v1/identity-providers", get(identity_providers).post(configure_identity_provider))
+        .route("/v1/auth/challenges", post(create_identity_challenge))
+        .route("/v1/auth/challenges/{challenge_id}/verify", post(verify_identity_challenge))
+        .route("/v1/auth/challenges/{challenge_id}/complete", post(verify_identity_challenge))
         .route("/v1/identities", get(list_identities).post(create_identity))
         .route("/v1/identities/{identity_id}/offline-bindings", post(create_offline_binding))
         .route("/v1/scopes", get(list_scopes).post(create_scope))
@@ -37,6 +51,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/assets/{asset_id}/revisions/{revision}/content", get(download_asset))
         .route("/v1/targets", post(create_target))
         .route("/v1/scopes/{scope_id}/targets", get(list_targets))
+        .route("/v1/scopes/{scope_id}/events/recovery", get(outbox_recovery))
         .route("/v1/targets/{target_id}/appearance", get(get_appearance).put(update_appearance))
         .route("/v1/targets/{target_id}/acl", get(list_acl).put(set_acl))
         .with_state(state)
@@ -55,6 +70,41 @@ async fn instance(State(state): State<AppState>) -> Json<InstanceResponse> {
 }
 
 async fn identity_providers(State(state): State<AppState>) -> Result<Json<Vec<serde_json::Value>>, CloudError> { Ok(Json(state.store.list_providers()?)) }
+
+async fn configure_identity_provider(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<IdentityProviderUpdate>) -> Result<Json<serde_json::Value>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    if account != state.config.bootstrap_account_id { return Err(CloudError::AccessDenied); }
+    Ok(Json(state.store.configure_provider(&input)?))
+}
+
+async fn create_identity_challenge(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<CreateIdentityChallenge>) -> Result<Json<IdentityChallengeResponse>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.create_identity_challenge(&account, &input)?))
+}
+
+async fn verify_identity_challenge(State(state): State<AppState>, headers: HeaderMap, Path(challenge_id): Path<String>, Json(input): Json<VerifyIdentityChallenge>) -> Result<Json<IdentitySummary>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    if input.challenge_id != challenge_id { return Err(CloudError::invalid_metadata("challenge_id path/body mismatch")); }
+    let challenge = state.store.provider_challenge(&account, &challenge_id)?;
+    let base_url = state.store.provider_base_url(&challenge.provider_id)?;
+    let mut provider_url = reqwest::Url::parse(&base_url).map_err(|_| CloudError::IdentityProviderUntrusted)?;
+    let host = provider_url.host_str().ok_or(CloudError::IdentityProviderUntrusted)?.to_owned();
+    let port = provider_url.port_or_known_default().ok_or(CloudError::IdentityProviderUntrusted)?;
+    let addresses: Vec<_> = lookup_host((host.as_str(), port)).await
+        .map_err(|error| CloudError::Internal(anyhow::anyhow!("identity provider DNS lookup failed: {error}")))?
+        .filter(|address| is_allowed_provider_address(address.ip()))
+        .collect();
+    let address = addresses.first().copied().ok_or(CloudError::IdentityProviderUntrusted)?;
+    provider_url.set_path("/session/minecraft/hasJoined");
+    provider_url.query_pairs_mut().append_pair("username", &challenge.username).append_pair("serverId", &challenge.server_id);
+    let client = reqwest::Client::builder().resolve(&host, address).redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(5)).build().map_err(|error| CloudError::Internal(anyhow::anyhow!("provider client configuration failed: {error}")))?;
+    let response = client.get(provider_url).send().await.map_err(|error| CloudError::Internal(anyhow::anyhow!("identity provider request failed: {error}")))?;
+    if !response.status().is_success() { return Err(CloudError::IdentityProfileMismatch); }
+    let profile: serde_json::Value = response.json().await.map_err(|error| CloudError::Internal(anyhow::anyhow!("identity provider response was invalid: {error}")))?;
+    let profile_uuid = profile.get("id").and_then(serde_json::Value::as_str).ok_or(CloudError::IdentityProfileMismatch)?;
+    let display_name = profile.get("name").and_then(serde_json::Value::as_str).unwrap_or(&challenge.username);
+    Ok(Json(state.store.complete_identity_challenge(&account, &challenge_id, profile_uuid, display_name)?))
+}
 
 async fn create_account(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<CreateAccount>) -> Result<(StatusCode, Json<AccountSummary>), CloudError> {
     authenticate(&state, &headers)?;
@@ -124,6 +174,11 @@ async fn list_targets(State(state): State<AppState>, headers: HeaderMap, Path(sc
     Ok(Json(state.store.list_targets(&account, &scope_id)?))
 }
 
+async fn outbox_recovery(State(state): State<AppState>, headers: HeaderMap, Path(scope_id): Path<String>, Query(query): Query<CatalogQuery>) -> Result<Json<serde_json::Value>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.outbox_recovery(&account, &scope_id, query.after.unwrap_or(0), query.limit.unwrap_or(256))?))
+}
+
 async fn list_acl(State(state): State<AppState>, headers: HeaderMap, Path(target_id): Path<String>) -> Result<Json<Vec<crate::models::AclEntry>>, CloudError> {
     let account = authenticate(&state, &headers)?;
     Ok(Json(state.store.list_acl(&account, &target_id)?))
@@ -141,7 +196,16 @@ async fn get_appearance(State(state): State<AppState>, headers: HeaderMap, Path(
 
 async fn update_appearance(State(state): State<AppState>, headers: HeaderMap, Path(target_id): Path<String>, Json(input): Json<AppearanceUpdate>) -> Result<Json<crate::models::AppearanceState>, CloudError> {
     let account = authenticate(&state, &headers)?;
-    Ok(Json(state.store.update_appearance(&account, &target_id, &input)?))
+    let mutation = state.store.update_appearance(&account, &target_id, &input)?;
+    let _ = state.events.send(CloudEvent { event_id: mutation.event_id, scope_id: mutation.scope_id, appearance: mutation.appearance.clone() });
+    Ok(Json(mutation.appearance))
+}
+
+fn is_allowed_provider_address(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(ip) => !(ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified() || ip.is_broadcast()),
+        std::net::IpAddr::V6(ip) => !(ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() || ip.is_unicast_link_local()),
+    }
 }
 
 async fn list_assets(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Vec<crate::models::AssetSummary>>, CloudError> {

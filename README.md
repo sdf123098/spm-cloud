@@ -49,4 +49,4 @@ python -m unittest tools/test_migrate_legacy.py
 
 ## 当前边界
 
-这是独立后端的第一批实现，不宣称 Cloudflare 公共实例、第三方 provider 的远程认证、完整管理 GUI 或迁移导入已经完成。协议模型与数据库边界先固定，后续 Cloudflare 适配必须复用这些领域语义。
+这是独立后端的本地/自托管实现基线：已提供 provider registry 管理、官方/可信 Yggdrasil challenge 验证、外观 outbox 与 WebSocket 恢复接口，以及只读迁移盘点工具。它仍不宣称 Cloudflare 公共实例、完整管理 GUI 或迁移导入已经完成。协议模型与数据库边界先固定，后续 Cloudflare 适配必须复用这些领域语义。
