@@ -238,6 +238,29 @@ impl CloudStore {
                  response_json TEXT NOT NULL,
                  PRIMARY KEY(account_id, request_id)
              );
+             CREATE TABLE IF NOT EXISTS upload_operations (
+                 operation_id TEXT PRIMARY KEY,
+                 account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                 request_id TEXT NOT NULL,
+                 asset_id TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 revision INTEGER,
+                 raw_sha256 TEXT,
+                 byte_length INTEGER,
+                 error_code TEXT,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_upload_operations_account_request ON upload_operations(account_id, request_id, created_at);
+             CREATE TABLE IF NOT EXISTS upload_leases (
+                 lease_id TEXT PRIMARY KEY,
+                 operation_id TEXT NOT NULL UNIQUE REFERENCES upload_operations(operation_id),
+                 account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                 temp_path TEXT NOT NULL,
+                 expires_at INTEGER NOT NULL,
+                 state TEXT NOT NULL DEFAULT 'ACTIVE'
+             );
+             CREATE INDEX IF NOT EXISTS idx_upload_leases_expiry ON upload_leases(expires_at);
              CREATE TABLE IF NOT EXISTS catalog_events (
                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                  tenant_id TEXT NOT NULL,
@@ -1851,6 +1874,143 @@ impl CloudStore {
             .join(&sha256[0..2.min(sha256.len())])
             .join(sha256)
     }
+
+    pub fn begin_upload_operation(
+        &self,
+        account_id: &str,
+        request_id: &str,
+        asset_id: &str,
+    ) -> Result<String, CloudError> {
+        if request_id.is_empty() || request_id.len() > 128 {
+            return Err(CloudError::invalid_metadata("invalid Idempotency-Key"));
+        }
+        validate_slug(asset_id, "asset_id")?;
+        let operation_id = format!("op_{}", uuid::Uuid::new_v4().simple());
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        conn.execute(
+            "INSERT INTO upload_operations(operation_id, account_id, request_id, asset_id, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, 'RECEIVING', datetime('now'), datetime('now'))",
+            params![operation_id, account_id, request_id, asset_id],
+        )?;
+        Ok(operation_id)
+    }
+
+    pub fn create_upload_lease(
+        &self,
+        operation_id: &str,
+        account_id: &str,
+        temp_path: &Path,
+        expires_at: i64,
+    ) -> Result<String, CloudError> {
+        let lease_id = format!("lease_{}", uuid::Uuid::new_v4().simple());
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        conn.execute(
+            "INSERT INTO upload_leases(lease_id, operation_id, account_id, temp_path, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![lease_id, operation_id, account_id, temp_path.to_string_lossy().to_string(), expires_at],
+        )?;
+        Ok(lease_id)
+    }
+
+    pub fn complete_upload_operation(
+        &self,
+        operation_id: &str,
+        summary: &AssetSummary,
+    ) -> Result<(), CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let changed = conn.execute(
+            "UPDATE upload_operations SET status = 'COMMITTED', revision = ?2, raw_sha256 = ?3, byte_length = ?4, updated_at = datetime('now') WHERE operation_id = ?1",
+            params![operation_id, summary.revision as i64, summary.raw_sha256, summary.byte_length as i64],
+        )?;
+        if changed == 0 {
+            return Err(CloudError::NotFound);
+        }
+        conn.execute(
+            "UPDATE upload_leases SET state = 'COMMITTED' WHERE operation_id = ?1",
+            [operation_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn fail_upload_operation(
+        &self,
+        operation_id: &str,
+        error_code: &str,
+    ) -> Result<(), CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        conn.execute(
+            "UPDATE upload_operations SET status = 'FAILED', error_code = ?2, updated_at = datetime('now') WHERE operation_id = ?1 AND status NOT IN ('COMMITTED', 'FAILED')",
+            params![operation_id, error_code],
+        )?;
+        conn.execute(
+            "UPDATE upload_leases SET state = 'FAILED' WHERE operation_id = ?1 AND state = 'ACTIVE'",
+            [operation_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn upload_operation(
+        &self,
+        account_id: &str,
+        operation_id: &str,
+    ) -> Result<crate::models::UploadOperation, CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        conn.query_row(
+            "SELECT operation_id, status, asset_id, revision, raw_sha256, byte_length, error_code, created_at, updated_at FROM upload_operations WHERE operation_id = ?1 AND account_id = ?2",
+            params![operation_id, account_id],
+            |row| Ok(crate::models::UploadOperation {
+                operation_id: row.get(0)?,
+                status: row.get(1)?,
+                asset_id: row.get(2)?,
+                revision: row.get::<_, Option<i64>>(3)?.map(|value| value as u64),
+                raw_sha256: row.get(4)?,
+                byte_length: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
+                error_code: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            }),
+        )
+        .optional()?
+        .ok_or(CloudError::NotFound)
+    }
+
+    pub fn reconcile_upload_leases(&self, now: i64) -> Result<Vec<PathBuf>, CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let mut stmt = conn.prepare(
+            "SELECT temp_path FROM upload_leases WHERE state = 'ACTIVE' AND expires_at <= ?1",
+        )?;
+        let paths = stmt
+            .query_map([now], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect();
+        conn.execute(
+            "UPDATE upload_leases SET state = 'EXPIRED' WHERE state = 'ACTIVE' AND expires_at <= ?1",
+            [now],
+        )?;
+        conn.execute(
+            "UPDATE upload_operations SET status = 'EXPIRED', error_code = 'UPLOAD_LEASE_EXPIRED', updated_at = datetime('now') WHERE status = 'RECEIVING' AND operation_id IN (SELECT operation_id FROM upload_leases WHERE state = 'EXPIRED' AND expires_at <= ?1)",
+            [now],
+        )?;
+        Ok(paths)
+    }
 }
 
 fn write_audit(
@@ -2339,5 +2499,52 @@ mod tests {
         ));
         let catalog = store.catalog_recovery("account_local", 0, 10).unwrap();
         assert_eq!(catalog["entries"].as_array().unwrap().len(), 2);
+
+        let operation = store
+            .begin_upload_operation("account_local", "operation-request", "operation-asset")
+            .unwrap();
+        let lease_path = dir.path().join(".upload-operation");
+        store
+            .create_upload_lease(&operation, "account_local", &lease_path, now_seconds() + 60)
+            .unwrap();
+        assert_eq!(
+            store
+                .upload_operation("account_local", &operation)
+                .unwrap()
+                .status,
+            "RECEIVING"
+        );
+        store.complete_upload_operation(&operation, &idem).unwrap();
+        assert_eq!(
+            store
+                .upload_operation("account_local", &operation)
+                .unwrap()
+                .status,
+            "COMMITTED"
+        );
+
+        let expired_operation = store
+            .begin_upload_operation("account_local", "expired-request", "expired-asset")
+            .unwrap();
+        let expired_path = dir.path().join(".upload-expired");
+        store
+            .create_upload_lease(
+                &expired_operation,
+                "account_local",
+                &expired_path,
+                now_seconds() - 1,
+            )
+            .unwrap();
+        assert_eq!(
+            store.reconcile_upload_leases(now_seconds()).unwrap(),
+            vec![expired_path]
+        );
+        assert_eq!(
+            store
+                .upload_operation("account_local", &expired_operation)
+                .unwrap()
+                .status,
+            "EXPIRED"
+        );
     }
 }

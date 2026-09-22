@@ -32,6 +32,19 @@ pub struct AssetSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct UploadOperation {
+    pub operation_id: String,
+    pub status: String,
+    pub asset_id: String,
+    pub revision: Option<u64>,
+    pub raw_sha256: Option<String>,
+    pub byte_length: Option<u64>,
+    pub error_code: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct AssetAclEntry {
     pub account_id: String,
     pub permission: String,

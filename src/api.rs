@@ -5,7 +5,7 @@ use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
 use futures_util::StreamExt;
@@ -101,6 +101,7 @@ pub fn router(state: AppState) -> Router {
             get(list_scope_acl).put(set_scope_acl),
         )
         .route("/v1/assets", get(list_assets).post(upload_asset))
+        .route("/v1/operations/{operation_id}", get(get_operation))
         .route(
             "/v1/assets/{asset_id}/acl",
             get(list_asset_acl).put(set_asset_acl),
@@ -601,6 +602,15 @@ async fn list_assets(
     Ok(Json(state.store.list_assets(&account)?))
 }
 
+async fn get_operation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(operation_id): Path<String>,
+) -> Result<Json<crate::models::UploadOperation>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.upload_operation(&account, &operation_id)?))
+}
+
 async fn list_asset_acl(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -645,7 +655,7 @@ async fn upload_asset(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Body,
-) -> Result<(StatusCode, Json<crate::models::AssetSummary>), CloudError> {
+) -> Result<Response, CloudError> {
     let account = authenticate(&state, &headers)?;
     let request_id = header_string(&headers, "idempotency-key")?
         .ok_or_else(|| CloudError::invalid_metadata("Idempotency-Key is required"))?;
@@ -659,13 +669,27 @@ async fn upload_asset(
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
+    let operation_id = state
+        .store
+        .begin_upload_operation(&account, &request_id, &asset_id)?;
+    let operation_header = HeaderValue::from_str(&operation_id)
+        .map_err(|_| CloudError::invalid_metadata("invalid upload operation id"))?;
     if content_length.is_some_and(|length| length > state.config.max_asset_bytes) {
+        state
+            .store
+            .fail_upload_operation(&operation_id, "ASSET_TOO_LARGE")?;
         return Err(CloudError::AssetTooLarge);
     }
     let temp_path = state
         .config
         .object_dir
         .join(format!(".upload-{}", Uuid::new_v4().simple()));
+    state.store.create_upload_lease(
+        &operation_id,
+        &account,
+        &temp_path,
+        crate::api::now_unix_ms() / 1000 + 15 * 60,
+    )?;
     let mut file = fs::File::create(&temp_path).await?;
     let mut stream = body.into_data_stream();
     let mut hasher = Sha256::new();
@@ -676,6 +700,9 @@ async fn upload_asset(
         total = total.saturating_add(chunk.len() as u64);
         if total > state.config.max_asset_bytes {
             let _ = fs::remove_file(&temp_path).await;
+            let _ = state
+                .store
+                .fail_upload_operation(&operation_id, "ASSET_TOO_LARGE");
             return Err(CloudError::AssetTooLarge);
         }
         hasher.update(&chunk);
@@ -685,6 +712,9 @@ async fn upload_asset(
     drop(file);
     if total == 0 {
         let _ = fs::remove_file(&temp_path).await;
+        let _ = state
+            .store
+            .fail_upload_operation(&operation_id, "INVALID_METADATA");
         return Err(CloudError::invalid_metadata("asset must not be empty"));
     }
     let sha256 = hex::encode(hasher.finalize());
@@ -693,6 +723,9 @@ async fn upload_asset(
         .is_some_and(|expected| !expected.eq_ignore_ascii_case(&sha256))
     {
         let _ = fs::remove_file(&temp_path).await;
+        let _ = state
+            .store
+            .fail_upload_operation(&operation_id, "ASSET_HASH_MISMATCH");
         return Err(CloudError::AssetHashMismatch);
     }
     let object_path = state.store.object_path_for_sha(&sha256);
@@ -731,10 +764,21 @@ async fn upload_asset(
             if !object_already_exists {
                 let _ = fs::remove_file(&object_path).await;
             }
+            let _ = state
+                .store
+                .fail_upload_operation(&operation_id, error.code());
             return Err(error);
         }
     };
-    Ok((StatusCode::CREATED, Json(summary)))
+    state
+        .store
+        .complete_upload_operation(&operation_id, &summary)?;
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::HeaderName::from_static("x-operation-id"),
+        operation_header,
+    );
+    Ok((StatusCode::CREATED, response_headers, Json(summary)).into_response())
 }
 
 async fn download_asset(
