@@ -7,7 +7,7 @@ use subtle::ConstantTimeEq;
 use tokio::{io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, net::lookup_host, sync::broadcast, fs};
 use uuid::Uuid;
 
-use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, ClaimCodeRequest, CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, InstanceResponse, Limits, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, RevokeClaimCode, ScopeAclUpdate, VerifyIdentityChallenge}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
+use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, AssetAclUpdate, ClaimCodeRequest, CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, InstanceResponse, Limits, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, RevokeClaimCode, ScopeAclUpdate, VerifyIdentityChallenge}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -51,6 +51,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/scopes", get(list_scopes).post(create_scope))
         .route("/v1/scopes/{scope_id}/acl", get(list_scope_acl).put(set_scope_acl))
         .route("/v1/assets", get(list_assets).post(upload_asset))
+        .route("/v1/assets/{asset_id}/acl", get(list_asset_acl).put(set_asset_acl))
         .route("/v1/catalog/recovery", get(catalog_recovery))
         .route("/v1/assets/{asset_id}/revisions/{revision}/content", get(download_asset))
         .route("/v1/targets", post(create_target))
@@ -267,6 +268,16 @@ async fn list_assets(State(state): State<AppState>, headers: HeaderMap) -> Resul
     Ok(Json(state.store.list_assets(&account)?))
 }
 
+async fn list_asset_acl(State(state): State<AppState>, headers: HeaderMap, Path(asset_id): Path<String>) -> Result<Json<Vec<crate::models::AssetAclEntry>>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.list_asset_acl(&account, &asset_id)?))
+}
+
+async fn set_asset_acl(State(state): State<AppState>, headers: HeaderMap, Path(asset_id): Path<String>, Json(input): Json<AssetAclUpdate>) -> Result<Json<crate::models::AssetAclEntry>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.set_asset_acl(&account, &asset_id, &input)?))
+}
+
 async fn catalog_recovery(State(state): State<AppState>, headers: HeaderMap, Query(query): Query<CatalogQuery>) -> Result<Json<serde_json::Value>, CloudError> {
     let account = authenticate(&state, &headers)?;
     Ok(Json(state.store.catalog_recovery(&account, query.after.unwrap_or(0), query.limit.unwrap_or(256))?))
@@ -320,8 +331,8 @@ async fn upload_asset(State(state): State<AppState>, headers: HeaderMap, body: B
 }
 
 async fn download_asset(State(state): State<AppState>, headers: HeaderMap, Path((asset_id, revision)): Path<(String, u64)>) -> Result<Response, CloudError> {
-    let _account = authenticate(&state, &headers)?;
-    let content = state.store.asset_content(&asset_id, revision)?;
+    let account = authenticate(&state, &headers)?;
+    let content = state.store.asset_content(&account, &asset_id, revision)?;
     let etag = format!("\"{}\"", content.raw_sha256);
     if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).is_some_and(|value| value == etag) && headers.get(header::RANGE).is_none() {
         return Ok(Response::builder().status(StatusCode::NOT_MODIFIED).header(header::ETAG, etag).body(Body::empty()).unwrap());

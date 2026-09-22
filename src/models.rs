@@ -31,6 +31,18 @@ pub struct AssetSummary {
     pub byte_length: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct AssetAclEntry {
+    pub account_id: String,
+    pub permission: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AssetAclUpdate {
+    pub account_id: String,
+    pub permission: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateScope {
     pub scope_id: String,

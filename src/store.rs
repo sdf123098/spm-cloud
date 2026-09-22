@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, AuditEntry, ClaimCodeRequest, ClaimCodeResponse, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, RevokeClaimCode, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, ScopedIdentityBindingSummary, SessionResponse, TargetKind, TargetSummary}};
+use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetAclEntry, AssetAclUpdate, AssetSummary, AuditEntry, ClaimCodeRequest, ClaimCodeResponse, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, RevokeClaimCode, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, ScopedIdentityBindingSummary, SessionResponse, TargetKind, TargetSummary}};
 
 #[derive(Clone)]
 pub struct CloudStore {
@@ -195,6 +195,12 @@ impl CloudStore {
                  PRIMARY KEY(asset_id, revision),
                  UNIQUE(raw_sha256)
              );
+             CREATE TABLE IF NOT EXISTS asset_acl (
+                 asset_id TEXT NOT NULL REFERENCES assets(asset_id),
+                 account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                 permission TEXT NOT NULL,
+                 PRIMARY KEY(asset_id, account_id)
+             );
              CREATE TABLE IF NOT EXISTS idempotency (
                  account_id TEXT NOT NULL,
                  request_id TEXT NOT NULL,
@@ -236,6 +242,8 @@ impl CloudStore {
              CREATE INDEX IF NOT EXISTS idx_asset_revisions_sha ON asset_revisions(raw_sha256);
              INSERT OR IGNORE INTO scope_acl(scope_id, account_id, role)
                  SELECT scope_id, tenant_id, 'manage' FROM scopes;
+             INSERT OR IGNORE INTO asset_acl(asset_id, account_id, permission)
+                 SELECT asset_id, owner_account_id, 'manage' FROM assets;
              COMMIT;"
         )?;
         let has_offline_policy: Option<String> = connection.query_row("SELECT name FROM pragma_table_info('scopes') WHERE name = 'offline_policy'", [], |row| row.get(0)).optional()?;
@@ -704,6 +712,9 @@ impl CloudStore {
             return serde_json::from_str(&response_json).map_err(|_| CloudError::Internal(anyhow::anyhow!("stored idempotency response is invalid")));
         }
         if target_role(&tx, target_id, account_id)?.as_deref() != Some("manage") && target_role(&tx, target_id, account_id)?.as_deref() != Some("edit") { return Err(CloudError::AccessDenied); }
+        if let Some(asset_id) = update.asset_id.as_deref() {
+            if asset_permission(&tx, asset_id, account_id)?.is_none_or(|permission| !matches!(permission.as_str(), "manage" | "use")) { return Err(CloudError::AccessDenied); }
+        }
         let current: AppearanceState = tx.query_row("SELECT a.target_id, a.revision, a.asset_id, a.asset_revision, a.raw_sha256, a.texture_id, a.scale, a.disabled FROM appearances a WHERE a.target_id = ?1", [target_id], |row| Ok(AppearanceState { target_id: row.get(0)?, revision: row.get(1)?, asset_id: row.get(2)?, asset_revision: row.get(3)?, raw_sha256: row.get(4)?, texture_id: row.get(5)?, scale: row.get(6)?, disabled: row.get::<_, i64>(7)? != 0 })).optional()?.ok_or(CloudError::NotFound)?;
         if current.revision != update.expected_revision { return Err(CloudError::RevisionConflict); }
         let next_revision = current.revision + 1;
@@ -754,7 +765,7 @@ impl CloudStore {
 
     pub fn list_assets(&self, account_id: &str) -> Result<Vec<AssetSummary>, CloudError> {
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let mut stmt = conn.prepare("SELECT r.asset_id, r.revision, r.name, r.format, r.raw_sha256, r.byte_length FROM asset_revisions r JOIN assets a ON a.asset_id = r.asset_id WHERE a.owner_account_id = ?1 ORDER BY r.asset_id, r.revision")?;
+        let mut stmt = conn.prepare("SELECT r.asset_id, r.revision, r.name, r.format, r.raw_sha256, r.byte_length FROM asset_revisions r JOIN asset_acl acl ON acl.asset_id = r.asset_id WHERE acl.account_id = ?1 AND acl.permission IN ('manage', 'use', 'discover') ORDER BY r.asset_id, r.revision")?;
         let rows = stmt.query_map([account_id], |row| Ok(AssetSummary { asset_id: row.get(0)?, revision: row.get(1)?, name: row.get(2)?, format: row.get(3)?, raw_sha256: row.get(4)?, byte_length: row.get(5)? }))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -783,6 +794,7 @@ impl CloudStore {
         let revision: u64 = tx.query_row("SELECT current_revision FROM assets WHERE asset_id = ?1", [asset_id], |row| row.get(0))?;
         tx.execute("INSERT INTO asset_revisions(asset_id, revision, name, format, raw_sha256, byte_length, object_path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))", params![asset_id, revision, name, format, sha256, byte_length as i64, object_path.to_string_lossy().to_string()])?;
         tx.execute("INSERT INTO catalog_events(tenant_id, asset_id, revision, created_at) VALUES (?1, ?2, ?3, datetime('now'))", params![account_id, asset_id, revision])?;
+        tx.execute("INSERT INTO asset_acl(asset_id, account_id, permission) VALUES (?1, ?2, 'manage') ON CONFLICT(asset_id, account_id) DO UPDATE SET permission = 'manage'", params![asset_id, account_id])?;
         let summary = AssetSummary { asset_id: asset_id.to_owned(), revision, name: name.to_owned(), format: format.to_owned(), raw_sha256: sha256.to_owned(), byte_length };
         if let Some((request_id, request_hash)) = idempotency {
             let response_json = serde_json::to_string(&summary).map_err(|_| CloudError::Internal(anyhow::anyhow!("failed to encode asset idempotency response")))?;
@@ -818,9 +830,29 @@ impl CloudStore {
         }))
     }
 
-    pub fn asset_content(&self, asset_id: &str, revision: u64) -> Result<AssetContent, CloudError> {
+    pub fn asset_content(&self, account_id: &str, asset_id: &str, revision: u64) -> Result<AssetContent, CloudError> {
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if asset_permission(&conn, asset_id, account_id)?.is_none_or(|permission| !matches!(permission.as_str(), "manage" | "render_read")) { return Err(CloudError::AccessDenied); }
         conn.query_row("SELECT object_path, byte_length, raw_sha256, name, format FROM asset_revisions WHERE asset_id = ?1 AND revision = ?2", params![asset_id, revision], |row| Ok(AssetContent { path: PathBuf::from(row.get::<_, String>(0)?), length: row.get::<_, i64>(1)? as u64, raw_sha256: row.get(2)?, name: row.get(3)?, format: row.get(4)? })).optional()?.ok_or(CloudError::NotFound)
+    }
+
+    pub fn list_asset_acl(&self, account_id: &str, asset_id: &str) -> Result<Vec<AssetAclEntry>, CloudError> {
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if asset_permission(&conn, asset_id, account_id)?.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
+        let mut stmt = conn.prepare("SELECT account_id, permission FROM asset_acl WHERE asset_id = ?1 ORDER BY account_id")?;
+        let rows = stmt.query_map([asset_id], |row| Ok(AssetAclEntry { account_id: row.get(0)?, permission: row.get(1)? }))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn set_asset_acl(&self, account_id: &str, asset_id: &str, update: &AssetAclUpdate) -> Result<AssetAclEntry, CloudError> {
+        validate_slug(&update.account_id, "account_id")?;
+        if !matches!(update.permission.as_str(), "discover" | "use" | "render_read" | "manage") { return Err(CloudError::invalid_metadata("invalid asset permission")); }
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if asset_permission(&conn, asset_id, account_id)?.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
+        conn.execute("INSERT INTO accounts(account_id, created_at) VALUES (?1, datetime('now')) ON CONFLICT(account_id) DO NOTHING", [&update.account_id])?;
+        conn.execute("INSERT INTO asset_acl(asset_id, account_id, permission) VALUES (?1, ?2, ?3) ON CONFLICT(asset_id, account_id) DO UPDATE SET permission = excluded.permission", params![asset_id, update.account_id, update.permission])?;
+        write_audit(&conn, account_id, "asset_acl.updated", None, Some(asset_id), Some(&update.account_id), serde_json::json!({"permission": update.permission}))?;
+        Ok(AssetAclEntry { account_id: update.account_id.clone(), permission: update.permission.clone() })
     }
 
     pub fn object_path_for_sha(&self, sha256: &str) -> PathBuf { self.object_dir.join(&sha256[0..2.min(sha256.len())]).join(sha256) }
@@ -829,6 +861,10 @@ impl CloudStore {
 fn write_audit(conn: &Connection, actor_account_id: &str, action: &str, scope_id: Option<&str>, target_id: Option<&str>, subject_id: Option<&str>, details: serde_json::Value) -> Result<(), CloudError> {
     conn.execute("INSERT INTO audit_events(event_id, actor_account_id, action, scope_id, target_id, subject_id, details_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))", params![format!("audit_{}", uuid::Uuid::new_v4().simple()), actor_account_id, action, scope_id, target_id, subject_id, details.to_string()])?;
     Ok(())
+}
+
+fn asset_permission(conn: &Connection, asset_id: &str, account_id: &str) -> Result<Option<String>, CloudError> {
+    conn.query_row("SELECT permission FROM asset_acl WHERE asset_id = ?1 AND account_id = ?2", params![asset_id, account_id], |row| row.get(0)).optional().map_err(CloudError::from)
 }
 
 fn scope_role(conn: &Connection, scope_id: &str, account_id: &str) -> Result<Option<String>, CloudError> {
@@ -942,6 +978,9 @@ mod tests {
 
         let asset = store.register_asset("account_local", "asset", "model.ysm", "application/octet-stream", &"a".repeat(64), 1, &dir.path().join("asset")).unwrap();
         assert_eq!(asset.revision, 1);
+        assert!(matches!(store.asset_content("account_editor", "asset", 1), Err(CloudError::AccessDenied)));
+        store.set_asset_acl("account_local", "asset", &crate::models::AssetAclUpdate { account_id: "account_editor".into(), permission: "render_read".into() }).unwrap();
+        assert_eq!(store.asset_content("account_editor", "asset", 1).unwrap().raw_sha256, "a".repeat(64));
         let idem = store.register_asset_with_idempotency("account_local", "idem-asset", "model.ysm", "application/octet-stream", &"b".repeat(64), 1, &dir.path().join("idem-asset"), Some(("upload-1", "request-hash"))).unwrap();
         let idem_retry = store.register_asset_with_idempotency("account_local", "idem-asset", "model.ysm", "application/octet-stream", &"b".repeat(64), 1, &dir.path().join("idem-asset"), Some(("upload-1", "request-hash"))).unwrap();
         assert_eq!(idem.revision, idem_retry.revision);
