@@ -1,0 +1,135 @@
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InstanceResponse {
+    pub instance_id: String,
+    pub origin: String,
+    pub websocket_origin: String,
+    pub protocol: String,
+    pub limits: Limits,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Limits {
+    pub max_message_bytes: usize,
+    pub max_snapshot_bytes: usize,
+    pub max_snapshot_chunk_bytes: usize,
+    pub max_asset_bytes: u64,
+    pub max_subscriptions: usize,
+    pub heartbeat_interval_seconds: u64,
+    pub heartbeat_ttl_seconds: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AssetSummary {
+    pub asset_id: String,
+    pub revision: u64,
+    pub name: String,
+    pub format: String,
+    pub raw_sha256: String,
+    pub byte_length: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateScope {
+    pub scope_id: String,
+    pub name: String,
+    pub world_epoch: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ScopeSummary {
+    pub scope_id: String,
+    pub tenant_id: String,
+    pub name: String,
+    pub world_epoch: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AccountSummary {
+    pub account_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IdentitySummary {
+    pub identity_id: String,
+    pub account_id: String,
+    pub identity: String,
+    pub display_name: String,
+    pub verification_status: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateIdentity {
+    pub identity: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct OfflineBindingRequest {
+    pub scope_id: String,
+    pub world_epoch: String,
+    pub identity_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppearanceUpdate {
+    pub request_id: String,
+    pub expected_revision: u64,
+    pub asset_id: Option<String>,
+    pub asset_revision: Option<u64>,
+    pub raw_sha256: Option<String>,
+    pub texture_id: Option<String>,
+    pub scale: Option<f32>,
+    pub disabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppearanceState {
+    pub target_id: String,
+    pub revision: u64,
+    pub asset_id: Option<String>,
+    pub asset_revision: Option<u64>,
+    pub raw_sha256: Option<String>,
+    pub texture_id: Option<String>,
+    pub scale: Option<f32>,
+    pub disabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateTarget {
+    pub scope_id: String,
+    pub target_id: Option<String>,
+    pub kind: TargetKind,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TargetSummary {
+    pub target_id: String,
+    pub scope_id: String,
+    pub kind: TargetKind,
+    pub display_name: String,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AclEntry {
+    pub account_id: String,
+    pub role: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AclUpdate {
+    pub account_id: String,
+    pub role: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TargetKind { Player, Dummy, Maid }
+
+impl CreateTarget {
+    pub fn id(&self) -> String { self.target_id.clone().unwrap_or_else(|| format!("target_{}", Uuid::new_v4().simple())) }
+}

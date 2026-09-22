@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package spm.cloud.v1;
+
+message Envelope {
+  string protocol_version = 1;
+  string kind = 2;
+  string request_id = 3;
+  string event_id = 4;
+  string scope_id = 5;
+  bytes payload = 6;
+}
+
+message Hello {
+  string client_version = 1;
+  repeated string protocol_versions = 2;
+  string instance_id = 3;
+}
+
+message HelloAck {
+  string instance_id = 1;
+  string protocol_version = 2;
+  uint64 max_message_bytes = 3;
+  uint64 heartbeat_interval_seconds = 4;
+  uint64 heartbeat_ttl_seconds = 5;
+}
+
+message Heartbeat {
+  int64 client_time_unix_ms = 1;
+}
+
+message HeartbeatAck {
+  int64 server_time_unix_ms = 1;
+}
+
+message Error {
+  string code = 1;
+  bool retryable = 2;
+  string message_key = 3;
+  string details = 4;
+}
+
+message Ack {
+  string operation_id = 1;
+  uint64 revision = 2;
+}
+
+message JoinScope { string scope_id = 1; string world_epoch = 2; }
+message LeaveScope { string scope_id = 1; }
+message SubscribeTargets { repeated string target_ids = 1; }
+message UnsubscribeTargets { repeated string target_ids = 1; }
+message AppearanceUpdate {
+  string request_id = 1;
+  string target_id = 2;
+  uint64 expected_revision = 3;
+  string asset_id = 4;
+  uint64 asset_revision = 5;
+  string raw_sha256 = 6;
+  string texture_id = 7;
+  float scale = 8;
+  bool disabled = 9;
+}
+message AnimationIntent {
+  string request_id = 1;
+  string target_id = 2;
+  uint64 expected_revision = 3;
+  string action = 4;
+  string animation_key = 5;
+}
+message ObservationReport {
+  string target_id = 1;
+  string binding_id = 2;
+  uint64 observer_sequence = 3;
+  string context = 4;
+}
+message Resume {
+  string scope_id = 1;
+  uint64 view_epoch = 2;
+  string catalog_cursor = 3;
+  string last_event_id = 4;
+}
+
+message CatalogCursor {
+  string tenant_id = 1;
+  uint64 view_epoch = 2;
+  uint64 offset = 3;
+}
+message CatalogEntry {
+  string asset_id = 1;
+  uint64 revision = 2;
+  string name = 3;
+  string raw_sha256 = 4;
+  uint64 byte_length = 5;
+  string distribution = 6;
+}
+message CatalogSnapshotBegin {
+  string snapshot_id = 1;
+  uint64 view_epoch = 2;
+  CatalogCursor cursor = 3;
+  uint32 total_chunks = 4;
+}
+message CatalogSnapshotChunk {
+  string snapshot_id = 1;
+  uint32 chunk_index = 2;
+  repeated CatalogEntry entries = 3;
+}
+message CatalogSnapshotEnd { string snapshot_id = 1; CatalogCursor cursor = 2; }
+message CatalogDeltaBatch {
+  CatalogCursor from_cursor = 1;
+  CatalogCursor to_cursor = 2;
+  repeated CatalogEntry entries = 3;
+}
+message TargetSnapshot { string snapshot_id = 1; repeated TargetEntry targets = 2; }
+message TargetEntry { string target_id = 1; string kind = 2; string display_name = 3; uint64 revision = 4; }
+message TargetDelta { string target_id = 1; uint64 revision = 2; string change = 3; }
+message AppearanceState {
+  string target_id = 1;
+  uint64 revision = 2;
+  string asset_id = 3;
+  uint64 asset_revision = 4;
+  string raw_sha256 = 5;
+  string texture_id = 6;
+  float scale = 7;
+  bool disabled = 8;
+}
+message AnimationState {
+  string target_id = 1;
+  uint64 revision = 2;
+  string channel = 3;
+  string action = 4;
+  string animation_key = 5;
+  int64 expires_at_unix_ms = 6;
+}
+message AnimationEvent {
+  string event_id = 1;
+  string target_id = 2;
+  uint64 sequence = 3;
+  string channel = 4;
+  string action = 5;
+  string animation_key = 6;
+}
+message AccessRevoked { string scope_id = 1; uint64 view_epoch = 2; repeated string target_ids = 3; }
