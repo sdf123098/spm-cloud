@@ -1,0 +1,35 @@
+services:
+  spm-cloud:
+    build: .
+    restart: unless-stopped
+    environment:
+      SPM_CLOUD_INSTANCE_ID: ${SPM_CLOUD_INSTANCE_ID:-self-hosted}
+      SPM_CLOUD_ORIGIN: ${SPM_CLOUD_ORIGIN:-https://cloud.example.com}
+      SPM_CLOUD_BIND: 0.0.0.0:8787
+      SPM_CLOUD_ACCESS_TOKEN: ${SPM_CLOUD_ACCESS_TOKEN:?set SPM_CLOUD_ACCESS_TOKEN}
+      SPM_CLOUD_BOOTSTRAP_ACCOUNT: ${SPM_CLOUD_BOOTSTRAP_ACCOUNT:-account_local}
+      SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH: ${SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH:?set an Argon2id hash}
+    volumes:
+      - spm-cloud-data:/var/lib/spm-cloud/data
+      - spm-cloud-objects:/var/lib/spm-cloud/objects
+    expose:
+      - "8787"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - spm-cloud
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  spm-cloud-data:
+  spm-cloud-objects:
+  caddy-data:
+  caddy-config:
