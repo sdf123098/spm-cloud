@@ -760,18 +760,36 @@ impl CloudStore {
     }
 
     pub fn register_asset(&self, account_id: &str, asset_id: &str, name: &str, format: &str, sha256: &str, byte_length: u64, object_path: &Path) -> Result<AssetSummary, CloudError> {
+        self.register_asset_with_idempotency(account_id, asset_id, name, format, sha256, byte_length, object_path, None)
+    }
+
+    pub fn register_asset_with_idempotency(&self, account_id: &str, asset_id: &str, name: &str, format: &str, sha256: &str, byte_length: u64, object_path: &Path, idempotency: Option<(&str, &str)>) -> Result<AssetSummary, CloudError> {
         validate_slug(asset_id, "asset_id")?;
         if name.is_empty() || name.len() > 16 * 1024 || format.is_empty() || format.len() > 64 { return Err(CloudError::invalid_metadata("invalid asset metadata")); }
+        if let Some((request_id, _)) = idempotency {
+            if request_id.is_empty() || request_id.len() > 128 { return Err(CloudError::invalid_metadata("invalid Idempotency-Key")); }
+        }
         let mut conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
         let tx = conn.transaction()?;
+        if let Some((request_id, request_hash)) = idempotency {
+            if let Some((existing_hash, response_json)) = tx.query_row("SELECT request_hash, response_json FROM idempotency WHERE account_id = ?1 AND request_id = ?2", params![account_id, request_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional()? {
+                if existing_hash != request_hash { return Err(CloudError::IdempotencyConflict); }
+                return serde_json::from_str(&response_json).map_err(|_| CloudError::Internal(anyhow::anyhow!("stored asset idempotency response is invalid")));
+            }
+        }
         let existing_owner: Option<String> = tx.query_row("SELECT owner_account_id FROM assets WHERE asset_id = ?1", [asset_id], |row| row.get(0)).optional()?;
         if existing_owner.is_some_and(|owner| owner != account_id) { return Err(CloudError::AccessDenied); }
         tx.execute("INSERT INTO assets(asset_id, owner_account_id, current_revision) VALUES (?1, ?2, 1) ON CONFLICT(asset_id) DO UPDATE SET current_revision = current_revision + 1", params![asset_id, account_id])?;
         let revision: u64 = tx.query_row("SELECT current_revision FROM assets WHERE asset_id = ?1", [asset_id], |row| row.get(0))?;
         tx.execute("INSERT INTO asset_revisions(asset_id, revision, name, format, raw_sha256, byte_length, object_path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))", params![asset_id, revision, name, format, sha256, byte_length as i64, object_path.to_string_lossy().to_string()])?;
         tx.execute("INSERT INTO catalog_events(tenant_id, asset_id, revision, created_at) VALUES (?1, ?2, ?3, datetime('now'))", params![account_id, asset_id, revision])?;
+        let summary = AssetSummary { asset_id: asset_id.to_owned(), revision, name: name.to_owned(), format: format.to_owned(), raw_sha256: sha256.to_owned(), byte_length };
+        if let Some((request_id, request_hash)) = idempotency {
+            let response_json = serde_json::to_string(&summary).map_err(|_| CloudError::Internal(anyhow::anyhow!("failed to encode asset idempotency response")))?;
+            tx.execute("INSERT INTO idempotency(account_id, request_id, request_hash, response_json) VALUES (?1, ?2, ?3, ?4)", params![account_id, request_id, request_hash, response_json])?;
+        }
         tx.commit()?;
-        Ok(AssetSummary { asset_id: asset_id.to_owned(), revision, name: name.to_owned(), format: format.to_owned(), raw_sha256: sha256.to_owned(), byte_length })
+        Ok(summary)
     }
 
     pub fn catalog_recovery(&self, account_id: &str, after: u64, requested_limit: usize) -> Result<serde_json::Value, CloudError> {

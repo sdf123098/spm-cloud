@@ -280,6 +280,7 @@ struct CatalogQuery {
 
 async fn upload_asset(State(state): State<AppState>, headers: HeaderMap, body: Body) -> Result<(StatusCode, Json<crate::models::AssetSummary>), CloudError> {
     let account = authenticate(&state, &headers)?;
+    let request_id = header_string(&headers, "idempotency-key")?.ok_or_else(|| CloudError::invalid_metadata("Idempotency-Key is required"))?;
     let asset_id = header_string(&headers, "x-asset-id")?.unwrap_or_else(|| format!("asset_{}", Uuid::new_v4().simple()));
     let name = header_string(&headers, "x-asset-name")?.unwrap_or_else(|| asset_id.clone());
     let format = header_string(&headers, "x-asset-format")?.unwrap_or_else(|| "application/octet-stream".to_owned());
@@ -305,8 +306,16 @@ async fn upload_asset(State(state): State<AppState>, headers: HeaderMap, body: B
     if expected_sha.as_deref().is_some_and(|expected| !expected.eq_ignore_ascii_case(&sha256)) { let _ = fs::remove_file(&temp_path).await; return Err(CloudError::AssetHashMismatch); }
     let object_path = state.store.object_path_for_sha(&sha256);
     if let Some(parent) = object_path.parent() { fs::create_dir_all(parent).await?; }
-    if fs::try_exists(&object_path).await.unwrap_or(false) { let _ = fs::remove_file(&temp_path).await; } else { fs::rename(&temp_path, &object_path).await?; }
-    let summary = state.store.register_asset(&account, &asset_id, &name, &format, &sha256, total, &object_path)?;
+    let object_already_exists = fs::try_exists(&object_path).await.unwrap_or(false);
+    if object_already_exists { let _ = fs::remove_file(&temp_path).await; } else { fs::rename(&temp_path, &object_path).await?; }
+    let request_hash = hex::encode(Sha256::digest(serde_json::to_vec(&(asset_id.as_str(), name.as_str(), format.as_str(), expected_sha.as_deref(), total, sha256.as_str())).map_err(|_| CloudError::invalid_metadata("invalid upload metadata"))?));
+    let summary = match state.store.register_asset_with_idempotency(&account, &asset_id, &name, &format, &sha256, total, &object_path, Some((&request_id, &request_hash))) {
+        Ok(summary) => summary,
+        Err(error) => {
+            if !object_already_exists { let _ = fs::remove_file(&object_path).await; }
+            return Err(error);
+        }
+    };
     Ok((StatusCode::CREATED, Json(summary)))
 }
 
