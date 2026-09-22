@@ -90,9 +90,24 @@ SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH=$argon2id$v=19$m=65536,t=3,p=4$...
 ```powershell
 docker compose up -d --build
 docker compose logs -f spm-cloud
-docker compose exec spm-cloud sh -c 'sqlite3 /var/lib/spm-cloud/data/spm-cloud.db "PRAGMA wal_checkpoint(TRUNCATE);"'
-docker run --rm -v spm-cloud-data:/from -v ${PWD}/backup:/to alpine sh -c 'tar czf /to/spm-cloud-data.tgz -C /from .'
+docker compose stop spm-cloud
+docker volume ls
+docker run --rm -v spm-cloud-data:/from:ro -v ${PWD}/backup:/to alpine sh -c 'tar czf /to/spm-cloud-data.tgz -C /from .'
+docker run --rm -v spm-cloud-objects:/from:ro -v ${PWD}/backup:/to alpine sh -c 'tar czf /to/spm-cloud-objects.tgz -C /from .'
+docker compose start spm-cloud
 ```
+
+Linux/macOS 的等价备份命令（如果通过 `.env` 自定义 volume 名称，应替换下面两个名称）：
+
+```bash
+mkdir -p backup
+docker compose stop spm-cloud
+docker run --rm -v spm-cloud-data:/from:ro -v "$PWD/backup:/to" alpine sh -c 'tar czf /to/spm-cloud-data.tgz -C /from .'
+docker run --rm -v spm-cloud-objects:/from:ro -v "$PWD/backup:/to" alpine sh -c 'tar czf /to/spm-cloud-objects.tgz -C /from .'
+docker compose start spm-cloud
+```
+
+Windows Docker Desktop 可使用上面的 PowerShell 形式。备份期间必须停止服务，避免 SQLite WAL 和对象目录出现不一致快照。
 
 备份必须同时包含 SQLite 数据目录和对象目录；恢复时停止服务、恢复两个 volume，再启动服务。不要把 SQLite 文件放在多个实例之间共享，也不要把容器本地目录当作跨主机存储。生产环境应把 `.env` 放到密钥管理器，定期轮换 bootstrap bearer，并验证备份可恢复。
 

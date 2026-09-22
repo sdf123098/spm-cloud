@@ -30,6 +30,8 @@ services:
 
 volumes:
   spm-cloud-data:
+    name: ${SPM_CLOUD_DATA_VOLUME:-spm-cloud-data}
   spm-cloud-objects:
+    name: ${SPM_CLOUD_OBJECTS_VOLUME:-spm-cloud-objects}
   caddy-data:
   caddy-config:
