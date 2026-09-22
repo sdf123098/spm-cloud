@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, CreateIdentity, CreateScope, CreateTarget, IdentitySummary, LoginRequest, OfflineBindingRequest, ScopeSummary, SessionResponse, TargetKind, TargetSummary}};
+use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, CreateIdentity, CreateScope, CreateTarget, IdentitySummary, LoginRequest, OfflineBindingRequest, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, SessionResponse, TargetKind, TargetSummary}};
 
 #[derive(Clone)]
 pub struct CloudStore {
@@ -80,6 +80,12 @@ impl CloudStore {
                  world_epoch TEXT NOT NULL,
                  created_at TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS scope_acl (
+                 scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
+                 account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                 role TEXT NOT NULL,
+                 PRIMARY KEY(scope_id, account_id)
+             );
              CREATE TABLE IF NOT EXISTS targets (
                  target_id TEXT PRIMARY KEY,
                  scope_id TEXT NOT NULL REFERENCES scopes(scope_id),
@@ -128,8 +134,17 @@ impl CloudStore {
                  response_json TEXT NOT NULL,
                  PRIMARY KEY(account_id, request_id)
              );
+             CREATE TABLE IF NOT EXISTS catalog_events (
+                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                 tenant_id TEXT NOT NULL,
+                 asset_id TEXT NOT NULL,
+                 revision INTEGER NOT NULL,
+                 created_at TEXT NOT NULL
+             );
              CREATE INDEX IF NOT EXISTS idx_targets_scope ON targets(scope_id);
              CREATE INDEX IF NOT EXISTS idx_asset_revisions_sha ON asset_revisions(raw_sha256);
+             INSERT OR IGNORE INTO scope_acl(scope_id, account_id, role)
+                 SELECT scope_id, tenant_id, 'manage' FROM scopes;
              COMMIT;"
         )?;
         Ok(())
@@ -258,14 +273,34 @@ impl CloudStore {
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
         conn.execute("INSERT INTO accounts(account_id, created_at) VALUES (?1, datetime('now')) ON CONFLICT(account_id) DO NOTHING", [account_id])?;
         conn.execute("INSERT INTO scopes(scope_id, tenant_id, name, world_epoch, created_at) VALUES (?1, ?2, ?3, ?4, datetime('now'))", params![input.scope_id, account_id, input.name, input.world_epoch])?;
+        conn.execute("INSERT INTO scope_acl(scope_id, account_id, role) VALUES (?1, ?2, 'manage')", params![input.scope_id, account_id])?;
         Ok(ScopeSummary { scope_id: input.scope_id.clone(), tenant_id: account_id.to_owned(), name: input.name.clone(), world_epoch: input.world_epoch.clone() })
     }
 
     pub fn list_scopes(&self, account_id: &str) -> Result<Vec<ScopeSummary>, CloudError> {
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let mut stmt = conn.prepare("SELECT scope_id, tenant_id, name, world_epoch FROM scopes WHERE tenant_id = ?1 ORDER BY scope_id")?;
+        let mut stmt = conn.prepare("SELECT s.scope_id, s.tenant_id, s.name, s.world_epoch FROM scopes s JOIN scope_acl acl ON acl.scope_id = s.scope_id WHERE acl.account_id = ?1 ORDER BY s.scope_id")?;
         let rows = stmt.query_map([account_id], |row| Ok(ScopeSummary { scope_id: row.get(0)?, tenant_id: row.get(1)?, name: row.get(2)?, world_epoch: row.get(3)? }))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn list_scope_acl(&self, account_id: &str, scope_id: &str) -> Result<Vec<ScopeAclEntry>, CloudError> {
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let role = scope_role(&conn, scope_id, account_id)?;
+        if role.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
+        let mut stmt = conn.prepare("SELECT account_id, role FROM scope_acl WHERE scope_id = ?1 ORDER BY account_id")?;
+        let rows = stmt.query_map([scope_id], |row| Ok(ScopeAclEntry { account_id: row.get(0)?, role: row.get(1)? }))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn set_scope_acl(&self, account_id: &str, scope_id: &str, update: &ScopeAclUpdate) -> Result<ScopeAclEntry, CloudError> {
+        validate_slug(&update.account_id, "account_id")?;
+        if !matches!(update.role.as_str(), "manage" | "edit" | "viewer") { return Err(CloudError::invalid_metadata("invalid scope ACL role")); }
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if scope_role(&conn, scope_id, account_id)?.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
+        conn.execute("INSERT INTO accounts(account_id, created_at) VALUES (?1, datetime('now')) ON CONFLICT(account_id) DO NOTHING", [&update.account_id])?;
+        conn.execute("INSERT INTO scope_acl(scope_id, account_id, role) VALUES (?1, ?2, ?3) ON CONFLICT(scope_id, account_id) DO UPDATE SET role = excluded.role", params![scope_id, update.account_id, update.role])?;
+        Ok(ScopeAclEntry { account_id: update.account_id.clone(), role: update.role.clone() })
     }
 
     pub fn create_target(&self, account_id: &str, input: &CreateTarget) -> Result<serde_json::Value, CloudError> {
@@ -273,8 +308,7 @@ impl CloudStore {
         validate_slug(&id, "target_id")?;
         if input.display_name.trim().is_empty() || input.display_name.len() > 16 * 1024 { return Err(CloudError::invalid_metadata("invalid target display name")); }
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let scope_exists: Option<String> = conn.query_row("SELECT scope_id FROM scopes WHERE scope_id = ?1 AND tenant_id = ?2", params![input.scope_id, account_id], |row| row.get(0)).optional()?;
-        if scope_exists.is_none() { return Err(CloudError::NotFound); }
+        if scope_role(&conn, &input.scope_id, account_id)?.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
         let kind = serde_json::to_string(&input.kind).unwrap().trim_matches('"').to_owned();
         conn.execute("INSERT INTO targets(target_id, scope_id, target_kind, display_name, owner_account_id) VALUES (?1, ?2, ?3, ?4, ?5)", params![id, input.scope_id, kind, input.display_name, account_id])?;
         conn.execute("INSERT INTO target_acl(target_id, account_id, role) VALUES (?1, ?2, 'manage')", params![id, account_id])?;
@@ -284,8 +318,29 @@ impl CloudStore {
 
     pub fn list_targets(&self, account_id: &str, scope_id: &str) -> Result<Vec<TargetSummary>, CloudError> {
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let mut stmt = conn.prepare("SELECT t.target_id, t.scope_id, t.target_kind, t.display_name, t.revision FROM targets t JOIN target_acl acl ON acl.target_id = t.target_id WHERE t.scope_id = ?1 AND acl.account_id = ?2 ORDER BY t.target_id")?;
-        let rows = stmt.query_map(params![scope_id, account_id], |row| {
+        if scope_role(&conn, scope_id, account_id)?.is_none() { return Err(CloudError::AccessDenied); }
+        let mut stmt = conn.prepare("SELECT t.target_id, t.scope_id, t.target_kind, t.display_name, t.revision FROM targets t WHERE t.scope_id = ?1 ORDER BY t.target_id")?;
+        let rows = stmt.query_map([scope_id], |row| {
+            let kind = match row.get::<_, String>(2)?.as_str() {
+                "PLAYER" => TargetKind::Player,
+                "DUMMY" => TargetKind::Dummy,
+                "MAID" => TargetKind::Maid,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            Ok(TargetSummary { target_id: row.get(0)?, scope_id: row.get(1)?, kind, display_name: row.get(3)?, revision: row.get(4)? })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn join_scope(&self, account_id: &str, scope_id: &str, world_epoch: &str) -> Result<Vec<TargetSummary>, CloudError> {
+        validate_slug(scope_id, "scope_id")?;
+        validate_slug(world_epoch, "world_epoch")?;
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if scope_role(&conn, scope_id, account_id)?.is_none() { return Err(CloudError::AccessDenied); }
+        let stored_epoch: Option<String> = conn.query_row("SELECT world_epoch FROM scopes WHERE scope_id = ?1", [scope_id], |row| row.get(0)).optional()?;
+        if stored_epoch.as_deref() != Some(world_epoch) { return Err(CloudError::AccessDenied); }
+        let mut stmt = conn.prepare("SELECT target_id, scope_id, target_kind, display_name, revision FROM targets WHERE scope_id = ?1 ORDER BY target_id")?;
+        let rows = stmt.query_map([scope_id], |row| {
             let kind = match row.get::<_, String>(2)?.as_str() {
                 "PLAYER" => TargetKind::Player,
                 "DUMMY" => TargetKind::Dummy,
@@ -299,8 +354,7 @@ impl CloudStore {
 
     pub fn list_acl(&self, account_id: &str, target_id: &str) -> Result<Vec<AclEntry>, CloudError> {
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let owner: Option<String> = conn.query_row("SELECT owner_account_id FROM targets WHERE target_id = ?1", [target_id], |row| row.get(0)).optional()?;
-        if owner.as_deref() != Some(account_id) { return Err(CloudError::AccessDenied); }
+        if target_role(&conn, target_id, account_id)?.is_none() { return Err(CloudError::AccessDenied); }
         let mut stmt = conn.prepare("SELECT account_id, role FROM target_acl WHERE target_id = ?1 ORDER BY account_id")?;
         let rows = stmt.query_map([target_id], |row| Ok(AclEntry { account_id: row.get(0)?, role: row.get(1)? }))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -310,8 +364,7 @@ impl CloudStore {
         validate_slug(&update.account_id, "account_id")?;
         if !matches!(update.role.as_str(), "manage" | "edit" | "viewer") { return Err(CloudError::invalid_metadata("invalid target ACL role")); }
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let owner: Option<String> = conn.query_row("SELECT owner_account_id FROM targets WHERE target_id = ?1", [target_id], |row| row.get(0)).optional()?;
-        if owner.as_deref() != Some(account_id) { return Err(CloudError::AccessDenied); }
+        if target_role(&conn, target_id, account_id)?.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
         conn.execute("INSERT INTO accounts(account_id, created_at) VALUES (?1, datetime('now')) ON CONFLICT(account_id) DO NOTHING", [&update.account_id])?;
         conn.execute("INSERT INTO target_acl(target_id, account_id, role) VALUES (?1, ?2, ?3) ON CONFLICT(target_id, account_id) DO UPDATE SET role = excluded.role", params![target_id, update.account_id, update.role])?;
         Ok(AclEntry { account_id: update.account_id.clone(), role: update.role.clone() })
@@ -319,7 +372,8 @@ impl CloudStore {
 
     pub fn get_appearance(&self, account_id: &str, target_id: &str) -> Result<AppearanceState, CloudError> {
         let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        conn.query_row("SELECT a.target_id, a.revision, a.asset_id, a.asset_revision, a.raw_sha256, a.texture_id, a.scale, a.disabled FROM appearances a JOIN targets t ON t.target_id = a.target_id WHERE a.target_id = ?1 AND t.owner_account_id = ?2", params![target_id, account_id], |row| Ok(AppearanceState { target_id: row.get(0)?, revision: row.get(1)?, asset_id: row.get(2)?, asset_revision: row.get(3)?, raw_sha256: row.get(4)?, texture_id: row.get(5)?, scale: row.get(6)?, disabled: row.get::<_, i64>(7)? != 0 })).optional()?.ok_or(CloudError::NotFound)
+        if target_role(&conn, target_id, account_id)?.is_none() { return Err(CloudError::AccessDenied); }
+        conn.query_row("SELECT a.target_id, a.revision, a.asset_id, a.asset_revision, a.raw_sha256, a.texture_id, a.scale, a.disabled FROM appearances a WHERE a.target_id = ?1", [target_id], |row| Ok(AppearanceState { target_id: row.get(0)?, revision: row.get(1)?, asset_id: row.get(2)?, asset_revision: row.get(3)?, raw_sha256: row.get(4)?, texture_id: row.get(5)?, scale: row.get(6)?, disabled: row.get::<_, i64>(7)? != 0 })).optional()?.ok_or(CloudError::NotFound)
     }
 
     pub fn update_appearance(&self, account_id: &str, target_id: &str, update: &crate::models::AppearanceUpdate) -> Result<AppearanceState, CloudError> {
@@ -332,7 +386,8 @@ impl CloudStore {
             if existing_hash != request_hash { return Err(CloudError::IdempotencyConflict); }
             return serde_json::from_str(&response_json).map_err(|_| CloudError::Internal(anyhow::anyhow!("stored idempotency response is invalid")));
         }
-        let current: AppearanceState = tx.query_row("SELECT a.target_id, a.revision, a.asset_id, a.asset_revision, a.raw_sha256, a.texture_id, a.scale, a.disabled FROM appearances a JOIN targets t ON t.target_id = a.target_id WHERE a.target_id = ?1 AND t.owner_account_id = ?2", params![target_id, account_id], |row| Ok(AppearanceState { target_id: row.get(0)?, revision: row.get(1)?, asset_id: row.get(2)?, asset_revision: row.get(3)?, raw_sha256: row.get(4)?, texture_id: row.get(5)?, scale: row.get(6)?, disabled: row.get::<_, i64>(7)? != 0 })).optional()?.ok_or(CloudError::NotFound)?;
+        if target_role(&tx, target_id, account_id)?.as_deref() != Some("manage") && target_role(&tx, target_id, account_id)?.as_deref() != Some("edit") { return Err(CloudError::AccessDenied); }
+        let current: AppearanceState = tx.query_row("SELECT a.target_id, a.revision, a.asset_id, a.asset_revision, a.raw_sha256, a.texture_id, a.scale, a.disabled FROM appearances a WHERE a.target_id = ?1", [target_id], |row| Ok(AppearanceState { target_id: row.get(0)?, revision: row.get(1)?, asset_id: row.get(2)?, asset_revision: row.get(3)?, raw_sha256: row.get(4)?, texture_id: row.get(5)?, scale: row.get(6)?, disabled: row.get::<_, i64>(7)? != 0 })).optional()?.ok_or(CloudError::NotFound)?;
         if current.revision != update.expected_revision { return Err(CloudError::RevisionConflict); }
         let next_revision = current.revision + 1;
         tx.execute("UPDATE appearances SET revision = ?1, asset_id = ?2, asset_revision = ?3, raw_sha256 = ?4, texture_id = ?5, scale = ?6, disabled = ?7 WHERE target_id = ?8", params![next_revision, update.asset_id, update.asset_revision, update.raw_sha256, update.texture_id, update.scale, i64::from(update.disabled), target_id])?;
@@ -355,11 +410,40 @@ impl CloudStore {
         if name.is_empty() || name.len() > 16 * 1024 || format.is_empty() || format.len() > 64 { return Err(CloudError::invalid_metadata("invalid asset metadata")); }
         let mut conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
         let tx = conn.transaction()?;
+        let existing_owner: Option<String> = tx.query_row("SELECT owner_account_id FROM assets WHERE asset_id = ?1", [asset_id], |row| row.get(0)).optional()?;
+        if existing_owner.is_some_and(|owner| owner != account_id) { return Err(CloudError::AccessDenied); }
         tx.execute("INSERT INTO assets(asset_id, owner_account_id, current_revision) VALUES (?1, ?2, 1) ON CONFLICT(asset_id) DO UPDATE SET current_revision = current_revision + 1", params![asset_id, account_id])?;
         let revision: u64 = tx.query_row("SELECT current_revision FROM assets WHERE asset_id = ?1", [asset_id], |row| row.get(0))?;
         tx.execute("INSERT INTO asset_revisions(asset_id, revision, name, format, raw_sha256, byte_length, object_path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))", params![asset_id, revision, name, format, sha256, byte_length as i64, object_path.to_string_lossy().to_string()])?;
+        tx.execute("INSERT INTO catalog_events(tenant_id, asset_id, revision, created_at) VALUES (?1, ?2, ?3, datetime('now'))", params![account_id, asset_id, revision])?;
         tx.commit()?;
         Ok(AssetSummary { asset_id: asset_id.to_owned(), revision, name: name.to_owned(), format: format.to_owned(), raw_sha256: sha256.to_owned(), byte_length })
+    }
+
+    pub fn catalog_recovery(&self, account_id: &str, after: u64, requested_limit: usize) -> Result<serde_json::Value, CloudError> {
+        let limit = requested_limit.clamp(1, 256);
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let mut stmt = conn.prepare("SELECT e.sequence, r.asset_id, r.revision, r.name, r.raw_sha256, r.byte_length FROM catalog_events e JOIN asset_revisions r ON r.asset_id = e.asset_id AND r.revision = e.revision WHERE e.tenant_id = ?1 AND e.sequence > ?2 ORDER BY e.sequence LIMIT ?3")?;
+        let rows = stmt.query_map(params![account_id, after as i64, limit as i64], |row| {
+            Ok(serde_json::json!({
+                "sequence": row.get::<_, i64>(0)?,
+                "asset_id": row.get::<_, String>(1)?,
+                "revision": row.get::<_, i64>(2)?,
+                "name": row.get::<_, String>(3)?,
+                "raw_sha256": row.get::<_, String>(4)?,
+                "byte_length": row.get::<_, i64>(5)?
+            }))
+        })?;
+        let entries = rows.collect::<Result<Vec<_>, _>>()?;
+        let to_cursor = entries.last().and_then(|entry| entry.get("sequence")).and_then(serde_json::Value::as_i64).unwrap_or(after as i64).max(0) as u64;
+        let has_more = entries.len() == limit;
+        Ok(serde_json::json!({
+            "view_epoch": 1,
+            "from_cursor": {"tenant_id": account_id, "view_epoch": 1, "offset": after},
+            "to_cursor": {"tenant_id": account_id, "view_epoch": 1, "offset": to_cursor},
+            "entries": entries,
+            "has_more": has_more
+        }))
     }
 
     pub fn asset_content(&self, asset_id: &str, revision: u64) -> Result<AssetContent, CloudError> {
@@ -368,6 +452,14 @@ impl CloudStore {
     }
 
     pub fn object_path_for_sha(&self, sha256: &str) -> PathBuf { self.object_dir.join(&sha256[0..2.min(sha256.len())]).join(sha256) }
+}
+
+fn scope_role(conn: &Connection, scope_id: &str, account_id: &str) -> Result<Option<String>, CloudError> {
+    conn.query_row("SELECT role FROM scope_acl WHERE scope_id = ?1 AND account_id = ?2", params![scope_id, account_id], |row| row.get(0)).optional().map_err(CloudError::from)
+}
+
+fn target_role(conn: &Connection, target_id: &str, account_id: &str) -> Result<Option<String>, CloudError> {
+    conn.query_row("SELECT role FROM target_acl WHERE target_id = ?1 AND account_id = ?2", params![target_id, account_id], |row| row.get(0)).optional().map_err(CloudError::from)
 }
 
 fn now_seconds() -> i64 {
@@ -404,6 +496,8 @@ mod tests {
         let store = CloudStore::open(&config).unwrap();
         let scope = store.create_scope("account_local", &CreateScope { scope_id: "scope".into(), name: "Scope".into(), world_epoch: "epoch-1".into() }).unwrap();
         assert_eq!(scope.scope_id, "scope");
+        store.set_scope_acl("account_local", "scope", &ScopeAclUpdate { account_id: "account_editor".into(), role: "viewer".into() }).unwrap();
+        assert_eq!(store.list_scopes("account_editor").unwrap().len(), 1);
         let target = CreateTarget { scope_id: "scope".into(), target_id: Some("target".into()), kind: crate::models::TargetKind::Player, display_name: "Player".into() };
         store.create_target("account_local", &target).unwrap();
         let first = store.get_appearance("account_local", "target").unwrap();
@@ -415,5 +509,10 @@ mod tests {
         let mut conflicting_request = update.clone();
         conflicting_request.texture_id = Some("different".into());
         assert!(matches!(store.update_appearance("account_local", "target", &conflicting_request), Err(CloudError::IdempotencyConflict)));
+
+        let asset = store.register_asset("account_local", "asset", "model.ysm", "application/octet-stream", &"a".repeat(64), 1, &dir.path().join("asset")).unwrap();
+        assert_eq!(asset.revision, 1);
+        let catalog = store.catalog_recovery("account_local", 0, 10).unwrap();
+        assert_eq!(catalog["entries"].as_array().unwrap().len(), 1);
     }
 }

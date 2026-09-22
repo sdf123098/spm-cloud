@@ -1,13 +1,13 @@
 use std::{sync::Arc, time::SystemTime};
 
-use axum::{body::Body, extract::{Path, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::Response, routing::{delete, get, post}, Json, Router};
+use axum::{body::Body, extract::{Path, Query, State}, http::{header, HeaderMap, HeaderValue, StatusCode}, response::Response, routing::{delete, get, post}, Json, Router};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::{io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, fs};
 use uuid::Uuid;
 
-use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateIdentity, CreateScope, CreateTarget, InstanceResponse, Limits, LoginRequest, OfflineBindingRequest}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
+use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, CreateIdentity, CreateScope, CreateTarget, InstanceResponse, Limits, LoginRequest, OfflineBindingRequest, ScopeAclUpdate}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/identities", get(list_identities).post(create_identity))
         .route("/v1/identities/{identity_id}/offline-bindings", post(create_offline_binding))
         .route("/v1/scopes", get(list_scopes).post(create_scope))
+        .route("/v1/scopes/{scope_id}/acl", get(list_scope_acl).put(set_scope_acl))
         .route("/v1/assets", get(list_assets).post(upload_asset))
         .route("/v1/catalog/recovery", get(catalog_recovery))
         .route("/v1/assets/{asset_id}/revisions/{revision}/content", get(download_asset))
@@ -103,6 +104,16 @@ async fn create_scope(State(state): State<AppState>, headers: HeaderMap, Json(in
     Ok((StatusCode::CREATED, Json(state.store.create_scope(&account, &input)?)))
 }
 
+async fn list_scope_acl(State(state): State<AppState>, headers: HeaderMap, Path(scope_id): Path<String>) -> Result<Json<Vec<crate::models::ScopeAclEntry>>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.list_scope_acl(&account, &scope_id)?))
+}
+
+async fn set_scope_acl(State(state): State<AppState>, headers: HeaderMap, Path(scope_id): Path<String>, Json(input): Json<ScopeAclUpdate>) -> Result<Json<crate::models::ScopeAclEntry>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.set_scope_acl(&account, &scope_id, &input)?))
+}
+
 async fn create_target(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<CreateTarget>) -> Result<(StatusCode, Json<serde_json::Value>), CloudError> {
     let account = authenticate(&state, &headers)?;
     Ok((StatusCode::CREATED, Json(state.store.create_target(&account, &input)?)))
@@ -138,10 +149,15 @@ async fn list_assets(State(state): State<AppState>, headers: HeaderMap) -> Resul
     Ok(Json(state.store.list_assets(&account)?))
 }
 
-async fn catalog_recovery(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<serde_json::Value>, CloudError> {
+async fn catalog_recovery(State(state): State<AppState>, headers: HeaderMap, Query(query): Query<CatalogQuery>) -> Result<Json<serde_json::Value>, CloudError> {
     let account = authenticate(&state, &headers)?;
-    let entries = state.store.list_assets(&account)?;
-    Ok(Json(serde_json::json!({ "view_epoch": 1, "cursor": {"tenant_id": account, "view_epoch": 1, "offset": entries.len()}, "entries": entries })))
+    Ok(Json(state.store.catalog_recovery(&account, query.after.unwrap_or(0), query.limit.unwrap_or(256))?))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CatalogQuery {
+    after: Option<u64>,
+    limit: Option<usize>,
 }
 
 async fn upload_asset(State(state): State<AppState>, headers: HeaderMap, body: Body) -> Result<(StatusCode, Json<crate::models::AssetSummary>), CloudError> {

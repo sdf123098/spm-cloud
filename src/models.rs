@@ -46,6 +46,18 @@ pub struct ScopeSummary {
     pub world_epoch: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ScopeAclEntry {
+    pub account_id: String,
+    pub role: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ScopeAclUpdate {
+    pub account_id: String,
+    pub role: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountSummary {
     pub account_id: String,

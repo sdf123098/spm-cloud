@@ -2,22 +2,22 @@ use axum::{extract::{ws::{Message, WebSocket, WebSocketUpgrade}, State}, http::H
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as ProstMessage;
 
-use crate::{api::{authenticate, AppState}, protocol::{generated::{Envelope, Error as ProtoError, Heartbeat, HeartbeatAck, Hello, HelloAck}, HEARTBEAT_INTERVAL_SECONDS, MAX_MESSAGE_BYTES, PROTOCOL_V1}};
+use crate::{api::{authenticate, AppState}, error::CloudError, protocol::{generated::{Envelope, Error as ProtoError, Heartbeat, HeartbeatAck, Hello, HelloAck, JoinScope, TargetEntry, TargetSnapshot}, HEARTBEAT_INTERVAL_SECONDS, MAX_MESSAGE_BYTES, PROTOCOL_V1}};
 
 pub fn router(state: AppState) -> Router {
     Router::new().route("/v1/realtime", get(upgrade)).with_state(state)
 }
 
 async fn upgrade(State(state): State<AppState>, headers: HeaderMap, websocket: WebSocketUpgrade) -> Result<Response, CloudError> {
-    authenticate(&state, &headers)?;
+    let account_id = authenticate(&state, &headers)?;
     Ok(websocket
         .read_buffer_size(state.config.max_message_bytes)
         .max_write_buffer_size(state.config.max_message_bytes * 2)
-        .on_upgrade(move |socket| serve(socket, state))
+        .on_upgrade(move |socket| serve(socket, state, account_id))
         .into_response())
 }
 
-async fn serve(mut socket: WebSocket, state: AppState) {
+async fn serve(mut socket: WebSocket, state: AppState, account_id: String) {
     while let Some(result) = socket.next().await {
         let Ok(message) = result else { break; };
         let Message::Binary(bytes) = message else { continue; };
@@ -30,10 +30,29 @@ async fn serve(mut socket: WebSocket, state: AppState) {
         let send_result = match envelope.kind.as_str() {
             "Hello" => handle_hello(&mut socket, &state, &envelope).await,
             "Heartbeat" => handle_heartbeat(&mut socket, &envelope).await,
+            "JoinScope" => handle_join_scope(&mut socket, &state, &account_id, &envelope).await,
             _ => send_error(&mut socket, &envelope.request_id, "MALFORMED_MESSAGE", false).await,
         };
         if send_result.is_err() { break; }
     }
+}
+
+async fn handle_join_scope(socket: &mut WebSocket, state: &AppState, account_id: &str, envelope: &Envelope) -> Result<(), ()> {
+    let join = JoinScope::decode(envelope.payload.as_ref()).map_err(|_| ())?;
+    let targets = match state.store.join_scope(account_id, &join.scope_id, &join.world_epoch) {
+        Ok(targets) => targets,
+        Err(error) => return send_error(socket, &envelope.request_id, error.code(), false).await,
+    };
+    let snapshot = TargetSnapshot {
+        snapshot_id: format!("snapshot_{}", uuid::Uuid::new_v4().simple()),
+        targets: targets.into_iter().map(|target| TargetEntry {
+            target_id: target.target_id,
+            kind: serde_json::to_string(&target.kind).unwrap_or_default().trim_matches('"').to_owned(),
+            display_name: target.display_name,
+            revision: target.revision,
+        }).collect(),
+    };
+    send_envelope(socket, Envelope { protocol_version: PROTOCOL_V1.to_owned(), kind: "TargetSnapshot".to_owned(), request_id: envelope.request_id.clone(), event_id: String::new(), scope_id: join.scope_id, payload: snapshot.encode_to_vec().into() }).await
 }
 
 async fn handle_hello(socket: &mut WebSocket, state: &AppState, envelope: &Envelope) -> Result<(), ()> {
