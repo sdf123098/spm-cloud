@@ -176,6 +176,11 @@ pub struct RedeemClaimCode {
 }
 
 #[derive(Clone, Debug, Deserialize)]
+pub struct RevokeClaimCode {
+    pub code: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct OfflineBindingApproval {
     pub status: String,
     pub expected_revision: u64,

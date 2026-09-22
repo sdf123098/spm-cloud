@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, ClaimCodeRequest, ClaimCodeResponse, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, ScopedIdentityBindingSummary, SessionResponse, TargetKind, TargetSummary}};
+use crate::{config::{validate_slug, CloudConfig}, error::CloudError, identity::GameIdentity, models::{AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetSummary, ClaimCodeRequest, ClaimCodeResponse, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, RevokeClaimCode, ScopeAclEntry, ScopeAclUpdate, ScopeSummary, ScopedIdentityBindingSummary, SessionResponse, TargetKind, TargetSummary}};
 
 #[derive(Clone)]
 pub struct CloudStore {
@@ -462,6 +462,17 @@ impl CloudStore {
         let summary = tx.query_row("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE binding_id = ?1", [&binding_id], |row| Ok(ScopedIdentityBindingSummary { binding_id: row.get(0)?, account_id: row.get(1)?, identity_id: row.get(2)?, target_id: row.get(3)?, scope_id: row.get(4)?, world_epoch: row.get(5)?, entity_uuid: row.get(6)?, verification_method: row.get(7)?, status: row.get(8)?, approved_by: row.get(9)?, revision: row.get::<_, i64>(10)? as u64 }))?;
         tx.commit()?;
         Ok(summary)
+    }
+
+    pub fn revoke_claim_code(&self, account_id: &str, input: &RevokeClaimCode) -> Result<(), CloudError> {
+        if input.code.is_empty() || input.code.len() > 256 { return Err(CloudError::invalid_metadata("invalid claim code")); }
+        let conn = self.connection.lock().map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let code_hash = hash_token(&input.code);
+        let scope_id: Option<String> = conn.query_row("SELECT scope_id FROM claim_codes WHERE code_hash = ?1", [&code_hash], |row| row.get(0)).optional()?;
+        let Some(scope_id) = scope_id else { return Err(CloudError::NotFound); };
+        if scope_role(&conn, &scope_id, account_id)?.as_deref() != Some("manage") { return Err(CloudError::AccessDenied); }
+        conn.execute("UPDATE claim_codes SET revoked = 1 WHERE code_hash = ?1 AND consumed = 0", [&code_hash])?;
+        Ok(())
     }
 
     pub fn approve_offline_binding(&self, account_id: &str, binding_id: &str, input: &OfflineBindingApproval) -> Result<ScopedIdentityBindingSummary, CloudError> {

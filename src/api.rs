@@ -7,7 +7,7 @@ use subtle::ConstantTimeEq;
 use tokio::{io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, net::lookup_host, sync::broadcast, fs};
 use uuid::Uuid;
 
-use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, ClaimCodeRequest, CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, InstanceResponse, Limits, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, ScopeAclUpdate, VerifyIdentityChallenge}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
+use crate::{config::CloudConfig, error::CloudError, models::{AccountSummary, AclUpdate, AppearanceUpdate, ClaimCodeRequest, CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, InstanceResponse, Limits, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, RevokeClaimCode, ScopeAclUpdate, VerifyIdentityChallenge}, protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1}, store::CloudStore};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -45,6 +45,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/identities", get(list_identities).post(create_identity))
         .route("/v1/identities/{identity_id}/offline-bindings", post(create_offline_binding))
         .route("/v1/claim-codes/redeem", post(redeem_claim_code))
+        .route("/v1/claim-codes/revoke", post(revoke_claim_code))
         .route("/v1/targets/{target_id}/claim-codes", post(create_claim_code))
         .route("/v1/scoped-identity-bindings/{binding_id}", put(approve_offline_binding))
         .route("/v1/scopes", get(list_scopes).post(create_scope))
@@ -158,6 +159,12 @@ async fn create_claim_code(State(state): State<AppState>, headers: HeaderMap, Pa
 async fn redeem_claim_code(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<RedeemClaimCode>) -> Result<Json<crate::models::ScopedIdentityBindingSummary>, CloudError> {
     let account = authenticate(&state, &headers)?;
     Ok(Json(state.store.redeem_claim_code(&account, &input)?))
+}
+
+async fn revoke_claim_code(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<RevokeClaimCode>) -> Result<StatusCode, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    state.store.revoke_claim_code(&account, &input)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn approve_offline_binding(State(state): State<AppState>, headers: HeaderMap, Path(binding_id): Path<String>, Json(input): Json<OfflineBindingApproval>) -> Result<Json<crate::models::ScopedIdentityBindingSummary>, CloudError> {
