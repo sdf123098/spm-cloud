@@ -10,7 +10,11 @@ pub fn router(state: AppState) -> Router {
 
 async fn upgrade(State(state): State<AppState>, headers: HeaderMap, websocket: WebSocketUpgrade) -> Result<Response, CloudError> {
     authenticate(&state, &headers)?;
-    Ok(websocket.max_frame_size(state.config.max_message_bytes).max_message_size(state.config.max_message_bytes).on_upgrade(move |socket| serve(socket, state)).into_response())
+    Ok(websocket
+        .read_buffer_size(state.config.max_message_bytes)
+        .max_write_buffer_size(state.config.max_message_bytes * 2)
+        .on_upgrade(move |socket| serve(socket, state))
+        .into_response())
 }
 
 async fn serve(mut socket: WebSocket, state: AppState) {
