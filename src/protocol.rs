@@ -6,4 +6,3 @@ pub const HEARTBEAT_TTL_SECONDS: u64 = 45;
 pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/spm.cloud.v1.rs"));
 }
-

@@ -1,13 +1,13 @@
 FROM rust:1.85-bookworm AS builder
 WORKDIR /src
 
-COPY Cargo.toml build.rs ./
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto ./proto
 RUN mkdir -p src && printf 'fn main() {}\n' > src/main.rs
-RUN cargo fetch
+RUN cargo fetch --locked
 
 COPY src ./src
-RUN cargo build --release
+RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
 RUN apt-get update \

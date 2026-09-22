@@ -36,6 +36,20 @@ cargo run --release
 
 当前 `SPM_CLOUD_ACCESS_TOKEN` 是本地/受控部署的 bootstrap bearer；它不是最终的 Cloud 登录协议。游戏身份写入后默认是 `PENDING_VERIFICATION`，未完成 Session Service challenge 不能获得 Offline binding。
 
+### Windows GNU 本地开发
+
+仓库自带 `.cargo/config.toml`，只在本项目内选择 `x86_64-pc-windows-gnu`，并将 linker/ar 指向 MSYS2 UCRT64；不会修改全局 Cargo 配置，也不依赖 MSVC 或 `link.exe`。准备 Rust GNU 工具链后，在当前 PowerShell 会话加入 GCC 路径：
+
+```powershell
+$env:Path = "C:\Users\$env:USERNAME\.cargo\bin;C:\msys64\ucrt64\bin;$env:Path"
+rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+rustup run stable-x86_64-pc-windows-gnu cargo check
+rustup run stable-x86_64-pc-windows-gnu cargo test
+rustup run stable-x86_64-pc-windows-gnu cargo build --release
+```
+
+如果 GNU 工具链已安装，可省略安装命令。Linux/macOS 仍使用同一 Cargo 项目和各自原生 target；Windows GNU 配置只对这个仓库生效。
+
 健康检查：
 
 ```text

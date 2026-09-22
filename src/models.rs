@@ -21,7 +21,7 @@ pub struct Limits {
     pub heartbeat_ttl_seconds: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssetSummary {
     pub asset_id: String,
     pub revision: u64,
@@ -292,8 +292,16 @@ pub struct AclUpdate {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum TargetKind { Player, Dummy, Maid }
+pub enum TargetKind {
+    Player,
+    Dummy,
+    Maid,
+}
 
 impl CreateTarget {
-    pub fn id(&self) -> String { self.target_id.clone().unwrap_or_else(|| format!("target_{}", Uuid::new_v4().simple())) }
+    pub fn id(&self) -> String {
+        self.target_id
+            .clone()
+            .unwrap_or_else(|| format!("target_{}", Uuid::new_v4().simple()))
+    }
 }

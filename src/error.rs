@@ -1,4 +1,8 @@
-use axum::{http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -51,8 +55,12 @@ pub enum CloudError {
 }
 
 impl CloudError {
-    pub fn configuration(message: impl Into<String>) -> Self { Self::Configuration(message.into()) }
-    pub fn invalid_metadata(message: impl Into<String>) -> Self { Self::InvalidMetadata(message.into()) }
+    pub fn configuration(message: impl Into<String>) -> Self {
+        Self::Configuration(message.into())
+    }
+    pub fn invalid_metadata(message: impl Into<String>) -> Self {
+        Self::InvalidMetadata(message.into())
+    }
     pub fn code(&self) -> &'static str {
         match self {
             Self::Configuration(_) => "INTERNAL",
@@ -88,8 +96,12 @@ impl CloudError {
             Self::AssetTooLarge | Self::MessageTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::InvalidMetadata(_) | Self::ProtocolUnsupported => StatusCode::BAD_REQUEST,
             Self::IdentityNotVerified => StatusCode::FORBIDDEN,
-            Self::IdentityChallengeExpired | Self::IdentityChallengeReplayed => StatusCode::UNAUTHORIZED,
-            Self::IdentityProviderUntrusted | Self::IdentityProfileMismatch => StatusCode::FORBIDDEN,
+            Self::IdentityChallengeExpired | Self::IdentityChallengeReplayed => {
+                StatusCode::UNAUTHORIZED
+            }
+            Self::IdentityProviderUntrusted | Self::IdentityProfileMismatch => {
+                StatusCode::FORBIDDEN
+            }
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -107,7 +119,12 @@ impl IntoResponse for CloudError {
     fn into_response(self) -> Response {
         let status = self.status();
         let code = self.code();
-        let body = Json(ErrorBody { ok: false, code, retryable: matches!(self, Self::Internal(_) | Self::Io(_)), message_key: format!("cloud.error.{}", code.to_lowercase()) });
+        let body = Json(ErrorBody {
+            ok: false,
+            code,
+            retryable: matches!(self, Self::Internal(_) | Self::Io(_)),
+            message_key: format!("cloud.error.{}", code.to_lowercase()),
+        });
         (status, body).into_response()
     }
 }

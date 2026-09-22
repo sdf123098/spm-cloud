@@ -1,0 +1,12 @@
+# Project-local Windows GNU toolchain configuration.
+#
+# Keep this configuration in the repository so contributors do not need to
+# modify their global Cargo/Rust settings. The command environment should add
+# C:\\msys64\\ucrt64\\bin to PATH when invoking Cargo.
+
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+linker = "C:\\msys64\\ucrt64\\bin\\gcc.exe"
+ar = "C:\\msys64\\ucrt64\\bin\\ar.exe"
