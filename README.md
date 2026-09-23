@@ -36,24 +36,9 @@ cargo run --release
 
 当前 `SPM_CLOUD_ACCESS_TOKEN` 是本地/受控部署的 bootstrap bearer；它不是最终的 Cloud 登录协议。游戏身份写入后默认是 `PENDING_VERIFICATION`，未完成 Session Service challenge 不能获得 Offline binding。
 
-### Windows 本地 GNU 开发（仅开发机示例）
+### 跨平台开发
 
-仓库不携带任何开发机路径或 linker 配置。若本机选择 MSYS2 UCRT64，可仅在当前 PowerShell 会话设置工具链：
-
-```powershell
-$env:Path = "C:\msys64\ucrt64\bin;C:\msys64\usr\bin;$env:Path"
-$env:CC_x86_64_pc_windows_gnu = "C:\msys64\ucrt64\bin\gcc.exe"
-$env:CXX_x86_64_pc_windows_gnu = "C:\msys64\ucrt64\bin\g++.exe"
-$env:AR_x86_64_pc_windows_gnu = "C:\msys64\ucrt64\bin\ar.exe"
-$env:RANLIB_x86_64_pc_windows_gnu = "C:\msys64\ucrt64\bin\ranlib.exe"
-rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
-rustup target add --toolchain stable-x86_64-pc-windows-gnu x86_64-pc-windows-gnu
-rustup run stable-x86_64-pc-windows-gnu cargo check --target x86_64-pc-windows-gnu
-rustup run stable-x86_64-pc-windows-gnu cargo test --target x86_64-pc-windows-gnu
-rustup run stable-x86_64-pc-windows-gnu cargo build --target x86_64-pc-windows-gnu --release
-```
-
-如果 GNU 工具链已安装，可省略安装命令。上述 MSYS2 路径只属于开发机当前 shell，不得写入项目配置、发布脚本或发布产物。Linux/macOS 和其他 Windows 构建使用各自原生 target/CI 工具链。
+使用 Rust 官方工具链为目标平台安装对应 target 与原生编译依赖。Linux、macOS 和 Windows 的构建应在各自原生环境或对应 CI runner 上执行；本仓库不固定开发机路径或 linker 配置。
 
 健康检查：
 
@@ -82,9 +67,9 @@ python -m unittest tools/test_migrate_legacy.py
 
 ## 当前边界
 
-这是独立后端的本地/自托管实现基线：已提供 provider registry 管理、官方/可信 Yggdrasil challenge 验证、外观 outbox 与 WebSocket 恢复接口，以及只读迁移盘点工具。仓库现在另有 `cloudflare/` 官方部署原型，验证 Worker + D1 + R2 + Durable Object 的边界；它仍不宣称完整管理 GUI 或迁移导入已经完成。协议模型与数据库边界必须由两种部署复用。
+这是独立后端的本地/自托管实现基线：已提供 provider registry 管理、官方/可信 Yggdrasil challenge 验证、外观 outbox 与 WebSocket 恢复接口，以及迁移盘点/导入工具。仓库另有 `cloudflare/` 官方部署适配器，使用 Worker + D1 + R2 + Durable Object；其当前能力和仍未通过的生产门禁见对应 README。协议模型与数据权限边界必须由两种部署复用。
 
-Cloudflare 原型的配置、迁移、secret 和部署命令见 [`cloudflare/README.md`](cloudflare/README.md)。原型明确保留 bootstrap bearer 和有界缓冲上传限制，不能直接当作正式公共 Cloud；正式上线前必须接入完整账户/身份/ACL、上传 lease/operation 和后台校验流水线。
+Cloudflare 官方实例的配置、迁移、secret 和部署命令见 [`cloudflare/README.md`](cloudflare/README.md)。当前 Worker 已有账户/session、scope/target/ACL、外观与动画 CAS、资产目录/上传下载/可见性和离线审批等 API，并已部署到 `workers.dev`。但它仍使用管理员 bootstrap bearer 开通账户；官方/Yggdrasil 游戏身份 provider 尚未配置，实时事件恢复/lease/撤权、多客户端实测、生产告警和自定义域名也未完成验收。因此当前部署可用于受控测试，不应宣称已达到完整生产发布状态。
 
 ## 跨平台交付
 
