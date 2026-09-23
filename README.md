@@ -89,7 +89,10 @@ SPM_CLOUD_ORIGIN=https://cloud.example.com
 SPM_CLOUD_ACCESS_TOKEN=replace-with-a-long-random-bootstrap-token
 SPM_CLOUD_BOOTSTRAP_ACCOUNT=account_local
 SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH=$argon2id$v=19$m=65536,t=3,p=4$...
+SPM_CLOUD_ALLOW_SELF_REGISTRATION=false
 ```
+
+By default, `POST /v1/accounts` is restricted to the bootstrap bearer. To let players create their own accounts on a community instance, set `SPM_CLOUD_ALLOW_SELF_REGISTRATION=true` once in the service environment (or the matching `.env` used by Docker Compose), then restart the service. Registration still grants no game-identity verification, scope membership, target ownership, or asset ACL; those remain separate authorization steps. Keep the bootstrap bearer private.
 
 启动、升级和备份：
 

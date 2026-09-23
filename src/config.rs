@@ -12,6 +12,7 @@ pub struct CloudConfig {
     pub access_token: Option<String>,
     pub bootstrap_account_id: String,
     pub bootstrap_password_hash: Option<String>,
+    pub allow_self_registration: bool,
     pub max_asset_bytes: u64,
     pub max_message_bytes: usize,
 }
@@ -44,6 +45,12 @@ impl CloudConfig {
         let bootstrap_password_hash = env::var("SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH")
             .ok()
             .filter(|v| !v.is_empty());
+        let allow_self_registration = env::var("SPM_CLOUD_ALLOW_SELF_REGISTRATION")
+            .unwrap_or_else(|_| "false".to_owned())
+            .parse::<bool>()
+            .map_err(|_| {
+                CloudError::configuration("SPM_CLOUD_ALLOW_SELF_REGISTRATION must be true or false")
+            })?;
         let max_asset_bytes = env::var("SPM_CLOUD_MAX_ASSET_BYTES")
             .ok()
             .map(|value| {
@@ -81,6 +88,7 @@ impl CloudConfig {
             access_token,
             bootstrap_account_id,
             bootstrap_password_hash,
+            allow_self_registration,
             max_asset_bytes,
             max_message_bytes,
         })

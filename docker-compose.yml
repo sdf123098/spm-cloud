@@ -9,6 +9,7 @@ services:
       SPM_CLOUD_ACCESS_TOKEN: ${SPM_CLOUD_ACCESS_TOKEN:?set SPM_CLOUD_ACCESS_TOKEN}
       SPM_CLOUD_BOOTSTRAP_ACCOUNT: ${SPM_CLOUD_BOOTSTRAP_ACCOUNT:-account_local}
       SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH: ${SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH:?set an Argon2id hash}
+      SPM_CLOUD_ALLOW_SELF_REGISTRATION: ${SPM_CLOUD_ALLOW_SELF_REGISTRATION:-false}
     volumes:
       - spm-cloud-data:/var/lib/spm-cloud/data
       - spm-cloud-objects:/var/lib/spm-cloud/objects

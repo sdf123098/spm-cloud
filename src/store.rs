@@ -2331,6 +2331,7 @@ mod tests {
             access_token: Some("secret".into()),
             bootstrap_account_id: "account_local".into(),
             bootstrap_password_hash: None,
+            allow_self_registration: false,
             max_asset_bytes: 128 * 1024 * 1024,
             max_message_bytes: 64 * 1024,
         };
@@ -2725,6 +2726,7 @@ mod tests {
             access_token: Some("secret".into()),
             bootstrap_account_id: "account_local".into(),
             bootstrap_password_hash: None,
+            allow_self_registration: false,
             max_asset_bytes: 128 * 1024 * 1024,
             max_message_bytes: 64 * 1024,
         };

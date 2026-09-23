@@ -300,7 +300,7 @@ async fn create_account(
     headers: HeaderMap,
     Json(input): Json<CreateAccount>,
 ) -> Result<(StatusCode, Json<AccountSummary>), CloudError> {
-    authenticate(&state, &headers)?;
+    authorize_account_registration(&state, &headers)?;
     Ok((
         StatusCode::CREATED,
         Json(
@@ -309,6 +309,18 @@ async fn create_account(
                 .create_account(&input.account_id, &input.password)?,
         ),
     ))
+}
+
+fn authorize_account_registration(state: &AppState, headers: &HeaderMap) -> Result<(), CloudError> {
+    if state.config.allow_self_registration {
+        return Ok(());
+    }
+    let account = authenticate(state, headers)?;
+    if account == state.config.bootstrap_account_id {
+        Ok(())
+    } else {
+        Err(CloudError::AccessDenied)
+    }
 }
 
 async fn login(
@@ -928,6 +940,77 @@ pub fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<String, Clo
         }
     }
     state.store.authenticate_access_token(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::CloudStore;
+    use tempfile::TempDir;
+
+    fn test_state(allow_self_registration: bool) -> (AppState, TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Arc::new(CloudConfig {
+            instance_id: "registration-test".into(),
+            origin: "https://localhost".into(),
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            database_path: directory.path().join("cloud.db"),
+            object_dir: directory.path().join("objects"),
+            access_token: Some("bootstrap-secret".into()),
+            bootstrap_account_id: "account_local".into(),
+            bootstrap_password_hash: None,
+            allow_self_registration,
+            max_asset_bytes: 128 * 1024 * 1024,
+            max_message_bytes: 64 * 1024,
+        });
+        let store = CloudStore::open(&config).unwrap();
+        let (events, _) = broadcast::channel(8);
+        (
+            AppState {
+                config,
+                store,
+                events,
+            },
+            directory,
+        )
+    }
+
+    fn registration_input() -> CreateAccount {
+        CreateAccount {
+            account_id: "player_one".into(),
+            password: "test-password-123".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn self_registration_requires_opt_in_but_bootstrap_creation_still_works() {
+        let (disabled, _disabled_directory) = test_state(false);
+        let denied = create_account(
+            State(disabled.clone()),
+            HeaderMap::new(),
+            Json(registration_input()),
+        )
+        .await;
+        assert!(matches!(denied, Err(CloudError::Unauthenticated)));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer bootstrap-secret"),
+        );
+        let admin_created = create_account(State(disabled), headers, Json(registration_input()))
+            .await
+            .unwrap();
+        assert_eq!(admin_created.0, StatusCode::CREATED);
+
+        let (enabled, _enabled_directory) = test_state(true);
+        let public_created =
+            create_account(State(enabled), HeaderMap::new(), Json(registration_input()))
+                .await
+                .unwrap();
+        assert_eq!(public_created.0, StatusCode::CREATED);
+        assert_eq!(public_created.1.account_id, "player_one");
+    }
 }
 
 fn bearer_token(headers: &HeaderMap) -> Result<&str, CloudError> {
