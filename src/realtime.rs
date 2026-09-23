@@ -18,7 +18,7 @@ use crate::{
         HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, MAX_MESSAGE_BYTES, PROTOCOL_V1,
         generated::{
             AppearanceState, Envelope, Error as ProtoError, Heartbeat, HeartbeatAck, Hello,
-            HelloAck, JoinScope, TargetEntry, TargetSnapshot,
+            HelloAck, JoinScope, LeaveScope, TargetEntry, TargetSnapshot,
         },
     },
 };
@@ -64,6 +64,7 @@ async fn serve(socket: WebSocket, state: AppState, account_id: String) {
                     "Hello" => handle_hello(&mut sender, &state, &envelope).await.map(|_| None),
                     "Heartbeat" => handle_heartbeat(&mut sender, &envelope).await.map(|_| None),
                     "JoinScope" => handle_join_scope(&mut sender, &state, &account_id, &envelope).await.map(Some),
+                    "LeaveScope" => handle_leave_scope(&envelope, &mut joined_scope).map(|_| None),
                     _ => send_error(&mut sender, &envelope.request_id, "MALFORMED_MESSAGE", false).await.map(|_| None),
                 };
                 if let Ok(scope) = join_result { if scope.is_some() { joined_scope = scope; } }
@@ -82,6 +83,24 @@ async fn serve(socket: WebSocket, state: AppState, account_id: String) {
                 }
             }
         }
+    }
+}
+
+fn handle_leave_scope(envelope: &Envelope, joined_scope: &mut Option<String>) -> Result<(), ()> {
+    let leave = LeaveScope::decode(envelope.payload.as_ref()).map_err(|_| ())?;
+    if leave.scope_id.is_empty() || leave.scope_id != envelope.scope_id {
+        return Err(());
+    }
+    clear_joined_scope(joined_scope, &leave.scope_id);
+    Ok(())
+}
+
+fn clear_joined_scope(joined_scope: &mut Option<String>, requested_scope: &str) -> bool {
+    if joined_scope.as_deref() == Some(requested_scope) {
+        *joined_scope = None;
+        true
+    } else {
+        false
     }
 }
 
@@ -245,4 +264,18 @@ async fn send_envelope(socket: &mut SocketSink, envelope: Envelope) -> Result<()
         .send(Message::Binary(bytes.into()))
         .await
         .map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clear_joined_scope;
+
+    #[test]
+    fn leave_scope_only_clears_the_matching_scope() {
+        let mut joined = Some("scope-a".to_owned());
+        assert!(!clear_joined_scope(&mut joined, "scope-b"));
+        assert_eq!(joined.as_deref(), Some("scope-a"));
+        assert!(clear_joined_scope(&mut joined, "scope-a"));
+        assert_eq!(joined, None);
+    }
 }
