@@ -54,7 +54,7 @@ export default {
         const id = env.SCOPE_ROOMS.idFromName(scopeId);
         return env.SCOPE_ROOMS.get(id).fetch(request);
       }
-      if (url.pathname === "/v1/assets" && request.method === "GET") return listAssets(env, accountId);
+      if (url.pathname === "/v1/assets" && request.method === "GET") return listAssets(env, accountId, url);
       if (url.pathname === "/v1/assets" && request.method === "POST") return uploadAsset(request, env, accountId);
       const assetAcl = url.pathname.match(/^\/v1\/assets\/([^/]+)\/acl$/);
       if (assetAcl && request.method === "GET") return listAssetAcl(env, accountId, assetAcl[1]);
@@ -602,14 +602,58 @@ function fromHex(value: string): Uint8Array {
   return result;
 }
 
-async function listAssets(env: Env, accountId: string): Promise<Response> {
+async function listAssets(env: Env, accountId: string, url: URL): Promise<Response> {
+  const scope = (url.searchParams.get("scope") ?? "accessible").trim().toLowerCase();
+  if (!["accessible", "mine", "shared", "public"].includes(scope)) {
+    return json({ code: "INVALID_METADATA", message: "asset scope is invalid" }, 400);
+  }
+  const query = (url.searchParams.get("q") ?? "").trim().slice(0, 128);
+  if (scope === "public" && query.length === 0) {
+    return json({ code: "SEARCH_REQUIRED", message: "public asset discovery requires a search query" }, 400);
+  }
+  const limitText = url.searchParams.get("limit") ?? "40";
+  const parsedLimit = Number.parseInt(limitText, 10);
+  const limit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(80, parsedLimit)) : 40;
+  const after = (url.searchParams.get("after") ?? "").trim().slice(0, 64);
+
+  const conditions: string[] = ["r.revision = x.current_revision"];
+  const values: unknown[] = [];
+  if (scope === "mine") {
+    conditions.push("x.owner_account_id = ?");
+    values.push(accountId);
+  } else if (scope === "shared") {
+    conditions.push("a.account_id = ? AND a.permission IN ('use', 'discover', 'render_read') AND x.owner_account_id <> ?");
+    values.push(accountId, accountId);
+  } else if (scope === "public") {
+    conditions.push("x.visibility = 'PUBLIC'");
+  } else {
+    conditions.push("(x.visibility = 'PUBLIC' OR x.owner_account_id = ? OR (a.account_id = ? AND a.permission IN ('manage', 'use', 'discover', 'render_read')))");
+    values.push(accountId, accountId);
+  }
+  if (query) {
+    conditions.push("(lower(r.asset_id) LIKE ? OR lower(r.name) LIKE ? OR lower(r.format) LIKE ?)");
+    const needle = `%${query.toLowerCase()}%`;
+    values.push(needle, needle, needle);
+  }
+  if (after) {
+    conditions.push("x.asset_id > ?");
+    values.push(after);
+  }
+  values.push(limit + 1);
   const result = await env.DB.prepare(
-    `SELECT r.asset_id, r.revision, r.name, r.format, r.raw_sha256, r.byte_length
-     FROM asset_revisions r JOIN asset_acl a ON a.asset_id = r.asset_id
-     WHERE a.account_id = ?1 AND a.permission IN ('manage', 'use', 'discover')
-     ORDER BY r.asset_id, r.revision`,
-  ).bind(accountId).all();
-  return json(result.results, 200);
+    `SELECT x.asset_id, x.visibility, r.revision, r.name, r.format, r.raw_sha256, r.byte_length
+     FROM assets x
+     JOIN asset_revisions r ON r.asset_id = x.asset_id
+     LEFT JOIN asset_acl a ON a.asset_id = x.asset_id AND a.account_id = ?
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY x.asset_id ASC
+     LIMIT ?`,
+  ).bind(accountId, ...values).all();
+  const rows = result.results as Array<Record<string, unknown>>;
+  const hasMore = rows.length > limit;
+  const entries = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor = hasMore ? String(entries[entries.length - 1]?.asset_id ?? "") : null;
+  return json({ entries, next_cursor: nextCursor, has_more: hasMore, scope, query }, 200);
 }
 
 async function uploadAsset(request: Request, env: Env, accountId: string): Promise<Response> {
@@ -618,6 +662,10 @@ async function uploadAsset(request: Request, env: Env, accountId: string): Promi
   const name = request.headers.get("x-asset-name") || assetId;
   const format = request.headers.get("x-asset-format") || "application/octet-stream";
   const expectedSha = request.headers.get("x-asset-sha256");
+  const requestedVisibility = (request.headers.get("x-asset-visibility") || "").trim().toUpperCase();
+  if (requestedVisibility && !["PRIVATE", "PUBLIC"].includes(requestedVisibility)) {
+    return json({ code: "INVALID_METADATA", message: "asset visibility is invalid" }, 400);
+  }
   const body = await request.arrayBuffer();
   if (body.byteLength === 0 || body.byteLength > 128 * 1024 * 1024) {
     return json({ code: "ASSET_TOO_LARGE", message: "asset size is outside the prototype limit" }, 413);
@@ -636,11 +684,15 @@ async function uploadAsset(request: Request, env: Env, accountId: string): Promi
   }
 
   await env.ASSETS.put(`assets/${sha}`, body, { httpMetadata: { contentType: format }, customMetadata: { sha256: sha } });
-  const current = await env.DB.prepare("SELECT current_revision FROM assets WHERE asset_id = ?1").bind(assetId).first<{ current_revision: number }>();
+  const current = await env.DB.prepare("SELECT owner_account_id, current_revision, visibility FROM assets WHERE asset_id = ?1").bind(assetId).first<{ owner_account_id: string; current_revision: number; visibility: string }>();
+  if (current && current.owner_account_id !== accountId) {
+    return json({ code: "ASSET_ACCESS_DENIED", message: "only the asset owner may upload a new revision" }, 403);
+  }
+  const visibility = requestedVisibility || current?.visibility || "PRIVATE";
   const revision = (current?.current_revision ?? 0) + 1;
-  const summary = { asset_id: assetId, revision, name, format, raw_sha256: sha, byte_length: body.byteLength };
+  const summary = { asset_id: assetId, revision, name, format, raw_sha256: sha, byte_length: body.byteLength, visibility };
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO assets(asset_id, owner_account_id, current_revision) VALUES (?1, ?2, ?3) ON CONFLICT(asset_id) DO UPDATE SET current_revision = excluded.current_revision").bind(assetId, accountId, revision),
+    env.DB.prepare("INSERT INTO assets(asset_id, owner_account_id, current_revision, visibility) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(asset_id) DO UPDATE SET current_revision = excluded.current_revision, visibility = excluded.visibility").bind(assetId, accountId, revision, visibility),
     env.DB.prepare("INSERT INTO asset_revisions(asset_id, revision, name, format, raw_sha256, byte_length, object_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)").bind(assetId, revision, name, format, sha, body.byteLength, `assets/${sha}`),
     env.DB.prepare("INSERT INTO asset_acl(asset_id, account_id, permission) VALUES (?1, ?2, 'manage') ON CONFLICT(asset_id, account_id) DO UPDATE SET permission = 'manage'").bind(assetId, accountId),
     env.DB.prepare("INSERT INTO catalog_events(tenant_id, asset_id, revision) VALUES (?1, ?2, ?3)").bind(accountId, assetId, revision),
@@ -651,8 +703,8 @@ async function uploadAsset(request: Request, env: Env, accountId: string): Promi
 
 async function downloadAsset(request: Request, env: Env, accountId: string, assetId: string, revision: number): Promise<Response> {
   const acl = await env.DB.prepare("SELECT permission FROM asset_acl WHERE asset_id = ?1 AND account_id = ?2").bind(assetId, accountId).first<{ permission: string }>();
-  if (!acl || !["manage", "use", "render_read", "discover"].includes(acl.permission)) return json({ code: "ASSET_ACCESS_DENIED", message: "asset access denied" }, 403);
-  const row = await env.DB.prepare("SELECT object_key, raw_sha256, byte_length, format FROM asset_revisions WHERE asset_id = ?1 AND revision = ?2").bind(assetId, revision).first<{ object_key: string; raw_sha256: string; byte_length: number; format: string }>();
+  const row = await env.DB.prepare("SELECT r.object_key, r.raw_sha256, r.byte_length, r.format, a.visibility FROM asset_revisions r JOIN assets a ON a.asset_id = r.asset_id WHERE r.asset_id = ?1 AND r.revision = ?2").bind(assetId, revision).first<{ object_key: string; raw_sha256: string; byte_length: number; format: string; visibility: string }>();
+  if ((!acl || !["manage", "use", "render_read", "discover"].includes(acl.permission)) && row?.visibility !== "PUBLIC") return json({ code: "ASSET_ACCESS_DENIED", message: "asset access denied" }, 403);
   if (!row) return json({ code: "NOT_FOUND", message: "asset revision not found" }, 404);
   const object = await env.ASSETS.get(row.object_key);
   if (!object) return json({ code: "NOT_FOUND", message: "asset object not found" }, 404);
@@ -692,7 +744,7 @@ function json(value: unknown, status: number): Response {
 }
 
 function corsHeaders(): Record<string, string> {
-  return { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type,idempotency-key,x-asset-id,x-asset-name,x-asset-format,x-asset-sha256", "access-control-allow-methods": "GET,POST,PUT,OPTIONS" };
+  return { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type,idempotency-key,x-asset-id,x-asset-name,x-asset-format,x-asset-sha256,x-asset-visibility", "access-control-allow-methods": "GET,POST,PUT,OPTIONS" };
 }
 
 function authorized(request: Request, expected: string): boolean {
