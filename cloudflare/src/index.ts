@@ -56,6 +56,9 @@ export default {
       }
       if (url.pathname === "/v1/assets" && request.method === "GET") return listAssets(env, accountId);
       if (url.pathname === "/v1/assets" && request.method === "POST") return uploadAsset(request, env, accountId);
+      const assetAcl = url.pathname.match(/^\/v1\/assets\/([^/]+)\/acl$/);
+      if (assetAcl && request.method === "GET") return listAssetAcl(env, accountId, assetAcl[1]);
+      if (assetAcl && request.method === "PUT") return setAssetAcl(request, env, accountId, assetAcl[1]);
       const contentMatch = url.pathname.match(/^\/v1\/assets\/([^/]+)\/revisions\/(\d+)\/content$/);
       if (contentMatch && request.method === "GET") return downloadAsset(request, env, accountId, contentMatch[1], Number(contentMatch[2]));
       if (url.pathname === "/v1/identity-providers" && request.method === "GET") return json([], 200);
@@ -661,6 +664,27 @@ async function downloadAsset(request: Request, env: Env, accountId: string, asse
   return new Response(object.body, { status: 200, headers });
 }
 
+async function listAssetAcl(env: Env, accountId: string, assetId: string): Promise<Response> {
+  const owner = await env.DB.prepare("SELECT account_id FROM asset_acl WHERE asset_id = ?1 AND account_id = ?2 AND permission = 'manage'").bind(assetId, accountId).first();
+  if (!owner) return json({ code: "ASSET_ACCESS_DENIED", message: "asset management access denied" }, 403);
+  const result = await env.DB.prepare("SELECT account_id, permission FROM asset_acl WHERE asset_id = ?1 ORDER BY account_id").bind(assetId).all();
+  return json(result.results, 200);
+}
+
+async function setAssetAcl(request: Request, env: Env, accountId: string, assetId: string): Promise<Response> {
+  const owner = await env.DB.prepare("SELECT account_id FROM asset_acl WHERE asset_id = ?1 AND account_id = ?2 AND permission = 'manage'").bind(assetId, accountId).first();
+  if (!owner) return json({ code: "ASSET_ACCESS_DENIED", message: "asset management access denied" }, 403);
+  const body = await readJson(request);
+  const targetAccount = slug(body.account_id, "account_id");
+  const permission = text(body.permission, "permission", 1, 32).toLowerCase();
+  if (!["discover", "use", "render_read", "manage"].includes(permission)) return json({ code: "INVALID_METADATA", message: "asset permission is invalid" }, 400);
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR IGNORE INTO accounts(account_id) VALUES (?1)").bind(targetAccount),
+    env.DB.prepare("INSERT INTO asset_acl(asset_id, account_id, permission) VALUES (?1, ?2, ?3) ON CONFLICT(asset_id, account_id) DO UPDATE SET permission = excluded.permission").bind(assetId, targetAccount, permission),
+  ]);
+  return json({ account_id: targetAccount, permission }, 200);
+}
+
 function json(value: unknown, status: number): Response {
   const headers = new Headers(JSON_HEADERS);
   Object.entries(corsHeaders()).forEach(([key, value]) => headers.set(key, value));
@@ -668,7 +692,7 @@ function json(value: unknown, status: number): Response {
 }
 
 function corsHeaders(): Record<string, string> {
-  return { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type,idempotency-key,x-asset-id,x-asset-name,x-asset-format,x-asset-sha256", "access-control-allow-methods": "GET,POST,OPTIONS" };
+  return { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type,idempotency-key,x-asset-id,x-asset-name,x-asset-format,x-asset-sha256", "access-control-allow-methods": "GET,POST,PUT,OPTIONS" };
 }
 
 function authorized(request: Request, expected: string): boolean {
