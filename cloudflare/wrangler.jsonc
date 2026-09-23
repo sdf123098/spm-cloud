@@ -9,13 +9,13 @@
   },
   "vars": {
     "SPM_CLOUD_INSTANCE_ID": "official",
-    "SPM_CLOUD_ORIGIN": "https://cloud.example.com"
+    "SPM_CLOUD_ORIGIN": "https://spm-cloud-official.robinson171.workers.dev"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "spm-cloud",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "aebc625f-f2e1-4d2d-af89-bfa519ce78de",
       "migrations_dir": "migrations"
     }
   ],
