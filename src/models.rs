@@ -247,6 +247,27 @@ pub struct AppearanceState {
     pub disabled: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnimationUpdate {
+    pub request_id: String,
+    pub expected_revision: u64,
+    pub channel: String,
+    pub action: String,
+    pub animation_key: String,
+    pub lease_ttl_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnimationState {
+    pub target_id: String,
+    pub revision: u64,
+    pub channel: String,
+    pub action: String,
+    pub animation_key: String,
+    pub expires_at_unix_ms: i64,
+    pub lease_id: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateTarget {
     pub scope_id: String,

@@ -36,12 +36,16 @@ cargo run --release
 
 当前 `SPM_CLOUD_ACCESS_TOKEN` 是本地/受控部署的 bootstrap bearer；它不是最终的 Cloud 登录协议。游戏身份写入后默认是 `PENDING_VERIFICATION`，未完成 Session Service challenge 不能获得 Offline binding。
 
-### Windows GNU 本地开发
+### Windows 本地 GNU 开发（仅开发机示例）
 
-仓库自带 `.cargo/config.toml`，只在本项目内选择 `x86_64-pc-windows-gnu`，并将 linker/ar 指向 MSYS2 UCRT64；不会修改全局 Cargo 配置，也不依赖 MSVC 或 `link.exe`。准备 Rust GNU 工具链后，在当前 PowerShell 会话加入 GCC 路径：
+仓库不携带任何开发机路径或 linker 配置。若本机选择 MSYS2 UCRT64，可仅在当前 PowerShell 会话设置工具链：
 
 ```powershell
-$env:Path = "C:\Users\$env:USERNAME\.cargo\bin;C:\msys64\ucrt64\bin;$env:Path"
+$env:Path = "C:\msys64\ucrt64\bin;C:\msys64\usr\bin;$env:Path"
+$env:CC_x86_64_pc_windows_gnu = "C:\msys64\ucrt64\bin\gcc.exe"
+$env:CXX_x86_64_pc_windows_gnu = "C:\msys64\ucrt64\bin\g++.exe"
+$env:AR_x86_64_pc_windows_gnu = "C:\msys64\ucrt64\bin\ar.exe"
+$env:RANLIB_x86_64_pc_windows_gnu = "C:\msys64\ucrt64\bin\ranlib.exe"
 rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
 rustup target add --toolchain stable-x86_64-pc-windows-gnu x86_64-pc-windows-gnu
 rustup run stable-x86_64-pc-windows-gnu cargo check --target x86_64-pc-windows-gnu
@@ -49,7 +53,7 @@ rustup run stable-x86_64-pc-windows-gnu cargo test --target x86_64-pc-windows-gn
 rustup run stable-x86_64-pc-windows-gnu cargo build --target x86_64-pc-windows-gnu --release
 ```
 
-如果 GNU 工具链已安装，可省略安装命令。Linux/macOS 仍使用同一 Cargo 项目和各自原生 target；Windows GNU 配置只对这个仓库生效。
+如果 GNU 工具链已安装，可省略安装命令。上述 MSYS2 路径只属于开发机当前 shell，不得写入项目配置、发布脚本或发布产物。Linux/macOS 和其他 Windows 构建使用各自原生 target/CI 工具链。
 
 健康检查：
 

@@ -23,12 +23,12 @@ use crate::{
     config::CloudConfig,
     error::CloudError,
     models::{
-        AccountSummary, AclUpdate, AppearanceUpdate, AssetAclUpdate, ClaimCodeRequest,
-        CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget,
-        IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, InstanceResponse,
-        Limits, LoginRequest, ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest,
-        RedeemClaimCode, RegisterEntityBinding, RevokeClaimCode, ScopeAclUpdate,
-        VerifyIdentityChallenge,
+        AccountSummary, AclUpdate, AnimationUpdate, AppearanceUpdate, AssetAclUpdate,
+        ClaimCodeRequest, CreateAccount, CreateIdentity, CreateIdentityChallenge, CreateScope,
+        CreateTarget, IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary,
+        InstanceResponse, Limits, LoginRequest, ObserveEntityBinding, OfflineBindingApproval,
+        OfflineBindingRequest, RedeemClaimCode, RegisterEntityBinding, RevokeClaimCode,
+        ScopeAclUpdate, VerifyIdentityChallenge,
     },
     protocol::{HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PROTOCOL_V1},
     store::CloudStore,
@@ -42,10 +42,25 @@ pub struct AppState {
 }
 
 #[derive(Clone)]
-pub struct CloudEvent {
-    pub event_id: String,
-    pub scope_id: String,
-    pub appearance: crate::models::AppearanceState,
+pub enum CloudEvent {
+    Appearance {
+        event_id: String,
+        scope_id: String,
+        appearance: crate::models::AppearanceState,
+    },
+    Animation {
+        event_id: String,
+        scope_id: String,
+        animation: crate::models::AnimationState,
+    },
+}
+
+impl CloudEvent {
+    pub fn scope_id(&self) -> &str {
+        match self {
+            Self::Appearance { scope_id, .. } | Self::Animation { scope_id, .. } => scope_id,
+        }
+    }
 }
 
 impl AppState {
@@ -134,12 +149,25 @@ pub fn router(state: AppState) -> Router {
             "/v1/targets/{target_id}/appearance",
             get(get_appearance).put(update_appearance),
         )
+        .route(
+            "/v1/targets/{target_id}/animation",
+            get(get_animation).put(update_animation),
+        )
         .route("/v1/targets/{target_id}/acl", get(list_acl).put(set_acl))
         .with_state(state)
 }
 
-async fn health() -> &'static str {
-    "ok"
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "instance_id": state.config.instance_id,
+        "protocol": PROTOCOL_V1,
+        "storage": "sqlite-wal-cas",
+        "limits": {
+            "max_asset_bytes": state.config.max_asset_bytes,
+            "max_message_bytes": state.config.max_message_bytes
+        }
+    }))
 }
 
 async fn instance(State(state): State<AppState>) -> Json<InstanceResponse> {
@@ -568,12 +596,37 @@ async fn update_appearance(
     let mutation = state
         .store
         .update_appearance(&account, &target_id, &input)?;
-    let _ = state.events.send(CloudEvent {
+    let _ = state.events.send(CloudEvent::Appearance {
         event_id: mutation.event_id,
         scope_id: mutation.scope_id,
         appearance: mutation.appearance.clone(),
     });
     Ok(Json(mutation.appearance))
+}
+
+async fn get_animation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_id): Path<String>,
+) -> Result<Json<crate::models::AnimationState>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.get_animation(&account, &target_id)?))
+}
+
+async fn update_animation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(target_id): Path<String>,
+    Json(input): Json<AnimationUpdate>,
+) -> Result<Json<crate::models::AnimationState>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    let mutation = state.store.update_animation(&account, &target_id, &input)?;
+    let _ = state.events.send(CloudEvent::Animation {
+        event_id: mutation.event_id,
+        scope_id: mutation.scope_id,
+        animation: mutation.animation.clone(),
+    });
+    Ok(Json(mutation.animation))
 }
 
 fn is_allowed_provider_address(address: std::net::IpAddr) -> bool {

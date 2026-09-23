@@ -17,9 +17,9 @@ use crate::{
     error::CloudError,
     identity::GameIdentity,
     models::{
-        AccountSummary, AclEntry, AclUpdate, AppearanceState, AssetAclEntry, AssetAclUpdate,
-        AssetSummary, AuditEntry, ClaimCodeRequest, ClaimCodeResponse, CreateIdentity,
-        CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary,
+        AccountSummary, AclEntry, AclUpdate, AnimationState, AppearanceState, AssetAclEntry,
+        AssetAclUpdate, AssetSummary, AuditEntry, ClaimCodeRequest, ClaimCodeResponse,
+        CreateIdentity, CreateIdentityChallenge, CreateScope, CreateTarget, EntityBindingSummary,
         IdentityChallengeResponse, IdentityProviderUpdate, IdentitySummary, LoginRequest,
         ObserveEntityBinding, OfflineBindingApproval, OfflineBindingRequest, RedeemClaimCode,
         RegisterEntityBinding, RevokeClaimCode, ScopeAclEntry, ScopeAclUpdate, ScopeSummary,
@@ -56,6 +56,13 @@ type ClaimCodeRecord = (String, String, String, String, i64, i64, i64, i64);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppearanceMutation {
     pub appearance: AppearanceState,
+    pub event_id: String,
+    pub scope_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnimationMutation {
+    pub animation: AnimationState,
     pub event_id: String,
     pub scope_id: String,
 }
@@ -207,6 +214,16 @@ impl CloudStore {
                  texture_id TEXT,
                  scale REAL,
                  disabled INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS animation_states (
+                 target_id TEXT PRIMARY KEY REFERENCES targets(target_id),
+                 revision INTEGER NOT NULL DEFAULT 0,
+                 owner_account_id TEXT NOT NULL REFERENCES accounts(account_id),
+                 lease_id TEXT NOT NULL,
+                 expires_at_unix_ms INTEGER NOT NULL,
+                 channel TEXT NOT NULL,
+                 action TEXT NOT NULL,
+                 animation_key TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS assets (
                  asset_id TEXT PRIMARY KEY,
@@ -1224,6 +1241,7 @@ impl CloudStore {
             params![id, account_id],
         )?;
         conn.execute("INSERT INTO appearances(target_id) VALUES (?1)", [&id])?;
+        conn.execute("INSERT INTO animation_states(target_id, owner_account_id, lease_id, expires_at_unix_ms, channel, action, animation_key) VALUES (?1, ?2, ?3, 0, '', 'IDLE', '')", params![id, account_id, format!("lease_{}", uuid::Uuid::new_v4().simple())])?;
         Ok(
             serde_json::json!({"target_id": id, "scope_id": input.scope_id, "kind": input.kind.clone(), "display_name": input.display_name, "revision": 0}),
         )
@@ -1568,6 +1586,153 @@ impl CloudStore {
         })?;
         tx.execute("INSERT INTO idempotency(account_id, request_id, request_hash, response_json) VALUES (?1, ?2, ?3, ?4)", params![account_id, update.request_id, request_hash, response_json])?;
         tx.execute("INSERT INTO outbox_events(event_id, tenant_id, scope_id, target_id, kind, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, 'APPEARANCE_UPDATED', ?5, datetime('now'))", params![mutation.event_id, account_id, mutation.scope_id, target_id, appearance_json])?;
+        tx.commit()?;
+        Ok(mutation)
+    }
+
+    pub fn get_animation(
+        &self,
+        account_id: &str,
+        target_id: &str,
+    ) -> Result<AnimationState, CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if target_role(&conn, target_id, account_id)?.is_none() {
+            return Err(CloudError::AccessDenied);
+        }
+        conn.query_row(
+            "SELECT target_id, revision, channel, action, animation_key, expires_at_unix_ms, lease_id FROM animation_states WHERE target_id = ?1",
+            [target_id],
+            |row| {
+                Ok(AnimationState {
+                    target_id: row.get(0)?,
+                    revision: row.get::<_, i64>(1)? as u64,
+                    channel: row.get(2)?,
+                    action: row.get(3)?,
+                    animation_key: row.get(4)?,
+                    expires_at_unix_ms: row.get(5)?,
+                    lease_id: row.get(6)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or(CloudError::NotFound)
+    }
+
+    pub fn update_animation(
+        &self,
+        account_id: &str,
+        target_id: &str,
+        update: &crate::models::AnimationUpdate,
+    ) -> Result<AnimationMutation, CloudError> {
+        if update.request_id.is_empty() || update.request_id.len() > 128 {
+            return Err(CloudError::invalid_metadata("invalid request_id"));
+        }
+        if update.channel.is_empty()
+            || update.channel.len() > 64
+            || update.action.is_empty()
+            || update.action.len() > 64
+            || update.animation_key.len() > 256
+        {
+            return Err(CloudError::invalid_metadata("invalid animation metadata"));
+        }
+        if !(250..=60_000).contains(&update.lease_ttl_ms) {
+            return Err(CloudError::invalid_metadata(
+                "invalid animation lease_ttl_ms",
+            ));
+        }
+        let mut conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let tx = conn.transaction()?;
+        let request_hash = hex::encode(sha2::Sha256::digest(
+            serde_json::to_vec(&(target_id, update))
+                .map_err(|_| CloudError::invalid_metadata("invalid animation payload"))?,
+        ));
+        if let Some((existing_hash, response_json)) = tx
+            .query_row(
+                "SELECT request_hash, response_json FROM idempotency WHERE account_id = ?1 AND request_id = ?2",
+                params![account_id, update.request_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            if existing_hash != request_hash {
+                return Err(CloudError::IdempotencyConflict);
+            }
+            return serde_json::from_str(&response_json).map_err(|_| {
+                CloudError::Internal(anyhow::anyhow!("stored animation idempotency response is invalid"))
+            });
+        }
+        let role = target_role(&tx, target_id, account_id)?;
+        if !matches!(role.as_deref(), Some("manage") | Some("edit")) {
+            return Err(CloudError::AccessDenied);
+        }
+        let current: Option<(u64, String, i64)> = tx
+            .query_row(
+                "SELECT revision, owner_account_id, expires_at_unix_ms FROM animation_states WHERE target_id = ?1",
+                [target_id],
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((revision, owner, expires_at)) = &current {
+            if *expires_at > crate::api::now_unix_ms() && owner != account_id {
+                return Err(CloudError::AccessDenied);
+            }
+            if *revision != update.expected_revision {
+                return Err(CloudError::RevisionConflict);
+            }
+        } else if update.expected_revision != 0 {
+            return Err(CloudError::RevisionConflict);
+        }
+        let next_revision = current.map(|(revision, _, _)| revision + 1).unwrap_or(1);
+        let now = crate::api::now_unix_ms();
+        let animation = AnimationState {
+            target_id: target_id.to_owned(),
+            revision: next_revision,
+            channel: update.channel.clone(),
+            action: update.action.clone(),
+            animation_key: update.animation_key.clone(),
+            expires_at_unix_ms: now + update.lease_ttl_ms as i64,
+            lease_id: format!("lease_{}", uuid::Uuid::new_v4().simple()),
+        };
+        tx.execute(
+            "INSERT INTO animation_states(target_id, revision, owner_account_id, lease_id, expires_at_unix_ms, channel, action, animation_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(target_id) DO UPDATE SET revision = excluded.revision, owner_account_id = excluded.owner_account_id, lease_id = excluded.lease_id, expires_at_unix_ms = excluded.expires_at_unix_ms, channel = excluded.channel, action = excluded.action, animation_key = excluded.animation_key",
+            params![target_id, next_revision as i64, account_id, animation.lease_id, animation.expires_at_unix_ms, animation.channel, animation.action, animation.animation_key],
+        )?;
+        let scope_id: String = tx.query_row(
+            "SELECT scope_id FROM targets WHERE target_id = ?1",
+            [target_id],
+            |row| row.get(0),
+        )?;
+        let event_id = format!("event_{}", uuid::Uuid::new_v4().simple());
+        let payload = serde_json::to_string(&animation).map_err(|_| {
+            CloudError::Internal(anyhow::anyhow!("failed to encode animation event"))
+        })?;
+        let mutation = AnimationMutation {
+            animation,
+            event_id,
+            scope_id,
+        };
+        let response_json = serde_json::to_string(&mutation).map_err(|_| {
+            CloudError::Internal(anyhow::anyhow!(
+                "failed to encode animation idempotency response"
+            ))
+        })?;
+        tx.execute("INSERT INTO idempotency(account_id, request_id, request_hash, response_json) VALUES (?1, ?2, ?3, ?4)", params![account_id, update.request_id, request_hash, response_json])?;
+        tx.execute("INSERT INTO outbox_events(event_id, tenant_id, scope_id, target_id, kind, payload_json, created_at) VALUES (?1, ?2, ?3, ?4, 'ANIMATION_UPDATED', ?5, datetime('now'))", params![mutation.event_id, account_id, mutation.scope_id, target_id, payload])?;
+        write_audit(
+            &tx,
+            account_id,
+            "animation.updated",
+            Some(&mutation.scope_id),
+            Some(target_id),
+            None,
+            serde_json::json!({"revision": mutation.animation.revision, "lease_id": mutation.animation.lease_id, "expires_at_unix_ms": mutation.animation.expires_at_unix_ms}),
+        )?;
         tx.commit()?;
         Ok(mutation)
     }
@@ -2546,5 +2711,87 @@ mod tests {
                 .status,
             "EXPIRED"
         );
+    }
+
+    #[test]
+    fn animation_state_is_cas_idempotent_and_expires() {
+        let dir = tempdir().unwrap();
+        let config = CloudConfig {
+            instance_id: "test-animation".into(),
+            origin: "https://localhost".into(),
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            database_path: dir.path().join("test.db"),
+            object_dir: dir.path().join("objects"),
+            access_token: Some("secret".into()),
+            bootstrap_account_id: "account_local".into(),
+            bootstrap_password_hash: None,
+            max_asset_bytes: 128 * 1024 * 1024,
+            max_message_bytes: 64 * 1024,
+        };
+        let store = CloudStore::open(&config).unwrap();
+        store
+            .create_scope(
+                "account_local",
+                &CreateScope {
+                    scope_id: "scope-animation".into(),
+                    name: "Animation Scope".into(),
+                    world_epoch: "epoch-1".into(),
+                    offline_policy: None,
+                },
+            )
+            .unwrap();
+        store
+            .create_target(
+                "account_local",
+                &CreateTarget {
+                    scope_id: "scope-animation".into(),
+                    target_id: Some("target-animation".into()),
+                    kind: TargetKind::Dummy,
+                    display_name: "Animation Target".into(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get_animation("account_local", "target-animation")
+                .unwrap()
+                .revision,
+            0
+        );
+        let update = crate::models::AnimationUpdate {
+            request_id: "animation-request".into(),
+            expected_revision: 0,
+            channel: "body".into(),
+            action: "PLAY".into(),
+            animation_key: "idle".into(),
+            lease_ttl_ms: 1000,
+        };
+        let first = store
+            .update_animation("account_local", "target-animation", &update)
+            .unwrap();
+        assert_eq!(first.animation.revision, 1);
+        assert!(first.animation.expires_at_unix_ms > crate::api::now_unix_ms());
+        assert_eq!(
+            store
+                .update_animation("account_local", "target-animation", &update)
+                .unwrap()
+                .animation
+                .revision,
+            1
+        );
+        let mut conflicting = update.clone();
+        conflicting.action = "STOP".into();
+        assert!(matches!(
+            store.update_animation("account_local", "target-animation", &conflicting),
+            Err(CloudError::IdempotencyConflict)
+        ));
+
+        let mut stale = update.clone();
+        stale.request_id = "animation-stale".into();
+        assert!(matches!(
+            store.update_animation("account_local", "target-animation", &stale),
+            Err(CloudError::RevisionConflict)
+        ));
     }
 }

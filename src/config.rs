@@ -44,6 +44,34 @@ impl CloudConfig {
         let bootstrap_password_hash = env::var("SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH")
             .ok()
             .filter(|v| !v.is_empty());
+        let max_asset_bytes = env::var("SPM_CLOUD_MAX_ASSET_BYTES")
+            .ok()
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| CloudError::configuration("invalid SPM_CLOUD_MAX_ASSET_BYTES"))
+            })
+            .transpose()?
+            .unwrap_or(128 * 1024 * 1024);
+        if !(1..=4 * 1024 * 1024 * 1024).contains(&max_asset_bytes) {
+            return Err(CloudError::configuration(
+                "SPM_CLOUD_MAX_ASSET_BYTES is outside 1..=4GiB",
+            ));
+        }
+        let max_message_bytes = env::var("SPM_CLOUD_MAX_MESSAGE_BYTES")
+            .ok()
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .map_err(|_| CloudError::configuration("invalid SPM_CLOUD_MAX_MESSAGE_BYTES"))
+            })
+            .transpose()?
+            .unwrap_or(64 * 1024);
+        if !(1024..=1024 * 1024).contains(&max_message_bytes) {
+            return Err(CloudError::configuration(
+                "SPM_CLOUD_MAX_MESSAGE_BYTES is outside 1KiB..=1MiB",
+            ));
+        }
         Ok(Self {
             instance_id,
             origin,
@@ -53,8 +81,8 @@ impl CloudConfig {
             access_token,
             bootstrap_account_id,
             bootstrap_password_hash,
-            max_asset_bytes: 128 * 1024 * 1024,
-            max_message_bytes: 64 * 1024,
+            max_asset_bytes,
+            max_message_bytes,
         })
     }
 }

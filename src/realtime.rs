@@ -72,12 +72,12 @@ async fn serve(socket: WebSocket, state: AppState, account_id: String) {
             }
             event = events.recv() => {
                 match event {
-                    Ok(event) if joined_scope.as_deref() == Some(event.scope_id.as_str()) => {
+                    Ok(event) if joined_scope.as_deref() == Some(event.scope_id()) => {
                         if send_appearance_event(&mut sender, &event).await.is_err() { break; }
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        if send_error(&mut sender, "", "CATALOG_SNAPSHOT_REQUIRED", true).await.is_err() { break; }
+                        if send_error(&mut sender, "", "RECOVERY_REQUIRED", true).await.is_err() { break; }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -153,26 +153,52 @@ async fn handle_join_scope(
 }
 
 async fn send_appearance_event(socket: &mut SocketSink, event: &CloudEvent) -> Result<(), ()> {
-    let state = &event.appearance;
-    let payload = AppearanceState {
-        target_id: state.target_id.clone(),
-        revision: state.revision,
-        asset_id: state.asset_id.clone().unwrap_or_default(),
-        asset_revision: state.asset_revision.unwrap_or_default(),
-        raw_sha256: state.raw_sha256.clone().unwrap_or_default(),
-        texture_id: state.texture_id.clone().unwrap_or_default(),
-        scale: state.scale.unwrap_or_default(),
-        disabled: state.disabled,
+    let (kind, payload) = match event {
+        CloudEvent::Appearance {
+            appearance: state, ..
+        } => (
+            "AppearanceState",
+            AppearanceState {
+                target_id: state.target_id.clone(),
+                revision: state.revision,
+                asset_id: state.asset_id.clone().unwrap_or_default(),
+                asset_revision: state.asset_revision.unwrap_or_default(),
+                raw_sha256: state.raw_sha256.clone().unwrap_or_default(),
+                texture_id: state.texture_id.clone().unwrap_or_default(),
+                scale: state.scale.unwrap_or_default(),
+                disabled: state.disabled,
+            }
+            .encode_to_vec(),
+        ),
+        CloudEvent::Animation {
+            animation: state, ..
+        } => (
+            "AnimationState",
+            crate::protocol::generated::AnimationState {
+                target_id: state.target_id.clone(),
+                revision: state.revision,
+                channel: state.channel.clone(),
+                action: state.action.clone(),
+                animation_key: state.animation_key.clone(),
+                expires_at_unix_ms: state.expires_at_unix_ms,
+            }
+            .encode_to_vec(),
+        ),
+    };
+    let event_id = match event {
+        CloudEvent::Appearance { event_id, .. } | CloudEvent::Animation { event_id, .. } => {
+            event_id.clone()
+        }
     };
     send_envelope(
         socket,
         Envelope {
             protocol_version: PROTOCOL_V1.to_owned(),
-            kind: "AppearanceState".to_owned(),
+            kind: kind.to_owned(),
             request_id: String::new(),
-            event_id: event.event_id.clone(),
-            scope_id: event.scope_id.clone(),
-            payload: payload.encode_to_vec().into(),
+            event_id,
+            scope_id: event.scope_id().to_owned(),
+            payload: payload.into(),
         },
     )
     .await
