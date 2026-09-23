@@ -41,9 +41,14 @@ def copy_tree(source: Path, destination: Path) -> int:
 def backup(database: Path, objects: Path, destination: Path) -> dict:
     destination.mkdir(parents=True, exist_ok=True)
     db_backup = destination / "spm-cloud.db"
-    with sqlite3.connect(database) as source:
-        with sqlite3.connect(db_backup) as target:
-            source.backup(target)
+    source = sqlite3.connect(database)
+    target = sqlite3.connect(db_backup)
+    try:
+        source.backup(target)
+        target.commit()
+    finally:
+        target.close()
+        source.close()
     object_backup = destination / "objects"
     files = copy_tree(objects, object_backup)
     manifest = {
