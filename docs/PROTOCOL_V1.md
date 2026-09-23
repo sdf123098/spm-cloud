@@ -19,7 +19,7 @@ yggdrasil:<provider_id>:<uuid>
 offline:<scope_id>:<uuid>
 ```
 
-The same UUID in different providers or scopes is not merged. Offline bindings remain scope-local and are returned as `PENDING_APPROVAL` until an explicit approval workflow is added.
+The same UUID in different providers or scopes is not merged. Offline identities are namespace-scoped to one Cloud scope and never become globally verified. Binding requests are returned as `PENDING_APPROVAL`; an authorized scope/target manager must explicitly approve them. One-time target claim codes provide a separate explicit binding path and can be revoked.
 
 ## Asset semantics
 
