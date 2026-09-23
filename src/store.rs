@@ -1241,7 +1241,7 @@ impl CloudStore {
             params![id, account_id],
         )?;
         conn.execute("INSERT INTO appearances(target_id) VALUES (?1)", [&id])?;
-        conn.execute("INSERT INTO animation_states(target_id, owner_account_id, lease_id, expires_at_unix_ms, channel, action, animation_key) VALUES (?1, ?2, ?3, 0, '', 'IDLE', '')", params![id, account_id, format!("lease_{}", uuid::Uuid::new_v4().simple())])?;
+        conn.execute("INSERT INTO animation_states(target_id, owner_account_id, lease_id, expires_at_unix_ms, channel, action, animation_key) VALUES (?1, ?2, ?3, 0, 'body', 'IDLE', '')", params![id, account_id, format!("lease_{}", uuid::Uuid::new_v4().simple())])?;
         Ok(
             serde_json::json!({"target_id": id, "scope_id": input.scope_id, "kind": input.kind.clone(), "display_name": input.display_name, "revision": 0}),
         )
