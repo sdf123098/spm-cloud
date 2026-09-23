@@ -100,7 +100,7 @@ export default {
       const observe = url.pathname.match(/^\/v1\/bindings\/([^/]+)\/observation$/);
       if (observe && request.method === "PUT") return observeBinding(request, env, accountId, observe[1]);
       const recovery = url.pathname.match(/^\/v1\/scopes\/([^/]+)\/events\/recovery$/);
-      if (recovery && request.method === "GET") return json({ from_cursor: 0, to_cursor: 0, has_more: false, entries: [] }, 200);
+      if (recovery && request.method === "GET") return recoverEvents(env, accountId, recovery[1], url);
       return json({ code: "NOT_FOUND", message: "Cloud route not found" }, 404);
     } catch (error) {
       if (error instanceof Response) return error;
@@ -437,17 +437,33 @@ async function getAppearance(env: Env, accountId: string, targetId: string): Pro
 }
 
 async function updateAppearance(request: Request, env: Env, accountId: string, targetId: string): Promise<Response> {
-  await requireTarget(env, accountId, targetId, "editor");
+  const target = await requireTarget(env, accountId, targetId, "editor");
   const body = await readJson(request);
   const expected = integer(body.expected_revision, "expected_revision", 0);
   const current = await env.DB.prepare("SELECT revision FROM appearances WHERE target_id = ?1").bind(targetId).first<{ revision: number }>();
   if ((current?.revision ?? 0) !== expected) return json({ code: "REVISION_CONFLICT", message: "appearance revision conflict" }, 409);
   const next = expected + 1;
-  await env.DB.prepare(
-    `INSERT INTO appearances(target_id, revision, asset_id, asset_revision, raw_sha256, texture_id, scale, disabled)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-     ON CONFLICT(target_id) DO UPDATE SET revision = excluded.revision, asset_id = excluded.asset_id, asset_revision = excluded.asset_revision, raw_sha256 = excluded.raw_sha256, texture_id = excluded.texture_id, scale = excluded.scale, disabled = excluded.disabled`,
-  ).bind(targetId, next, nullableText(body.asset_id), nullableInteger(body.asset_revision), nullableText(body.raw_sha256), nullableText(body.texture_id), body.scale == null ? null : Number(body.scale), body.disabled === true ? 1 : 0).run();
+  const payload = {
+    target_id: targetId,
+    revision: next,
+    asset_id: nullableText(body.asset_id),
+    asset_revision: nullableInteger(body.asset_revision),
+    raw_sha256: nullableText(body.raw_sha256),
+    texture_id: nullableText(body.texture_id),
+    scale: body.scale == null ? null : Number(body.scale),
+    disabled: body.disabled === true,
+  };
+  const result = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE appearances SET revision = ?1, asset_id = ?2, asset_revision = ?3, raw_sha256 = ?4, texture_id = ?5, scale = ?6, disabled = ?7
+       WHERE target_id = ?8 AND revision = ?9`,
+    ).bind(next, payload.asset_id, payload.asset_revision, payload.raw_sha256, payload.texture_id, payload.scale, payload.disabled ? 1 : 0, targetId, expected),
+    env.DB.prepare(
+      `INSERT INTO outbox_events(event_id, tenant_id, scope_id, target_id, kind, payload_json)
+       SELECT ?1, ?2, ?3, ?4, 'APPEARANCE_UPDATED', ?5 WHERE changes() = 1`,
+    ).bind(crypto.randomUUID(), String(target.tenant_id), String(target.scope_id), targetId, JSON.stringify(payload)),
+  ]);
+  if (result[0].meta.changes !== 1) return json({ code: "REVISION_CONFLICT", message: "appearance revision conflict" }, 409);
   return getAppearance(env, accountId, targetId);
 }
 
@@ -458,20 +474,76 @@ async function getAnimation(env: Env, accountId: string, targetId: string): Prom
 }
 
 async function updateAnimation(request: Request, env: Env, accountId: string, targetId: string): Promise<Response> {
-  await requireTarget(env, accountId, targetId, "editor");
+  const target = await requireTarget(env, accountId, targetId, "editor");
   const body = await readJson(request);
   const current = await env.DB.prepare("SELECT revision, owner_account_id, lease_id, expires_at_unix_ms FROM animation_states WHERE target_id = ?1").bind(targetId).first<{ revision: number; owner_account_id: string; lease_id: string; expires_at_unix_ms: number }>();
   const expected = integer(body.expected_revision, "expected_revision", 0);
   if ((current?.revision ?? 0) !== expected) return json({ code: "REVISION_CONFLICT", message: "animation revision conflict" }, 409);
-  const leaseId = nullableText(body.lease_id) ?? crypto.randomUUID();
+  const submittedLeaseId = nullableText(body.lease_id);
+  if (current && current.expires_at_unix_ms > Date.now() && submittedLeaseId !== current.lease_id) {
+    return json({ code: "LEASE_CONFLICT", message: "animation state is owned by an active lease" }, 409);
+  }
+  const leaseId = submittedLeaseId ?? crypto.randomUUID();
   const ttl = Math.max(250, Math.min(60_000, integer(body.lease_ttl_ms ?? body.ttl_ms ?? body.ttl, "lease_ttl_ms", 250)));
   const row = { target_id: targetId, revision: expected + 1, owner_account_id: accountId, lease_id: leaseId, expires_at_unix_ms: Date.now() + ttl, channel: text(body.channel, "channel", 1, 64), action: text(body.action, "action", 1, 128), animation_key: text(body.animation_key, "animation_key", 0, 256) };
-  await env.DB.prepare(
-    `INSERT INTO animation_states(target_id, revision, owner_account_id, lease_id, expires_at_unix_ms, channel, action, animation_key)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-     ON CONFLICT(target_id) DO UPDATE SET revision = excluded.revision, owner_account_id = excluded.owner_account_id, lease_id = excluded.lease_id, expires_at_unix_ms = excluded.expires_at_unix_ms, channel = excluded.channel, action = excluded.action, animation_key = excluded.animation_key`,
-  ).bind(row.target_id, row.revision, row.owner_account_id, row.lease_id, row.expires_at_unix_ms, row.channel, row.action, row.animation_key).run();
+  const result = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE animation_states SET revision = ?1, owner_account_id = ?2, lease_id = ?3, expires_at_unix_ms = ?4, channel = ?5, action = ?6, animation_key = ?7
+       WHERE target_id = ?8 AND revision = ?9 AND (expires_at_unix_ms <= ?10 OR lease_id = ?11)`,
+    ).bind(row.revision, row.owner_account_id, row.lease_id, row.expires_at_unix_ms, row.channel, row.action, row.animation_key, targetId, expected, Date.now(), submittedLeaseId),
+    env.DB.prepare(
+      `INSERT INTO outbox_events(event_id, tenant_id, scope_id, target_id, kind, payload_json)
+       SELECT ?1, ?2, ?3, ?4, 'AnimationState', ?5 WHERE changes() = 1`,
+    ).bind(crypto.randomUUID(), String(target.tenant_id), String(target.scope_id), targetId, JSON.stringify(row)),
+  ]);
+  if (result[0].meta.changes !== 1) return json({ code: "LEASE_CONFLICT", message: "animation state changed or is owned by another lease" }, 409);
   return json(row, 200);
+}
+
+async function recoverEvents(env: Env, accountId: string, scopeId: string, url: URL): Promise<Response> {
+  await requireScope(env, accountId, scopeId, "viewer");
+  const after = integer(url.searchParams.get("after") ?? 0, "after", 0);
+  const limit = integer(url.searchParams.get("limit") ?? 256, "limit", 1);
+  if (limit > 256) throw bad("limit must not exceed 256");
+
+  const page = await env.DB.prepare(
+    `WITH high_water AS (
+       SELECT COALESCE(MAX(sequence), ?3) AS sequence FROM outbox_events WHERE scope_id = ?1
+     ), visible_events AS (
+       SELECT e.sequence, e.event_id, e.kind, e.payload_json
+       FROM outbox_events e
+       JOIN targets t ON t.target_id = e.target_id AND t.scope_id = e.scope_id
+       JOIN target_acl a ON a.target_id = e.target_id AND a.account_id = ?2
+       WHERE e.scope_id = ?1 AND e.sequence > ?3 AND a.role IN ('viewer', 'editor', 'manage', 'owner')
+       ORDER BY e.sequence ASC LIMIT ?4
+     )
+     SELECT v.sequence, v.event_id, v.kind, v.payload_json, h.sequence AS high_water_sequence
+     FROM high_water h LEFT JOIN visible_events v ON 1 = 1 ORDER BY v.sequence ASC`,
+  ).bind(scopeId, accountId, after, limit + 1).all<{
+    sequence: number | null;
+    event_id: string | null;
+    kind: string | null;
+    payload_json: string | null;
+    high_water_sequence: number;
+  }>();
+
+  const events = page.results.filter((entry) => entry.sequence !== null);
+  const hasMore = events.length > limit;
+  const visible = hasMore ? events.slice(0, limit) : events;
+  const highWater = Number(page.results[0]?.high_water_sequence ?? after);
+  const toCursor = hasMore ? visible.at(-1)!.sequence! : Math.max(after, highWater);
+  return json({
+    scope_id: scopeId,
+    from_cursor: after,
+    to_cursor: toCursor,
+    has_more: hasMore,
+    entries: visible.map((entry) => ({
+      sequence: entry.sequence!,
+      event_id: entry.event_id!,
+      kind: entry.kind!,
+      payload: JSON.parse(entry.payload_json!),
+    })),
+  }, 200);
 }
 
 async function listBindings(env: Env, accountId: string, scopeId: string): Promise<Response> {
