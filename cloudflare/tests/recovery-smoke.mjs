@@ -25,6 +25,9 @@ async function request(path, { token, method = "GET", body } = {}) {
 async function createAccount(accountId) {
   const created = await request("/v1/accounts", { method: "POST", body: { account_id: accountId, password: "test-password-123" } });
   assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.deepEqual(Object.keys(created.body).sort(), ["account_id"], "registration must not return credentials or password hashes");
+  const duplicate = await request("/v1/accounts", { method: "POST", body: { account_id: accountId, password: "another-password-123" } });
+  assert.equal(duplicate.status, 409, "self-registration must reject duplicate account IDs");
   const login = await request("/v1/sessions", { method: "POST", body: { account_id: accountId, password: "test-password-123" } });
   assert.equal(login.status, 200, JSON.stringify(login.body));
   return login.body.access_token;
