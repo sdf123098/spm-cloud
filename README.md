@@ -2,7 +2,7 @@
 
 独立的 SparkleMorpher Cloud 自托管后端。它不作为 Minecraft 服务端模组运行；客户端通过 HTTPS 与 WSS 使用同一套 Cloud 协议。
 
-当前实现基于计划 v4.2 的 P0/P1/P2 边界，项目版本为 `2.0.0`：
+Rust 自建端与官方 Cloud 使用同一套客户端接口，项目版本保持 `2.0.0`：
 
 - Axum/Tokio HTTP 服务与 WebSocket 握手、心跳、64 KiB 二进制消息限制。
 - Protobuf schema 版本 `spm.cloud.v1`。
@@ -10,6 +10,11 @@
 - `CloudAccount`、provider registry、命名空间身份、scope、target、ACL 和外观 CAS。
 - 原始资产上传/下载的 SHA-256、ETag、Range/206/304/416 语义。
 - 客户端断线时不回退 Minecraft 自定义通道。
+- 官方游戏身份的 Mojang 证书与挑战签名验证、账号绑定和免密码游戏身份登录。
+- LittleSkin、Ely.by、Drasl 和管理员配置的可信 Yggdrasil 身份验证。
+- 模型目录的“我的／共享／公共”搜索与游标分页，仅展示最新版本；公开／私密切换无需重复上传。
+- Cloud 直接同步玩家模型和贴图；私密模型仅本人可见，其他玩家使用原版皮肤，无需 Minecraft 服务端安装模组。
+- 离线模式实体 UUID 使用新鲜的官方签名名称证明，不能根据客户端自报名字或未验证的展示名称绑定。
 
 ## 本地运行
 
@@ -19,6 +24,8 @@
 $env:SPM_CLOUD_ACCESS_TOKEN = "replace-with-a-secret"
 cargo run
 ```
+
+使用编译产物时，Windows 运行 `target/release/spm-cloud.exe`，Linux/macOS 运行 `./target/release/spm-cloud`。运行只需要该平台的可执行文件；数据库、对象目录和环境配置由运维指定。Windows、Linux、macOS 必须使用各自平台构建的二进制文件。
 
 Windows PowerShell、Linux/macOS shell 均可直接运行同一个 Cargo 项目：
 
@@ -67,15 +74,18 @@ python -m unittest tools/test_migrate_legacy.py
 
 ## 当前边界
 
-这是独立后端的本地/自托管实现基线：已提供 provider registry 管理、官方/可信 Yggdrasil challenge 验证、外观 outbox 与 WebSocket 恢复接口，以及迁移盘点/导入工具。仓库另有 `cloudflare/` 官方部署适配器，使用 Worker + D1 + R2 + Durable Object；其当前能力和仍未通过的生产门禁见对应 README。协议模型与数据权限边界必须由两种部署复用。
+自建端使用 SQLite WAL 和本地对象文件保存数据，官方适配器使用 Worker + D1 + R2 + Durable Object。两种服务均提供账户/session、身份验证、scope/target/ACL、模型上传下载及可见性、玩家模型与贴图同步、外观与动画 CAS、离线身份审批及认领码接口。Rust 还提供上传操作查询、审计和目录恢复接口。界面的卡片／经典显示、收藏和贴图选择由客户端提供，选择自建实例后同样使用。
 
-Cloudflare 官方实例的配置、迁移、secret 和部署命令见 [`cloudflare/README.md`](cloudflare/README.md)。当前 Worker 已有账户/session、scope/target/ACL、外观与动画 CAS、资产目录/上传下载/可见性和离线审批等 API，并已部署到 `workers.dev`。但它仍使用管理员 bootstrap bearer 开通账户；官方/Yggdrasil 游戏身份 provider 尚未配置，实时事件恢复/lease/撤权、多客户端实测、生产告警和自定义域名也未完成验收。因此当前部署可用于受控测试，不应宣称已达到完整生产发布状态。
+官方实例的部署配置见 [`cloudflare/README.md`](cloudflare/README.md)。更换为自建服务不会自动转移官方账号、密码、模型和数据；游戏身份需在新的 Cloud 账号上重新绑定。现有自建数据库在启动时增量升级，保留账户、资产、权限和会话。已编译的可执行文件内嵌 Mojang 公钥，不需要运行时携带 `cloudflare/` 源码目录。
+
+官方公钥轮换时，服务会从固定的 Mojang HTTPS 公钥接口刷新并缓存；网络不可用时使用内嵌公钥。更新内嵌信任集可运行 `cd cloudflare` 后的 `npm run refresh:mojang-keys`，然后重新构建 Rust。请求和环境变量均不能替换信任根。游戏 access token 和私钥不会传给 Cloud。
 
 ## 跨平台交付
 
 - 原生运行：在 Windows x64、Linux x64/arm64、macOS x64/Apple Silicon 上用 Rust 编译；SQLite 使用 `bundled`，TLS 使用 Rustls，避免依赖系统 SQLite/OpenSSL。
 - 容器运行：`Dockerfile` 是 Linux 容器镜像，Windows/macOS 使用 Docker Desktop 运行同一 `docker compose` 文件；持久化 volume 和 Caddy TLS 语义保持一致。
 - CI：`.github/workflows/platforms.yml` 对 Ubuntu、Windows、macOS 执行 check/test/release build；发布时再按目标平台签名和打包二进制。
+- CI 在三种系统实际启动编译产物执行同一份 HTTP 契约测试，并上传各自的可执行文件；另有 Linux Docker 构建检查。
 - 不把 `bash`、`systemd`、Linux 文件锁、Unix socket 或 `/var/lib` 路径写入服务核心；这些只允许出现在部署示例中。
 
 ## 单服务器部署
@@ -91,6 +101,10 @@ SPM_CLOUD_BOOTSTRAP_ACCOUNT=account_local
 SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH=$argon2id$v=19$m=65536,t=3,p=4$...
 SPM_CLOUD_ALLOW_SELF_REGISTRATION=false
 ```
+
+`SPM_CLOUD_ORIGIN` 必须是与客户端配置一致的 HTTPS 根地址，例如 `https://cloud.example.com`；可包含非默认端口，不能包含账号、路径或查询参数。它参与签名挑战的域名绑定。HTTP 监听端口应由 Caddy 等反向代理提供 HTTPS/WSS。
+
+Compose 会为 Caddy 使用固定的受信任代理 IP，并覆盖 `X-SPM-Client-IP`，使挑战频率限制按真实玩家 IP 计算。可通过 `SPM_CLOUD_PROXY_IP` 与 `SPM_CLOUD_NETWORK_SUBNET` 调整 Docker 网段。使用其他代理时，设置 `SPM_CLOUD_TRUSTED_PROXY_IPS` 为逗号分隔的代理地址，并由代理覆盖该头为连接者 IP；不配置时服务仅信任 TCP 对端地址，不信任客户端传入的转发头。
 
 By default, `POST /v1/accounts` is restricted to the bootstrap bearer. To let players create their own accounts on a community instance, set `SPM_CLOUD_ALLOW_SELF_REGISTRATION=true` once in the service environment (or the matching `.env` used by Docker Compose), then restart the service. Registration still grants no game-identity verification, scope membership, target ownership, or asset ACL; those remain separate authorization steps. Keep the bootstrap bearer private.
 

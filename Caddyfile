@@ -1,3 +1,5 @@
 {$SPM_CLOUD_HOST:cloud.example.com} {
-    reverse_proxy spm-cloud:8787
+    reverse_proxy spm-cloud:8787 {
+        header_up X-SPM-Client-IP {http.request.remote.host}
+    }
 }

@@ -7,6 +7,7 @@ RUN mkdir -p src && printf 'fn main() {}\n' > src/main.rs
 RUN cargo fetch --locked
 
 COPY src ./src
+COPY cloudflare/src/mojang-certificate-keys.json ./cloudflare/src/mojang-certificate-keys.json
 RUN cargo build --release --locked
 
 FROM debian:bookworm-slim

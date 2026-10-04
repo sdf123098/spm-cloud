@@ -11,7 +11,12 @@ This directory contains the official Cloudflare deployment for protocol
 Implemented API areas include account/session lifecycle, scopes and targets,
 ACLs, appearance/animation compare-and-swap, entity bindings/observations,
 offline approval and claim codes, and asset upload/catalog/download/visibility
-with ACL checks. The official deployment currently uses a `workers.dev` origin.
+with ACL checks. The official deployment uses `https://micafic.xyz` as its
+canonical origin, with a Workers Custom Domain managed by Wrangler. The existing
+`workers.dev` endpoint stays enabled for older clients. Instance discovery and
+Minecraft certificate challenges retain the explicitly configured legacy origin
+when called through that endpoint; arbitrary request hosts cannot change signing
+origins. Updated clients migrate saved official instance metadata automatically.
 
 This is deployed and suitable for controlled testing, but it is not yet a
 completed production release. Account provisioning still requires an operator
@@ -20,8 +25,8 @@ players. The official deployment currently has no trusted Minecraft/Yggdrasil
 identity provider configured. Durable Object realtime behavior has basic
 authenticated WebSocket and size/backpressure guards, but full protocol event
 recovery, lease/revocation semantics, and dual-client game validation remain
-open. Upload hashing currently buffers a bounded request body. Custom domain,
-production monitoring/alerting, load/cost validation, and recovery drills are
+open. Upload hashing currently buffers a bounded request body.
+Production monitoring/alerting, load/cost validation, and recovery drills are
 also release gates. Do not treat this status as a claim of production
 readiness.
 

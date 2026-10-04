@@ -15,6 +15,7 @@ pub struct CloudConfig {
     pub allow_self_registration: bool,
     pub max_asset_bytes: u64,
     pub max_message_bytes: usize,
+    pub trusted_proxy_ips: Vec<std::net::IpAddr>,
 }
 
 impl CloudConfig {
@@ -22,8 +23,19 @@ impl CloudConfig {
         let instance_id =
             env::var("SPM_CLOUD_INSTANCE_ID").unwrap_or_else(|_| "local-dev".to_owned());
         validate_slug(&instance_id, "instance_id")?;
-        let origin =
-            env::var("SPM_CLOUD_ORIGIN").unwrap_or_else(|_| "https://localhost".to_owned());
+        let origin = normalize_origin(
+            &env::var("SPM_CLOUD_ORIGIN").unwrap_or_else(|_| "https://localhost".to_owned()),
+        )?;
+        let trusted_proxy_ips = env::var("SPM_CLOUD_TRUSTED_PROXY_IPS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.parse()
+                    .map_err(|_| CloudError::configuration("invalid SPM_CLOUD_TRUSTED_PROXY_IPS"))
+            })
+            .collect::<Result<Vec<std::net::IpAddr>, CloudError>>()?;
         let bind_addr = env::var("SPM_CLOUD_BIND")
             .unwrap_or_else(|_| "127.0.0.1:8787".to_owned())
             .parse()
@@ -91,8 +103,27 @@ impl CloudConfig {
             allow_self_registration,
             max_asset_bytes,
             max_message_bytes,
+            trusted_proxy_ips,
         })
     }
+}
+
+fn normalize_origin(origin: &str) -> Result<String, CloudError> {
+    let url = reqwest::Url::parse(origin.trim())
+        .map_err(|_| CloudError::configuration("SPM_CLOUD_ORIGIN must be a bare HTTPS origin"))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(CloudError::configuration(
+            "SPM_CLOUD_ORIGIN must be a bare HTTPS origin",
+        ));
+    }
+    Ok(url.origin().ascii_serialization())
 }
 
 pub fn validate_slug(value: &str, field: &str) -> Result<(), CloudError> {
@@ -106,5 +137,30 @@ pub fn validate_slug(value: &str, field: &str) -> Result<(), CloudError> {
         Ok(())
     } else {
         Err(CloudError::invalid_metadata(format!("invalid {field}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn signing_origin_is_normalized_and_cannot_include_credentials_or_paths() {
+        assert_eq!(
+            normalize_origin("https://cloud.example.com/").unwrap(),
+            "https://cloud.example.com"
+        );
+        assert_eq!(
+            normalize_origin("https://cloud.example.com:8443").unwrap(),
+            "https://cloud.example.com:8443"
+        );
+        for origin in [
+            "http://example.com",
+            "https://user:password@example.com",
+            "https://example.com/v1",
+            "https://example.com?q=x",
+            "https://example.com/#x",
+        ] {
+            assert!(normalize_origin(origin).is_err());
+        }
     }
 }

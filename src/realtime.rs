@@ -39,27 +39,37 @@ async fn upgrade(
     let account_id = authenticate(&state, &headers)?;
     Ok(websocket
         .read_buffer_size(state.config.max_message_bytes)
+        .write_buffer_size(0)
         .max_write_buffer_size(state.config.max_message_bytes * 2)
-        .on_upgrade(move |socket| serve(socket, state, account_id))
+        .max_message_size(state.config.max_message_bytes)
+        .max_frame_size(state.config.max_message_bytes)
+        .on_upgrade(move |socket| serve(socket, state, account_id, headers))
         .into_response())
 }
 
-async fn serve(socket: WebSocket, state: AppState, account_id: String) {
+async fn serve(socket: WebSocket, state: AppState, account_id: String, headers: HeaderMap) {
     let (mut sender, mut receiver) = socket.split();
     let mut events = state.events.subscribe();
     let mut joined_scope: Option<String> = None;
+    let mut last_activity = tokio::time::Instant::now();
+    let mut expiry_check = tokio::time::interval(std::time::Duration::from_secs(5));
     loop {
         tokio::select! {
+            _ = expiry_check.tick() => {
+                if last_activity.elapsed().as_secs() >= HEARTBEAT_TTL_SECONDS || authenticate(&state,&headers).is_err() { break; }
+            }
             incoming = receiver.next() => {
                 let Some(result) = incoming else { break; };
                 let Ok(message) = result else { break; };
                 let Message::Binary(bytes) = message else { continue; };
-                if bytes.len() > MAX_MESSAGE_BYTES { let _ = send_error(&mut sender, "", "MESSAGE_TOO_LARGE", false).await; break; }
+                if authenticate(&state,&headers).is_err() { break; }
+                if bytes.len() > state.config.max_message_bytes { let _ = send_error(&mut sender, "", "MESSAGE_TOO_LARGE", false).await; break; }
                 let envelope = match Envelope::decode(bytes) {
                     Ok(envelope) => envelope,
                     Err(_) => { let _ = send_error(&mut sender, "", "MALFORMED_MESSAGE", false).await; continue; }
                 };
                 if envelope.protocol_version != PROTOCOL_V1 { let _ = send_error(&mut sender, &envelope.request_id, "PROTOCOL_UNSUPPORTED", false).await; continue; }
+                last_activity = tokio::time::Instant::now();
                 let join_result = match envelope.kind.as_str() {
                     "Hello" => handle_hello(&mut sender, &state, &envelope).await.map(|_| None),
                     "Heartbeat" => handle_heartbeat(&mut sender, &envelope).await.map(|_| None),
@@ -73,6 +83,11 @@ async fn serve(socket: WebSocket, state: AppState, account_id: String) {
             event = events.recv() => {
                 match event {
                     Ok(event) if joined_scope.as_deref() == Some(event.scope_id()) => {
+                        let authorized = match &event {
+                            CloudEvent::Appearance {appearance,..} => state.store.get_appearance(&account_id,&appearance.target_id).is_ok(),
+                            CloudEvent::Animation {animation,..} => state.store.get_animation(&account_id,&animation.target_id).is_ok(),
+                        };
+                        if !authorized { continue; }
                         if send_appearance_event(&mut sender, &event).await.is_err() { break; }
                     }
                     Ok(_) => {}

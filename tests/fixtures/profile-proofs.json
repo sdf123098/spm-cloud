@@ -1,0 +1,17 @@
+{
+  "uuid": "00112233-4455-6677-8899-aabbccddeeff",
+  "expiry": 4102444800000,
+  "now": 1700000000000,
+  "payload": "SPM-CLOUD-GAME-IDENTITY-V1\nhttps://cloud.example.com\nlogin\n\nofficial\n00112233-4455-6677-8899-aabbccddeeff\nchallenge_test\nnonce_test",
+  "root": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxD1FPVqjxoz60ZugIpqpEtafRighs+vZCTLkUyJHeN+OSIQ6bn0BFXw9BeBJlByHhBhCkvIxBH4uuflP+psSl++UrZfKhB0RiYyrdXrVBfV4Pgcf7GzXmCRpHnYtpXZBQG2fPqACsq3ep0+pfhPwOHIql/a1Bbbn9FrApG4ukO8hK9b6GdrHM7guXMfaZvISpDSlB0ZzefXArP11lUANvVewt+ZeLMdYpTwzXmPkAqwdunnnpTNaAfTawH/HLnfc8Bz6OsjN2WOileV7FBNOYnfrvnRinSTckJDQBGMk7iiVhhLA/juP91YrDkyHgdawCt4V6w5LMjDHX6pBpHh4QwIDAQAB",
+  "profile_key": {
+    "public_key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvv4tmK1avZUfKIbVh2KS8D+9caClo48Pbje4j412XwfQPXiBNCynU0t6Izv5GlnlRMuKteTtP5fTiUgHmDfEf1ev/x2Mxq2KYDggGoqVqEzcrzr+sfdtWxtNtjL1mcarvTL4tVaq8RK9rTjGgUj7KX5Mg0Qivm4L0dlllZidvVaAAnQhgmN8eVAhfb6WT063o/yMbq14oI8pIn8cHu0JSGWN3ftOiH8W+U+BhyACtKrZTdgfrViQ1swDFlKlQqSWaSUgnO4OzZLxWgqxkkiaDtS4eqtDPINqvOfBu6hZFSNKpDmipcmDRwgjJ0gZ46U1kjgk20vjQ4mSJI02/GXRHwIDAQAB",
+    "expires_at_ms": 4102444800000,
+    "key_signature": "oPt+3dtADbfKMlpu6bTsyowrXQTcuzXjI5K6vuzkGMhRV3G0TTjkB9EXIdM2H+pJeV6vrjydQmNQSJweLttxhLkSvXOn4L5Z9XqvFelGYF36QJHCCOjirNoEraVm5JnFQOnXXtVHcn44wliLdpYwIOXDATrmtyDS/Ebd8NMPc3MpgcoufH1Jl+8r0K39pxMlW4VmXqP1Kec4RW45vuKiRWF458gljvQfi8BRxmtpAdMaRxHkCZvPhvbaMnUgvzst57T5GVEh0lXMt+q0uBT7UEKhaWDUHeaG2soxRQpTKeHn9OnnxvPxrUQcxDQzt1x2prlkwUffvDbLezLbjbug/w==",
+    "challenge_signature": "apFKpL8O49FklSHCt3Z9Xh+Ms+/LqktEYq4uhOPsQMi1Ibbl2VavZPubZf7V/T1Vp+F+EFhptwFV8xgDPGE+3jyHRvk6++QwUqYsuCCs15rUEejjsAygCVhM4UXgSB2kUwgK9VCHQkVV6o11fcW6gQAvp8ZPeHe+wgEWoY/QsHu5ZDqEVLQqbvwRWTx57U7HaKTDxYd3UKOaYX4svQc8WpyQSjulQpvwxIZQ8aalO/uuBVDtq0bmOpqWD6JB2VZm4FAJLaU5VFHGURW7kCo4APo6B8Vcy5w2hXc94sp8uQIBbuQ5PjRODNA+UfVKSYQNhIJPWgkH/7cWrlw0Hr3+Zw=="
+  },
+  "profile_name_proof": {
+    "value": "eyJwcm9maWxlSWQiOiIwMDExMjIzMzQ0NTU2Njc3ODg5OWFhYmJjY2RkZWVmZiIsInByb2ZpbGVOYW1lIjoiTWljYWZ0aWMxIiwidGltZXN0YW1wIjoxNzAwMDAwMDAwMDAwfQ==",
+    "signature": "irGEqnFPUEprdEGeHFJr3sO374lX/8XyeV7l3Qjt1jjxaY6ziVLMQJ93WKUl06C4EoF772Jb5Oc4gKbnKTkuxw/MUk8eqM1DFd0Hz9zwXkiLhh70M1fUxDWQaYhVrfi5uuUDBYRttq/G/76kSYJvX76aFsumXtu5uzPJo/7BnxyiqwPg4ohjCeOG0hkhZAULCGNcdi2DTjcGcOO+3HA+HCR9PRR/vWtPPsisQsk6Rgdmc9Pgx4UqKxEeN3rSNJZksVKrspzLruiSeGMcO7Lw8U4O3zJWBh4vPmDQEmmSCdxKqoBDq/TXoxsxxT+8uyUiErR/pVCKDyoq2F73zStcuQ=="
+  }
+}

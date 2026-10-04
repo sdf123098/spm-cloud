@@ -46,6 +46,16 @@ pub enum CloudError {
     IdentityProviderUntrusted,
     #[error("identity profile mismatch")]
     IdentityProfileMismatch,
+    #[error("identity provider is unavailable")]
+    IdentityProviderUnavailable,
+    #[error("game identity is not linked to one Cloud account")]
+    IdentityNotLinked,
+    #[error("game identity is already linked to another Cloud account")]
+    IdentityAlreadyLinked,
+    #[error("too many game identity challenges")]
+    RateLimited,
+    #[error("public asset discovery requires a search query")]
+    SearchRequired,
     #[error("internal error")]
     Internal(#[source] anyhow::Error),
     #[error(transparent)]
@@ -82,16 +92,27 @@ impl CloudError {
             Self::IdentityChallengeReplayed => "IDENTITY_CHALLENGE_REPLAYED",
             Self::IdentityProviderUntrusted => "IDENTITY_PROVIDER_UNTRUSTED",
             Self::IdentityProfileMismatch => "IDENTITY_PROFILE_MISMATCH",
+            Self::IdentityProviderUnavailable => "IDENTITY_PROVIDER_UNAVAILABLE",
+            Self::IdentityNotLinked => "IDENTITY_NOT_LINKED",
+            Self::IdentityAlreadyLinked => "IDENTITY_ALREADY_LINKED",
+            Self::RateLimited => "RATE_LIMITED",
+            Self::SearchRequired => "SEARCH_REQUIRED",
             Self::Internal(_) | Self::Io(_) | Self::Sqlite(_) => "INTERNAL",
         }
     }
     pub fn status(&self) -> StatusCode {
         match self {
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
+            Self::IdentityProviderUnavailable => StatusCode::BAD_GATEWAY,
+            Self::IdentityNotLinked => StatusCode::NOT_FOUND,
+            Self::IdentityAlreadyLinked => StatusCode::CONFLICT,
+            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::SearchRequired => StatusCode::BAD_REQUEST,
             Self::SessionExpired | Self::RefreshReused => StatusCode::UNAUTHORIZED,
             Self::AccessDenied => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::AssetRangeInvalid => StatusCode::RANGE_NOT_SATISFIABLE,
+            Self::AssetHashMismatch => StatusCode::UNPROCESSABLE_ENTITY,
             Self::RevisionConflict | Self::IdempotencyConflict => StatusCode::CONFLICT,
             Self::AssetTooLarge | Self::MessageTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::InvalidMetadata(_) | Self::ProtocolUnsupported => StatusCode::BAD_REQUEST,
@@ -113,6 +134,7 @@ struct ErrorBody<'a> {
     code: &'a str,
     retryable: bool,
     message_key: String,
+    message: String,
 }
 
 impl IntoResponse for CloudError {
@@ -122,8 +144,20 @@ impl IntoResponse for CloudError {
         let body = Json(ErrorBody {
             ok: false,
             code,
-            retryable: matches!(self, Self::Internal(_) | Self::Io(_)),
+            retryable: matches!(
+                self,
+                Self::Internal(_)
+                    | Self::Io(_)
+                    | Self::IdentityProviderUnavailable
+                    | Self::RateLimited
+            ),
             message_key: format!("cloud.error.{}", code.to_lowercase()),
+            message: match &self {
+                Self::Internal(_) | Self::Io(_) | Self::Sqlite(_) | Self::Configuration(_) => {
+                    "Cloud request failed".to_owned()
+                }
+                _ => self.to_string(),
+            },
         });
         (status, body).into_response()
     }

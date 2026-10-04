@@ -48,6 +48,10 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http());
     let listener = TcpListener::bind(config.bind_addr).await?;
     tracing::info!(address = %config.bind_addr, instance = %config.instance_id, "SPM Cloud listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

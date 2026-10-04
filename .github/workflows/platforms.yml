@@ -10,11 +10,37 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            binary: spm-cloud
+          - os: windows-latest
+            binary: spm-cloud.exe
+          - os: macos-latest
+            binary: spm-cloud
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets --all-features
-      - run: cargo test --all-targets --all-features
-      - run: cargo build --release
+      - run: cargo fmt --check
+      - run: cargo check --all-targets --all-features --locked
+      - run: cargo test --all-targets --all-features --locked
+      - run: cargo build --release --locked
+      - run: python tools/service_contract.py --binary target/release/${{ matrix.binary }} --output service-contract.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spm-cloud-${{ matrix.os }}
+          path: |
+            target/release/spm-cloud
+            target/release/spm-cloud.exe
+            README.md
+            docker-compose.yml
+            Caddyfile
+            service-contract.json
+          if-no-files-found: error
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --tag spm-cloud:ci .

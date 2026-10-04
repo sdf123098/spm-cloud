@@ -1,4 +1,7 @@
+import { offlinePlayerUuid } from "./player-uuid";
+import { entityWorldRoute } from "./entity-world";
 import { ScopeRoom } from "./scope-room";
+import { profileKeyPayload, verifyOfficialProfileKey, verifyOfficialProfileName } from "./profile-key-proof";
 
 export { ScopeRoom };
 
@@ -8,6 +11,12 @@ const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
 };
+
+function cloudOrigin(request: Request, env: Env): string {
+  // Keep the explicitly trusted legacy origin for old clients; never trust arbitrary hosts.
+  return env.SPM_CLOUD_LEGACY_ORIGIN && new URL(request.url).origin === env.SPM_CLOUD_LEGACY_ORIGIN
+    ? env.SPM_CLOUD_LEGACY_ORIGIN : env.SPM_CLOUD_ORIGIN;
+}
 
 export default {
   async fetch(request: Request, env: RuntimeEnv, _ctx: ExecutionContext): Promise<Response> {
@@ -21,9 +30,10 @@ export default {
     if (url.pathname === "/v1/instance" && request.method === "GET") {
       return json({
         instance_id: env.SPM_CLOUD_INSTANCE_ID,
-        origin: env.SPM_CLOUD_ORIGIN,
-        websocket_origin: `${env.SPM_CLOUD_ORIGIN.replace(/^http/, "ws")}/v1/realtime`,
+        origin: cloudOrigin(request, env),
+        websocket_origin: `${cloudOrigin(request, env).replace(/^http/, "ws")}/v1/realtime`,
         protocol: "spm.cloud.v1",
+        capabilities: ["player_motion_v1"],
         limits: {
           max_message_bytes: 64 * 1024,
           max_snapshot_bytes: 16 * 1024 * 1024,
@@ -40,9 +50,16 @@ export default {
       if (url.pathname === "/v1/accounts" && request.method === "POST") return await createAccount(request, env);
       if (url.pathname === "/v1/sessions" && request.method === "POST") return await login(request, env);
       if (url.pathname === "/v1/sessions/refresh" && request.method === "POST") return await refreshSession(request, env);
+      if (url.pathname === "/v1/identity-providers" && request.method === "GET") return await listIdentityProviders(env);
+      if (url.pathname === "/v1/identity-providers" && request.method === "POST") return await configureIdentityProvider(request, env);
+      if (url.pathname === "/v1/auth/login-challenges" && request.method === "POST") return await createGameChallenge(request, env, "login", null);
+      const loginChallenge = url.pathname.match(/^\/v1\/auth\/login-challenges\/([^/]+)\/complete$/);
+      if (loginChallenge && request.method === "POST") return await completeGameChallenge(request, env, "login", null, loginChallenge[1]);
 
       const accountId = await authenticate(request, env);
       if (!accountId) return json({ code: "UNAUTHENTICATED", message: "Cloud bearer is required" }, 401);
+      const entityResponse = await entityWorldRoute(request, env, accountId);
+      if (entityResponse) return entityResponse;
 
       if (url.pathname === "/v1/sessions/current" && request.method === "DELETE") {
         await revokeSession(request, env);
@@ -54,14 +71,18 @@ export default {
         const id = env.SCOPE_ROOMS.idFromName(scopeId);
         return env.SCOPE_ROOMS.get(id).fetch(request);
       }
+      if (url.pathname === "/v1/players/me/appearance" && request.method === "GET") return await getPlayerAppearance(env, accountId, url);
+      if (url.pathname === "/v1/players/me/appearance" && request.method === "PUT") return await setPlayerAppearance(request, env, accountId);
+      if (url.pathname === "/v1/players/appearances/query" && request.method === "POST") return await queryPlayerAppearances(request, env, accountId);
       if (url.pathname === "/v1/assets" && request.method === "GET") return listAssets(env, accountId, url);
-      if (url.pathname === "/v1/assets" && request.method === "POST") return uploadAsset(request, env, accountId);
+      if (url.pathname === "/v1/assets" && request.method === "POST") return await uploadAsset(request, env, accountId);
       const assetAcl = url.pathname.match(/^\/v1\/assets\/([^/]+)\/acl$/);
-      if (assetAcl && request.method === "GET") return listAssetAcl(env, accountId, assetAcl[1]);
-      if (assetAcl && request.method === "PUT") return setAssetAcl(request, env, accountId, assetAcl[1]);
+      if (assetAcl && request.method === "GET") return listAssetAcl(env, accountId, assetPathId(assetAcl[1]));
+      if (assetAcl && request.method === "PUT") return setAssetAcl(request, env, accountId, assetPathId(assetAcl[1]));
+      const assetVisibility = url.pathname.match(/^\/v1\/assets\/([^/]+)\/visibility$/);
+      if (assetVisibility && request.method === "PUT") return await setAssetVisibility(request, env, accountId, assetPathId(assetVisibility[1]));
       const contentMatch = url.pathname.match(/^\/v1\/assets\/([^/]+)\/revisions\/(\d+)\/content$/);
-      if (contentMatch && request.method === "GET") return downloadAsset(request, env, accountId, contentMatch[1], Number(contentMatch[2]));
-      if (url.pathname === "/v1/identity-providers" && request.method === "GET") return json([], 200);
+      if (contentMatch && request.method === "GET") return downloadAsset(request, env, accountId, assetPathId(contentMatch[1]), Number(contentMatch[2]));
       if (url.pathname === "/v1/identities" && request.method === "GET") return listIdentities(env, accountId);
       if (url.pathname === "/v1/identities" && request.method === "POST") return createIdentity(request, env, accountId);
       const identityBindings = url.pathname.match(/^\/v1\/identities\/([^/]+)\/offline-bindings$/);
@@ -74,13 +95,13 @@ export default {
       if (url.pathname === "/v1/claim-codes/revoke" && request.method === "POST") return revokeClaimCode(request, env, accountId);
       const targetClaimCodes = url.pathname.match(/^\/v1\/targets\/([^/]+)\/claim-codes$/);
       if (targetClaimCodes && request.method === "POST") return createClaimCode(request, env, accountId, targetClaimCodes[1]);
-      if (url.pathname === "/v1/auth/challenges" && request.method === "POST") return identityChallengeUnavailable();
+      if (url.pathname === "/v1/auth/challenges" && request.method === "POST") return await createGameChallenge(request, env, "link", accountId);
       const challengeComplete = url.pathname.match(/^\/v1\/auth\/challenges\/([^/]+)\/(?:complete|verify)$/);
-      if (challengeComplete && request.method === "POST") return identityChallengeUnavailable();
+      if (challengeComplete && request.method === "POST") return await completeGameChallenge(request, env, "link", accountId, challengeComplete[1]);
       if (url.pathname === "/v1/scopes" && request.method === "GET") return listScopes(env, accountId);
       if (url.pathname === "/v1/scopes" && request.method === "POST") return createScope(request, env, accountId);
       const scopeAcl = url.pathname.match(/^\/v1\/scopes\/([^/]+)\/acl$/);
-      if (scopeAcl && request.method === "GET") return listScopeAcl(env, accountId, scopeAcl[1]);
+      if (scopeAcl && request.method === "GET") return await listScopeAcl(env, accountId, scopeAcl[1]);
       if (scopeAcl && request.method === "PUT") return setScopeAcl(request, env, accountId, scopeAcl[1]);
       const scopeTargets = url.pathname.match(/^\/v1\/scopes\/([^/]+)\/targets$/);
       if (scopeTargets && request.method === "GET") return listTargets(env, accountId, scopeTargets[1]);
@@ -89,7 +110,7 @@ export default {
       if (targetAcl && request.method === "GET") return listTargetAcl(env, accountId, targetAcl[1]);
       if (targetAcl && request.method === "PUT") return setTargetAcl(request, env, accountId, targetAcl[1]);
       const appearance = url.pathname.match(/^\/v1\/targets\/([^/]+)\/appearance$/);
-      if (appearance && request.method === "GET") return getAppearance(env, accountId, appearance[1]);
+      if (appearance && request.method === "GET") return await getAppearance(env, accountId, appearance[1]);
       if (appearance && request.method === "PUT") return updateAppearance(request, env, accountId, appearance[1]);
       const animation = url.pathname.match(/^\/v1\/targets\/([^/]+)\/animation$/);
       if (animation && request.method === "GET") return getAnimation(env, accountId, animation[1]);
@@ -204,7 +225,8 @@ async function listIdentities(env: Env, accountId: string): Promise<Response> {
   return json(result.results.map(row => ({
     identity_id: row.identity_id,
     account_id: row.account_id,
-    identity: `${row.identity_kind}:${row.scope_id ?? row.provider_id ?? ""}:${row.profile_uuid}`,
+    identity: row.identity_kind === "official" ? `official:${row.profile_uuid}`
+      : `${row.identity_kind}:${row.scope_id ?? row.provider_id ?? ""}:${row.profile_uuid}`,
     display_name: row.display_name,
     verification_status: row.verification_status,
   })), 200);
@@ -344,8 +366,207 @@ async function revokeClaimCode(request: Request, env: Env, accountId: string): P
   return new Response(null, { status: 204, headers: corsHeaders() });
 }
 
-function identityChallengeUnavailable(): Response {
-  return json({ code: "IDENTITY_PROVIDER_UNTRUSTED", message: "No official or third-party identity provider is enabled on this Cloud instance" }, 503);
+type GameChallengePurpose = "link" | "login";
+type GameChallengeRow = {
+  purpose: GameChallengePurpose;
+  account_id: string | null;
+  provider_id: string;
+  username: string;
+  profile_uuid: string;
+  server_id: string;
+  expires_at: number;
+  consumed: number;
+};
+type GameIdentityRow = { identity_id: string; account_id: string; display_name: string };
+
+async function listIdentityProviders(env: Env): Promise<Response> {
+  const rows = await env.DB.prepare(
+    "SELECT provider_id, display_name, enabled FROM identity_providers WHERE enabled = 1 ORDER BY CASE WHEN provider_id = 'official' THEN 0 ELSE 1 END, provider_id",
+  ).all();
+  return json(rows.results.map(row => ({ provider_id: row.provider_id, display_name: row.display_name, enabled: true })), 200);
+}
+
+async function configureIdentityProvider(request: Request, env: RuntimeEnv): Promise<Response> {
+  if (!authorized(request, env.SPM_CLOUD_ACCESS_TOKEN)) return json({ code: "ACCESS_DENIED", message: "operator bearer is required" }, 403);
+  const body = await readJson(request);
+  const providerId = slug(body.provider_id, "provider_id");
+  if (providerId === "official") return json({ code: "ACCESS_DENIED", message: "official provider is fixed" }, 403);
+  const displayName = text(body.display_name, "display_name", 1, 128);
+  const baseUrl = trustedProviderUrl(text(body.base_url, "base_url", 8, 512));
+  const sessionPath = trustedSessionPath(body.session_path);
+  const enabled = body.enabled === true;
+  await env.DB.prepare(
+    `INSERT INTO identity_providers(provider_id, display_name, base_url, session_path, enabled) VALUES (?1, ?2, ?3, ?4, ?5)
+     ON CONFLICT(provider_id) DO UPDATE SET display_name = excluded.display_name, base_url = excluded.base_url,
+       session_path = excluded.session_path, enabled = excluded.enabled`,
+  ).bind(providerId, displayName, baseUrl, sessionPath, Number(enabled)).run();
+  return json({ provider_id: providerId, display_name: displayName, enabled }, 200);
+}
+
+function trustedSessionPath(value: unknown): string {
+  const path = value == null ? "/sessionserver/session/minecraft/hasJoined" : text(value, "session_path", 1, 128);
+  if (path !== "/sessionserver/session/minecraft/hasJoined"
+      && path !== "/session/minecraft/hasJoined"
+      && path !== "/session/hasJoined") throw bad("unsupported identity provider session path");
+  return path;
+}
+
+function trustedProviderUrl(value: string): string {
+  let url: URL;
+  try { url = new URL(value); } catch { throw bad("identity provider URL is invalid"); }
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.port
+      || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")
+      || !/^[a-z0-9.-]+$/.test(host) || !host.includes(".") || /^\d+(?:\.\d+){3}$/.test(host)) {
+    throw bad("identity provider must use a public HTTPS hostname");
+  }
+  return url.toString().replace(/\/$/, "");
+}
+
+function profileUuid(value: unknown): string {
+  const compact = text(value, "profile_uuid", 32, 36).replaceAll("-", "").toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(compact)) throw bad("profile_uuid is invalid");
+  return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`;
+}
+
+async function createGameChallenge(request: Request, env: RuntimeEnv, purpose: GameChallengePurpose, accountId: string | null): Promise<Response> {
+  const body = await readJson(request);
+  const providerId = slug(body.provider_id, "provider_id");
+  const username = text(body.username, "username", 1, 64);
+  const uuid = profileUuid(body.profile_uuid);
+  const provider = await env.DB.prepare("SELECT provider_id FROM identity_providers WHERE provider_id = ?1 AND enabled = 1")
+    .bind(providerId).first();
+  if (!provider) return json({ code: "IDENTITY_PROVIDER_UNTRUSTED", message: "identity provider is not enabled" }, 403);
+
+  const now = Math.floor(Date.now() / 1000);
+  const requester = await sha256(new TextEncoder().encode(request.headers.get("CF-Connecting-IP") ?? "unknown"));
+  const recent = await env.DB.prepare("SELECT COUNT(*) AS count FROM identity_challenges WHERE requester_hash = ?1 AND created_at > ?2")
+    .bind(requester, now - 120).first<{ count: number }>();
+  if ((recent?.count ?? 0) >= 20) return json({ code: "RATE_LIMITED", message: "too many identity challenges" }, 429);
+  await env.DB.prepare("DELETE FROM identity_challenges WHERE expires_at < ?1").bind(now - 300).run();
+  const challengeId = `challenge_${crypto.randomUUID().replaceAll("-", "")}`;
+  const serverId = crypto.randomUUID().replaceAll("-", "");
+  await env.DB.prepare(
+    `INSERT INTO identity_challenges(challenge_hash, purpose, account_id, provider_id, username, profile_uuid, server_id, requester_hash, created_at, expires_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`,
+  ).bind(await tokenHash(challengeId), purpose, accountId, providerId, username, uuid, serverId, requester, now, now + 120).run();
+  return json({ challenge_id: challengeId, provider_id: providerId, server_id: serverId, expires_in_seconds: 120,
+    ...(providerId === "official" ? { profile_key_payload: profileKeyPayload(cloudOrigin(request, env), purpose, accountId, providerId, uuid, challengeId, serverId) } : {}),
+  }, 200);
+}
+
+async function completeGameChallenge(request: Request, env: RuntimeEnv, purpose: GameChallengePurpose, accountId: string | null, challengeId: string): Promise<Response> {
+  const body = await readJson(request);
+  if (body.challenge_id !== challengeId) return json({ code: "INVALID_METADATA", message: "challenge_id mismatch" }, 400);
+  const hash = await tokenHash(challengeId);
+  const challenge = await env.DB.prepare(
+    "SELECT purpose, account_id, provider_id, username, profile_uuid, server_id, expires_at, consumed FROM identity_challenges WHERE challenge_hash = ?1",
+  ).bind(hash).first<GameChallengeRow>();
+  if (!challenge || challenge.purpose !== purpose || challenge.account_id !== accountId) return json({ code: "IDENTITY_CHALLENGE_EXPIRED", message: "challenge is unavailable" }, 401);
+  if (challenge.consumed) return json({ code: "IDENTITY_CHALLENGE_REPLAYED", message: "challenge was used" }, 401);
+  const now = Math.floor(Date.now() / 1000);
+  if (challenge.expires_at <= now) return json({ code: "IDENTITY_CHALLENGE_EXPIRED", message: "challenge expired" }, 401);
+  const claim = await env.DB.prepare("UPDATE identity_challenges SET consumed = 1 WHERE challenge_hash = ?1 AND consumed = 0 AND expires_at > ?2")
+    .bind(hash, now).run();
+  if (claim.meta.changes !== 1) return json({ code: "IDENTITY_CHALLENGE_REPLAYED", message: "challenge was used" }, 401);
+
+  const provider = await env.DB.prepare("SELECT base_url, session_path FROM identity_providers WHERE provider_id = ?1 AND enabled = 1")
+    .bind(challenge.provider_id).first<{ base_url: string; session_path: string }>();
+  if (!provider) return json({ code: "IDENTITY_PROVIDER_UNTRUSTED", message: "identity provider is not enabled" }, 403);
+  let canonicalName: string | null = null;
+  let verified: Record<string, unknown>;
+  if (body.profile_key !== undefined) {
+    const valid = challenge.provider_id === "official" && await verifyOfficialProfileKey(body.profile_key, challenge.profile_uuid,
+      profileKeyPayload(cloudOrigin(request, env), purpose, accountId, challenge.provider_id, challenge.profile_uuid, challengeId, challenge.server_id));
+    if (!valid) return json({ code: "IDENTITY_PROFILE_MISMATCH", message: "player certificate or challenge signature was not verified" }, 403);
+    verified = { id: challenge.profile_uuid, name: challenge.username };
+  } else {
+    const session = await verifySessionProfile(challenge, provider);
+    if (session instanceof Response) return session;
+    verified = session;
+    canonicalName = String(session.name);
+  }
+  const verifiedUuid = profileUuid(verified.id);
+  const kind = challenge.provider_id === "official" ? "official" : "yggdrasil";
+  const providerId = kind === "official" ? "" : challenge.provider_id;
+  const displayName = String(verified.name);
+  const wire = kind === "official" ? `official:${verifiedUuid}` : `yggdrasil:${providerId}:${verifiedUuid}`;
+  if (purpose === "login") {
+    const linked = await env.DB.prepare(
+      `SELECT DISTINCT account_id FROM identities WHERE identity_kind = ?1 AND COALESCE(provider_id, '') = ?2
+       AND profile_uuid = ?3 AND verified = 1 LIMIT 2`,
+    ).bind(kind, providerId, verifiedUuid).all<{ account_id: string }>();
+    if (linked.results.length !== 1) return json({ code: "IDENTITY_NOT_LINKED", message: "game identity is not linked to one Cloud account" }, 404);
+    if (canonicalName) await env.DB.prepare("UPDATE identities SET canonical_name = ?1, display_name = ?1 WHERE account_id = ?2 AND identity_kind = ?3 AND COALESCE(provider_id, '') = ?4 AND profile_uuid = ?5 AND verified = 1")
+      .bind(canonicalName, linked.results[0].account_id, kind, providerId, verifiedUuid).run();
+    return json({ account_id: linked.results[0].account_id, ...await issueSession(env, linked.results[0].account_id) }, 200);
+  }
+
+  const existing = await env.DB.prepare(
+    `SELECT identity_id, account_id, display_name FROM identities WHERE identity_kind = ?1 AND COALESCE(provider_id, '') = ?2
+     AND profile_uuid = ?3 AND verified = 1 LIMIT 1`,
+  ).bind(kind, providerId, verifiedUuid).first<GameIdentityRow>();
+  if (existing && existing.account_id !== accountId) return json({ code: "IDENTITY_ALREADY_LINKED", message: "game identity belongs to another Cloud account" }, 409);
+  const identityId = existing?.identity_id ?? `identity_${crypto.randomUUID().replaceAll("-", "")}`;
+  if (!existing) {
+    const inserted = await env.DB.prepare(
+      `INSERT OR IGNORE INTO identities(identity_id, account_id, identity_kind, provider_id, scope_id, profile_uuid, display_name, verified)
+       VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 1)`,
+    ).bind(identityId, accountId, kind, kind === "official" ? null : providerId, verifiedUuid, displayName).run();
+    if (inserted.meta.changes !== 1) return json({ code: "IDENTITY_ALREADY_LINKED", message: "game identity belongs to another Cloud account" }, 409);
+  }
+  if (canonicalName) await env.DB.prepare("UPDATE identities SET canonical_name = ?1, display_name = ?1 WHERE identity_id = ?2").bind(canonicalName, identityId).run();
+  return json({ identity_id: identityId, account_id: accountId, identity: wire, display_name: displayName, verification_status: "VERIFIED" }, 200);
+}
+
+async function verifySessionProfile(challenge: GameChallengeRow, provider: { base_url: string; session_path: string }): Promise<Record<string, unknown> | Response> {
+  const baseUrl = trustedProviderUrl(provider.base_url);
+  const path = trustedSessionPath(provider.session_path);
+  const url = new URL(`${baseUrl}${path}`);
+  url.searchParams.set("username", challenge.username);
+  url.searchParams.set("serverId", challenge.server_id);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { accept: "application/json", "user-agent": "SPM-Cloud/1.0" },
+      redirect: "manual", signal: AbortSignal.timeout(5000),
+    });
+  } catch (error) {
+    console.warn("Game identity provider fetch failed", challenge.provider_id,
+      error instanceof Error ? error.message : String(error));
+    return json({ code: "IDENTITY_PROVIDER_UNAVAILABLE", message: "identity provider could not be reached" }, 502);
+  }
+  if (response.status === 204 || response.status === 404) return json({ code: "IDENTITY_PROFILE_MISMATCH", message: "game session was not verified" }, 403);
+  const responseType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!response.ok || !responseType.includes("json")) {
+    const providerBody = await response.text().catch(() => "");
+    let unjoined = challenge.provider_id !== "official" && path === "/session/minecraft/hasJoined"
+      && response.status === 403 && !responseType && !providerBody.trim();
+    if (path === "/session/hasJoined" && response.status === 401 && responseType.includes("json")) {
+      try {
+        const error = JSON.parse(providerBody) as Record<string, unknown>;
+        unjoined = error.error === "ForbiddenOperationException" && error.errorMessage === "Invalid token.";
+      } catch { /* Invalid JSON is an unavailable provider, never a verified identity. */ }
+    }
+    if (unjoined) return json({ code: "IDENTITY_PROFILE_MISMATCH", message: "game session was not verified" }, 403);
+    console.warn("Game identity provider returned unexpected response", challenge.provider_id,
+      response.status, responseType, response.headers.get("server"), response.headers.get("cf-ray"),
+      providerBody.match(/<title>([^<]{0,200})<\/title>/i)?.[1] ?? "",
+      providerBody.match(/(?:error-code["'>\s:]+|Error\s*(?:code)?\s*[: ]+)(\d{4})/i)?.[1] ?? "");
+    return json({ code: "IDENTITY_PROVIDER_UNAVAILABLE", message: "identity provider returned an invalid response" }, 502);
+  }
+  let canonicalName: string | null = null;
+  let verified: Record<string, unknown>;
+  try { verified = await response.json() as Record<string, unknown>; }
+  catch { return json({ code: "IDENTITY_PROVIDER_UNAVAILABLE", message: "identity provider returned invalid JSON" }, 502); }
+  let verifiedUuid: string;
+  try { verifiedUuid = profileUuid(verified.id); }
+  catch { return json({ code: "IDENTITY_PROFILE_MISMATCH", message: "profile UUID is invalid" }, 403); }
+  if (verifiedUuid !== challenge.profile_uuid || typeof verified.name !== "string"
+      || verified.name.toLowerCase() !== challenge.username.toLowerCase()) {
+    return json({ code: "IDENTITY_PROFILE_MISMATCH", message: "game profile did not match challenge" }, 403);
+  }
+  return verified;
 }
 
 async function listScopes(env: Env, accountId: string): Promise<Response> {
@@ -686,7 +907,7 @@ async function listAssets(env: Env, accountId: string, url: URL): Promise<Respon
   const limitText = url.searchParams.get("limit") ?? "40";
   const parsedLimit = Number.parseInt(limitText, 10);
   const limit = Number.isFinite(parsedLimit) ? Math.max(1, Math.min(80, parsedLimit)) : 40;
-  const after = (url.searchParams.get("after") ?? "").trim().slice(0, 64);
+  const after = url.searchParams.get("after") ?? "";
 
   const conditions: string[] = ["r.revision = x.current_revision"];
   const values: unknown[] = [];
@@ -730,8 +951,8 @@ async function listAssets(env: Env, accountId: string, url: URL): Promise<Respon
 
 async function uploadAsset(request: Request, env: Env, accountId: string): Promise<Response> {
   const requestId = requiredHeader(request, "idempotency-key");
-  const assetId = request.headers.get("x-asset-id") || `asset_${crypto.randomUUID().replaceAll("-", "")}`;
-  const name = request.headers.get("x-asset-name") || assetId;
+  const assetId = assetMetadataHeader(request, "x-asset-id") || `asset_${crypto.randomUUID().replaceAll("-", "")}`;
+  const name = assetMetadataHeader(request, "x-asset-name") || assetId;
   const format = request.headers.get("x-asset-format") || "application/octet-stream";
   const expectedSha = request.headers.get("x-asset-sha256");
   const requestedVisibility = (request.headers.get("x-asset-visibility") || "").trim().toUpperCase();
@@ -746,7 +967,7 @@ async function uploadAsset(request: Request, env: Env, accountId: string): Promi
   if (expectedSha && !constantTimeEqual(expectedSha.toLowerCase(), sha)) {
     return json({ code: "ASSET_HASH_MISMATCH", message: "asset SHA-256 mismatch" }, 422);
   }
-  const requestHash = await sha256(new TextEncoder().encode(JSON.stringify({ assetId, name, format, sha, length: body.byteLength })));
+  const requestHash = await sha256(new TextEncoder().encode(JSON.stringify({ assetId, name, format, sha, length: body.byteLength, requestedVisibility })));
   const existing = await env.DB.prepare(
     "SELECT request_hash, response_json FROM idempotency WHERE account_id = ?1 AND request_id = ?2",
   ).bind(accountId, requestId).first<{ request_hash: string; response_json: string }>();
@@ -755,10 +976,12 @@ async function uploadAsset(request: Request, env: Env, accountId: string): Promi
     return json(JSON.parse(existing.response_json), 201);
   }
 
-  await env.ASSETS.put(`assets/${sha}`, body, { httpMetadata: { contentType: format }, customMetadata: { sha256: sha } });
   const current = await env.DB.prepare("SELECT owner_account_id, current_revision, visibility FROM assets WHERE asset_id = ?1").bind(assetId).first<{ owner_account_id: string; current_revision: number; visibility: string }>();
   if (current && current.owner_account_id !== accountId) {
     return json({ code: "ASSET_ACCESS_DENIED", message: "only the asset owner may upload a new revision" }, 403);
+  }
+  if (!await env.ASSETS.head(`assets/${sha}`)) {
+    await env.ASSETS.put(`assets/${sha}`, body, { httpMetadata: { contentType: format }, customMetadata: { sha256: sha } });
   }
   const visibility = requestedVisibility || current?.visibility || "PRIVATE";
   const revision = (current?.current_revision ?? 0) + 1;
@@ -771,6 +994,26 @@ async function uploadAsset(request: Request, env: Env, accountId: string): Promi
     env.DB.prepare("INSERT INTO idempotency(account_id, request_id, request_hash, response_json) VALUES (?1, ?2, ?3, ?4)").bind(accountId, requestId, requestHash, JSON.stringify(summary)),
   ]);
   return json(summary, 201);
+}
+
+async function setAssetVisibility(request: Request, env: Env, accountId: string, assetId: string): Promise<Response> {
+  const body = await readJson(request);
+  if (typeof body.visibility !== "string" || !["PRIVATE", "PUBLIC"].includes(body.visibility)) {
+    return json({ code: "INVALID_METADATA", message: "visibility must be PRIVATE or PUBLIC" }, 400);
+  }
+  const current = await env.DB.prepare("SELECT owner_account_id FROM assets WHERE asset_id = ?1")
+    .bind(assetId).first<{ owner_account_id: string }>();
+  if (!current) return json({ code: "ASSET_NOT_FOUND", message: "asset not found" }, 404);
+  if (current.owner_account_id !== accountId) {
+    return json({ code: "ASSET_ACCESS_DENIED", message: "only the asset owner may change visibility" }, 403);
+  }
+  await env.DB.prepare("UPDATE assets SET visibility = ?1 WHERE asset_id = ?2 AND owner_account_id = ?3")
+    .bind(body.visibility, assetId, accountId).run();
+  const summary = await env.DB.prepare(
+    "SELECT x.asset_id, x.visibility, r.revision, r.name, r.format, r.raw_sha256, r.byte_length FROM assets x JOIN asset_revisions r ON r.asset_id = x.asset_id AND r.revision = x.current_revision WHERE x.asset_id = ?1",
+  ).bind(assetId).first();
+  if (!summary) return json({ code: "ASSET_NOT_FOUND", message: "asset revision not found" }, 404);
+  return json(summary, 200);
 }
 
 async function downloadAsset(request: Request, env: Env, accountId: string, assetId: string, revision: number): Promise<Response> {
@@ -816,7 +1059,7 @@ function json(value: unknown, status: number): Response {
 }
 
 function corsHeaders(): Record<string, string> {
-  return { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type,idempotency-key,x-asset-id,x-asset-name,x-asset-format,x-asset-sha256,x-asset-visibility", "access-control-allow-methods": "GET,POST,PUT,OPTIONS" };
+  return { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,content-type,idempotency-key,x-asset-metadata-encoding,x-asset-id,x-asset-name,x-asset-format,x-asset-sha256,x-asset-visibility", "access-control-allow-methods": "GET,POST,PUT,OPTIONS" };
 }
 
 function authorized(request: Request, expected: string): boolean {
@@ -830,6 +1073,35 @@ function constantTimeEqual(left: string, right: string): boolean {
   let result = a.length ^ b.length;
   for (let i = 0; i < Math.max(a.length, b.length); i++) result |= (a[i % Math.max(a.length, 1)] ?? 0) ^ (b[i % Math.max(b.length, 1)] ?? 0);
   return result === 0;
+}
+
+/** Decode only opted-in upload metadata; old clients may use literal percent and plus signs. */
+function assetPathId(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw json({ code: "INVALID_METADATA", message: "asset ID path must contain valid percent-encoded UTF-8" }, 400);
+  }
+}
+
+function assetMetadataHeader(request: Request, name: string): string | null {
+  const encoding = request.headers.get("x-asset-metadata-encoding");
+  const value = request.headers.get(name);
+  if (encoding === null) return value;
+  if (encoding !== "utf-8-percent") {
+    throw json({ code: "INVALID_METADATA", message: "asset metadata encoding is unsupported" }, 400);
+  }
+  if (value === null) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    throw json({ code: "INVALID_METADATA", message: `${name} must contain valid percent-encoded UTF-8` }, 400);
+  }
+  if (!decoded.trim() || /[\u0000-\u001f\u007f-\u009f]/.test(decoded)) {
+    throw json({ code: "INVALID_METADATA", message: `${name} must be a non-empty single-line value` }, 400);
+  }
+  return decoded;
 }
 
 function requiredHeader(request: Request, name: string): string {
@@ -848,4 +1120,160 @@ async function sha256(value: ArrayBuffer | Uint8Array): Promise<string> {
 
 async function tokenHash(value: string): Promise<string> {
   return sha256(new TextEncoder().encode(value));
+}
+
+
+type PlayerIdentityRow = { identity_id: string; identity_kind: string; profile_uuid: string; canonical_name: string | null };
+type PlayerAppearanceRow = { identity_id: string; entity_uuid: string; revision: number; asset_id: string | null;
+  asset_revision: number | null; raw_sha256: string | null; texture_id: string | null; updated_at: number };
+const PLAYER_TTL_SECONDS = 60;
+
+function motionObject(value: unknown, field: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw bad(`${field} must be an object`);
+  return value as Record<string, unknown>;
+}
+
+function motionString(value: unknown, field: string, max: number, min = 0): void {
+  if (typeof value !== "string" || value.length < min || value.length > max) throw bad(`${field} is invalid`);
+}
+
+function motionTime(value: unknown, field: string): void {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw bad(`${field} is invalid`);
+}
+
+function motionNumbers(value: unknown, field: string, keyLength: number): void {
+  const entries = Object.entries(motionObject(value, field));
+  if (entries.length > 64) throw bad(`${field} must contain at most 64 variables`);
+  for (const [key, number] of entries) {
+    motionString(key, `${field} key`, keyLength, 1);
+    if (typeof number !== "number" || !Number.isFinite(number)) throw bad(`${field} values must be finite numbers`);
+  }
+}
+
+function playerMotionJson(value: unknown): string | null {
+  if (value == null) return null;
+  const motion = motionObject(value, "motion");
+  const serialized = JSON.stringify(motion);
+  if (new TextEncoder().encode(serialized).byteLength > 65536) throw bad("motion must not exceed 65536 UTF-8 bytes");
+  motionString(motion.event_id, "motion.event_id", 64, 1);
+  motionString(motion.animation_key, "motion.animation_key", 256);
+  motionTime(motion.started_at_unix_ms, "motion.started_at_unix_ms");
+  if (motion.roaming !== undefined) motionNumbers(motion.roaming, "motion.roaming", 32);
+  if (motion.expressions !== undefined) {
+    if (!Array.isArray(motion.expressions) || motion.expressions.length > 16) throw bad("motion.expressions must contain at most 16 expressions");
+    for (const value of motion.expressions) {
+      const expression = motionObject(value, "motion expression");
+      motionString(expression.event_id, "expression.event_id", 64, 1);
+      motionTime(expression.started_at_unix_ms, "expression.started_at_unix_ms");
+      motionString(expression.expression, "expression.expression", 2048);
+      if (!Array.isArray(expression.values) || expression.values.length > 16 || expression.values.some(v => typeof v !== "number" || !Number.isFinite(v))) {
+        throw bad("expression.values must contain at most 16 finite numbers");
+      }
+    }
+  }
+  if (motion.controllers !== undefined) {
+    const entries = Object.entries(motionObject(motion.controllers, "motion.controllers"));
+    if (entries.length > 64) throw bad("motion.controllers must contain at most 64 controllers");
+    for (const [key, value] of entries) {
+      motionString(key, "controller key", 128, 1);
+      const controller = motionObject(value, "controller");
+      motionString(controller.state, "controller.state", 128);
+      motionTime(controller.started_at_unix_ms, "controller.started_at_unix_ms");
+      motionNumbers(controller.variables, "controller.variables", 64);
+    }
+  }
+  return serialized;
+}
+
+async function playerIdentity(env: Env, accountId: string, id: string): Promise<PlayerIdentityRow | null> {
+  return env.DB.prepare("SELECT identity_id, identity_kind, profile_uuid, canonical_name FROM identities WHERE identity_id = ?1 AND account_id = ?2 AND verified = 1 AND identity_kind IN ('official', 'yggdrasil') AND EXISTS (SELECT 1 FROM identity_providers WHERE provider_id = COALESCE(identities.provider_id, 'official') AND enabled = 1)")
+    .bind(id, accountId).first<PlayerIdentityRow>();
+}
+
+async function getPlayerAppearance(env: Env, accountId: string, url: URL): Promise<Response> {
+  const id = slug(url.searchParams.get("identity_id"), "identity_id");
+  if (!await playerIdentity(env, accountId, id)) return json({ code: "ACCESS_DENIED", message: "verified game identity is required" }, 403);
+  const row = await env.DB.prepare("SELECT revision FROM player_appearances WHERE identity_id = ?1").bind(id).first<{ revision: number }>();
+  return json({ revision: row?.revision ?? 0 }, 200);
+}
+
+async function setPlayerAppearance(request: Request, env: Env, accountId: string): Promise<Response> {
+  const body = await readJson(request);
+  const identityId = slug(body.identity_id, "identity_id");
+  const identity = await playerIdentity(env, accountId, identityId);
+  if (!identity) return json({ code: "ACCESS_DENIED", message: "verified game identity is required" }, 403);
+  const entityUuid = profileUuid(body.entity_uuid);
+  if (entityUuid !== identity.profile_uuid && identity.identity_kind === "official") {
+    const name = await verifyOfficialProfileName(body.profile_name_proof, identity.profile_uuid);
+    if (!name) return json({ code: "IDENTITY_PROFILE_MISMATCH", message: "fresh signed official profile name is required for offline-mode appearance" }, 403);
+    identity.canonical_name = name;
+  }
+  // Never trust a client-provided name, arbitrary UUID or certificate-only display name.
+  if (entityUuid !== identity.profile_uuid && (!identity.canonical_name || entityUuid !== offlinePlayerUuid(identity.canonical_name))) {
+    return json({ code: "IDENTITY_PROFILE_MISMATCH", message: "entity UUID does not match the verified game profile" }, 403);
+  }
+  const expected = integer(body.expected_revision, "expected_revision", 0);
+  if (!Number.isSafeInteger(expected) || expected < 0) throw bad("expected_revision is invalid");
+  const motionJson = playerMotionJson(body.motion);
+  let assetId: string | null = null, assetRevision: number | null = null, sha: string | null = null, texture: string | null = null;
+  if (body.asset_id != null) {
+    assetId = assetPathId(encodeURIComponent(text(body.asset_id, "asset_id", 1, 128)));
+    assetRevision = integer(body.asset_revision, "asset_revision", 1);
+    sha = text(body.raw_sha256, "raw_sha256", 64, 64).toLowerCase();
+    texture = text(body.texture_id, "texture_id", 1, 256);
+    if (!/^[0-9a-f]{64}$/.test(sha) || /[\u0000-\u001f\u007f]/.test(texture) || assetRevision <= 0) throw bad("player appearance is invalid");
+    const allowed = await env.DB.prepare(`SELECT r.raw_sha256, r.format FROM asset_revisions r JOIN assets a ON a.asset_id = r.asset_id
+      LEFT JOIN asset_acl acl ON acl.asset_id = a.asset_id AND acl.account_id = ?1
+      WHERE r.asset_id = ?2 AND r.revision = ?3 AND (a.visibility = 'PUBLIC' OR a.owner_account_id = ?1 OR acl.permission IN ('manage','use','render_read'))`)
+      .bind(accountId, assetId, assetRevision).first<{ raw_sha256: string; format: string }>();
+    if (!allowed || allowed.raw_sha256 !== sha) return json({ code: "ASSET_ACCESS_DENIED", message: "appearance asset revision is unavailable" }, 403);
+    if (!["ysm", "zip", "bbmodel", "gltf", "glb"].includes(allowed.format.toLowerCase())) throw bad("appearance asset format is unsupported");
+  }
+  const now = Math.floor(Date.now()/1000);
+  const appearanceWrite = expected === 0 ? env.DB.prepare(`INSERT INTO player_appearances(identity_id, entity_uuid, revision, asset_id, asset_revision, raw_sha256, texture_id, updated_at)
+    SELECT ?1, ?2, 1, ?3, ?4, ?5, ?6, ?7 WHERE ?8 = 0
+    ON CONFLICT(identity_id) DO UPDATE SET entity_uuid = excluded.entity_uuid, revision = player_appearances.revision + 1,
+      asset_id = excluded.asset_id, asset_revision = excluded.asset_revision, raw_sha256 = excluded.raw_sha256,
+      texture_id = excluded.texture_id, updated_at = excluded.updated_at WHERE player_appearances.revision = ?8`)
+    .bind(identityId, entityUuid, assetId, assetRevision, sha, texture, now, expected) : env.DB.prepare(`UPDATE player_appearances SET entity_uuid = ?1, revision = revision + 1,
+      asset_id = ?2, asset_revision = ?3, raw_sha256 = ?4, texture_id = ?5, updated_at = ?6 WHERE identity_id = ?7 AND revision = ?8`)
+    .bind(entityUuid, assetId, assetRevision, sha, texture, now, identityId, expected);
+  // Keep appearance CAS and motion atomic; stale clients cannot replace a newer motion.
+  const [updated] = await env.DB.batch([
+    appearanceWrite,
+    env.DB.prepare(`INSERT INTO player_motion(identity_id, motion_json)
+      SELECT ?1, ?2 WHERE changes() = 1
+      ON CONFLICT(identity_id) DO UPDATE SET motion_json = excluded.motion_json`)
+      .bind(identityId, assetId ? motionJson : null),
+  ]);
+  if (updated.meta.changes !== 1) return json({ code: "REVISION_CONFLICT", message: "player appearance changed; read its revision and retry" }, 409);
+  return json({ revision: expected + 1 }, 200);
+}
+
+async function queryPlayerAppearances(request: Request, env: Env, accountId: string): Promise<Response> {
+  const body = await readJson(request);
+  if (!Array.isArray(body.entity_uuids) || body.entity_uuids.length > 64) throw bad("entity_uuids must contain at most 64 UUIDs");
+  const uuids = [...new Set(body.entity_uuids.map(profileUuid))];
+  if (!uuids.length) return json({ entries: [] }, 200);
+  const now = Math.floor(Date.now()/1000);
+  const result = await env.DB.prepare(`SELECT p.*, m.motion_json, r.format, a.visibility, a.owner_account_id FROM player_appearances p
+    JOIN identities i ON i.identity_id = p.identity_id AND i.verified = 1
+    JOIN identity_providers provider ON provider.provider_id = COALESCE(i.provider_id, 'official') AND provider.enabled = 1
+    LEFT JOIN player_motion m ON m.identity_id = p.identity_id
+    LEFT JOIN assets a ON a.asset_id = p.asset_id
+    LEFT JOIN asset_revisions r ON r.asset_id = p.asset_id AND r.revision = p.asset_revision AND r.raw_sha256 = p.raw_sha256
+    WHERE p.updated_at > ? AND p.entity_uuid IN (${uuids.map(() => "?").join(",")})`)
+    .bind(now - PLAYER_TTL_SECONDS, ...uuids).all<PlayerAppearanceRow & { motion_json: string | null; format: string | null; visibility: string | null; owner_account_id: string | null }>();
+  const entries = uuids.map(uuid => {
+    const candidates = result.results.filter(row => row.entity_uuid === uuid);
+    // Provider namespaces can collide. Ambiguous identities never arbitrarily win.
+    if (candidates.length !== 1) return { entity_uuid: uuid, revision: 0, selection: null };
+    const row = candidates[0];
+    const allowed = row.visibility === "PUBLIC";
+    return { entity_uuid: uuid, revision: row.revision, selection: allowed && row.asset_id && row.format ? {
+      asset_id: row.asset_id, asset_revision: row.asset_revision, raw_sha256: row.raw_sha256,
+      format: row.format, texture_id: row.texture_id, motion: row.motion_json ? JSON.parse(row.motion_json) : null,
+    } : null };
+  });
+  return json({ entries }, 200);
 }

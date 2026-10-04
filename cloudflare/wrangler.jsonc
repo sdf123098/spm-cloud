@@ -3,13 +3,18 @@
   "name": "spm-cloud-official",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-22",
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "micafic.xyz", "custom_domain": true, "zone_name": "micafic.xyz" }
+  ],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
   },
   "vars": {
     "SPM_CLOUD_INSTANCE_ID": "official",
-    "SPM_CLOUD_ORIGIN": "https://spm-cloud-official.robinson171.workers.dev"
+    "SPM_CLOUD_ORIGIN": "https://micafic.xyz",
+    "SPM_CLOUD_LEGACY_ORIGIN": "https://spm-cloud-official.robinson171.workers.dev"
   },
   "d1_databases": [
     {

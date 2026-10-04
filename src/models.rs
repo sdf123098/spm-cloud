@@ -7,6 +7,7 @@ pub struct InstanceResponse {
     pub origin: String,
     pub websocket_origin: String,
     pub protocol: String,
+    pub capabilities: Vec<String>,
     pub limits: Limits,
 }
 
@@ -29,6 +30,17 @@ pub struct AssetSummary {
     pub format: String,
     pub raw_sha256: String,
     pub byte_length: u64,
+    #[serde(default = "private_asset_visibility")]
+    pub visibility: String,
+}
+
+fn private_asset_visibility() -> String {
+    "PRIVATE".to_owned()
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AssetVisibilityUpdate {
+    pub visibility: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,6 +164,8 @@ pub struct IdentityProviderUpdate {
     pub display_name: String,
     pub base_url: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub session_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -330,6 +344,7 @@ pub enum TargetKind {
     Player,
     Dummy,
     Maid,
+    FakePlayer,
 }
 
 impl CreateTarget {

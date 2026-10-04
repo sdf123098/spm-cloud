@@ -19,11 +19,13 @@ http = "1"
 http-body-util = "0.1"
 prost = "0.14"
 rand = "0.9"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+rsa = { version = "0.9", features = ["sha2"] }
+sha1 = { version = "0.10", features = ["oid"] }
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
@@ -39,3 +41,4 @@ protoc-bin-vendored = "3"
 
 [dev-dependencies]
 tempfile = "3"
+tokio-tungstenite = "0.29"

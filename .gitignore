@@ -7,5 +7,6 @@
 __pycache__/
 cloudflare/node_modules/
 cloudflare/.wrangler/
+/.wrangler/
 cloudflare/.dev.vars
 cloudflare/worker-configuration.d.ts
