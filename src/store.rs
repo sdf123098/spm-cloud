@@ -402,8 +402,11 @@ impl CloudStore {
 
     pub fn issue_session(&self, login: &LoginRequest) -> Result<SessionResponse, CloudError> {
         validate_slug(&login.account_id, "account_id")?;
-        if login.password.is_empty() || login.password.len() > 1024 {
-            return Err(CloudError::Unauthenticated);
+        if login.password.is_empty()
+            || login.password.encode_utf16().count() > 1024
+            || login.password.contains(['\r', '\n'])
+        {
+            return Err(CloudError::invalid_metadata("invalid password"));
         }
         let mut conn = self
             .connection
@@ -437,7 +440,8 @@ impl CloudStore {
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
         let refresh_hash = hash_token(refresh_token);
-        let session: Option<(String, i64, i64)> = conn.query_row("SELECT account_id, refresh_expires_at, revoked FROM sessions WHERE refresh_hash = ?1", [&refresh_hash], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        let tx = conn.transaction()?;
+        let session: Option<(String, i64, i64)> = tx.query_row("SELECT account_id, refresh_expires_at, revoked FROM sessions WHERE refresh_hash = ?1", [&refresh_hash], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
         let Some((account_id, expires_at, revoked)) = session else {
             return Err(CloudError::RefreshReused);
         };
@@ -447,11 +451,12 @@ impl CloudStore {
         if expires_at <= now_seconds() {
             return Err(CloudError::SessionExpired);
         }
-        conn.execute(
-            "UPDATE sessions SET revoked = 1 WHERE refresh_hash = ?1",
-            [&refresh_hash],
-        )?;
-        issue_session_in_transaction(&mut conn, &account_id)
+        if tx.execute("UPDATE sessions SET revoked=1 WHERE refresh_hash=?1 AND revoked=0 AND refresh_expires_at>?2", params![refresh_hash,now_seconds()])? != 1 {
+            return Err(CloudError::RefreshReused);
+        }
+        let session = issue_session_on_connection(&tx, &account_id)?;
+        tx.commit()?;
+        Ok(session)
     }
 
     pub fn revoke_access_token(&self, access_token: &str) -> Result<(), CloudError> {
@@ -483,11 +488,12 @@ impl CloudStore {
     ) -> Result<serde_json::Value, CloudError> {
         validate_slug(&input.provider_id, "provider_id")?;
         if input.provider_id == "official" {
-            return Err(CloudError::InvalidMetadata(
-                "official provider is immutable".to_owned(),
-            ));
+            return Err(CloudError::ProviderAccessDenied);
         }
-        if input.display_name.trim().is_empty() || input.display_name.len() > 256 {
+        if input.display_name.is_empty()
+            || input.display_name.encode_utf16().count() > 128
+            || input.display_name.contains(['\r', '\n'])
+        {
             return Err(CloudError::invalid_metadata(
                 "invalid provider display name",
             ));
@@ -686,9 +692,10 @@ impl CloudStore {
         password: &str,
     ) -> Result<AccountSummary, CloudError> {
         validate_slug(account_id, "account_id")?;
-        if password.len() < 8 || password.len() > 1024 {
+        if !(8..=1024).contains(&password.encode_utf16().count()) || password.contains(['\r', '\n'])
+        {
             return Err(CloudError::invalid_metadata(
-                "password must be between 8 and 1024 bytes",
+                "password must be between 8 and 1024 UTF-16 units and contain no line breaks",
             ));
         }
         let salt = SaltString::encode_b64(&rand::random::<[u8; 16]>()).map_err(|_| {
@@ -698,15 +705,28 @@ impl CloudStore {
             .hash_password(password.as_bytes(), &salt)
             .map_err(|_| CloudError::Internal(anyhow::anyhow!("failed to hash account password")))?
             .to_string();
-        let conn = self
+        let mut conn = self
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        conn.execute("INSERT INTO accounts(account_id, created_at) VALUES (?1, datetime('now')) ON CONFLICT(account_id) DO NOTHING", [account_id])?;
-        let inserted = conn.execute("INSERT INTO account_credentials(account_id, password_hash) VALUES (?1, ?2) ON CONFLICT(account_id) DO NOTHING", params![account_id, password_hash])?;
-        if inserted == 0 {
-            return Err(CloudError::AccessDenied);
+        let tx = conn.transaction()?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE account_id=?1)",
+            [account_id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Err(CloudError::AccountExists);
         }
+        tx.execute(
+            "INSERT INTO accounts(account_id, created_at) VALUES (?1, datetime('now'))",
+            [account_id],
+        )?;
+        tx.execute(
+            "INSERT INTO account_credentials(account_id, password_hash) VALUES (?1, ?2)",
+            params![account_id, password_hash],
+        )?;
+        tx.commit()?;
         Ok(AccountSummary {
             account_id: account_id.to_owned(),
         })
@@ -718,53 +738,35 @@ impl CloudStore {
         input: &CreateIdentity,
     ) -> Result<IdentitySummary, CloudError> {
         let identity: GameIdentity = input.identity.parse()?;
-        if input.display_name.trim().is_empty() || input.display_name.len() > 16 * 1024 {
+        let GameIdentity::Offline {
+            scope_id,
+            profile_uuid,
+        } = &identity
+        else {
+            return Err(CloudError::invalid_metadata(
+                "only offline identities can be registered here",
+            ));
+        };
+        if input.display_name.is_empty()
+            || input.display_name.encode_utf16().count() > 256
+            || input.display_name.contains(['\r', '\n'])
+        {
             return Err(CloudError::invalid_metadata(
                 "invalid identity display name",
             ));
         }
         let identity_id = format!("identity_{}", uuid::Uuid::new_v4().simple());
-        let (kind, provider_id, scope_id, profile_uuid) = match &identity {
-            GameIdentity::Official { profile_uuid } => {
-                ("official", None, None, profile_uuid.to_string())
-            }
-            GameIdentity::Yggdrasil {
-                provider_id,
-                profile_uuid,
-            } => (
-                "yggdrasil",
-                Some(provider_id.as_str()),
-                None,
-                profile_uuid.to_string(),
-            ),
-            GameIdentity::Offline {
-                scope_id,
-                profile_uuid,
-            } => (
-                "offline",
-                None,
-                Some(scope_id.as_str()),
-                profile_uuid.to_string(),
-            ),
-        };
         let conn = self
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        if let Some(provider_id) = provider_id {
-            let trusted: Option<i64> = conn
-                .query_row(
-                    "SELECT enabled FROM identity_providers WHERE provider_id = ?1",
-                    [provider_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if trusted != Some(1) {
-                return Err(CloudError::AccessDenied);
-            }
+        if !matches!(
+            scope_role(&conn, scope_id, account_id)?.as_deref(),
+            Some("manage") | Some("edit")
+        ) {
+            return Err(CloudError::ScopeAccessDenied);
         }
-        conn.execute("INSERT INTO accounts(account_id, created_at) VALUES (?1, datetime('now')) ON CONFLICT(account_id) DO NOTHING", [account_id])?;
-        conn.execute("INSERT INTO identities(identity_id, account_id, identity_kind, provider_id, scope_id, profile_uuid, display_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![identity_id, account_id, kind, provider_id, scope_id, profile_uuid, input.display_name])?;
+        conn.execute("INSERT INTO identities(identity_id, account_id, identity_kind, provider_id, scope_id, profile_uuid, display_name) VALUES (?1, ?2, 'offline', NULL, ?3, ?4, ?5)", params![identity_id, account_id, scope_id, profile_uuid.to_string(), input.display_name])?;
         Ok(IdentitySummary {
             identity_id,
             account_id: account_id.to_owned(),
@@ -2458,16 +2460,24 @@ pub(crate) fn issue_session_in_transaction(
     conn: &mut Connection,
     account_id: &str,
 ) -> Result<SessionResponse, CloudError> {
+    let tx = conn.transaction()?;
+    let session = issue_session_on_connection(&tx, account_id)?;
+    tx.commit()?;
+    Ok(session)
+}
+
+fn issue_session_on_connection(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<SessionResponse, CloudError> {
     const ACCESS_EXPIRES_IN: u64 = 15 * 60;
     const REFRESH_EXPIRES_IN: u64 = 30 * 24 * 60 * 60;
     let access_token = format!("spm_access_{}", uuid::Uuid::new_v4().simple());
     let refresh_token = format!("spm_refresh_{}", uuid::Uuid::new_v4().simple());
-    let tx = conn.transaction()?;
-    tx.execute(
+    conn.execute(
         "INSERT INTO sessions(session_id, account_id, access_hash, refresh_hash, access_expires_at, refresh_expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![uuid::Uuid::new_v4().to_string(), account_id, hash_token(&access_token), hash_token(&refresh_token), now_seconds() + ACCESS_EXPIRES_IN as i64, now_seconds() + REFRESH_EXPIRES_IN as i64]
     )?;
-    tx.commit()?;
     Ok(SessionResponse {
         access_token,
         refresh_token,
@@ -2478,6 +2488,163 @@ pub(crate) fn issue_session_in_transaction(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn credential_insertion_failure_rolls_back_account_creation() {
+        let (state, _dir) = crate::api::tests::test_state(true);
+        state.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER reject_credentials BEFORE INSERT ON account_credentials BEGIN SELECT RAISE(ABORT,'test registration rollback'); END;").unwrap();
+        assert!(
+            state
+                .store
+                .create_account("atomic-new", "test-new-password")
+                .is_err()
+        );
+        assert_eq!(
+            state
+                .store
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM accounts WHERE account_id='atomic-new'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn auth_metadata_matches_worker_utf16_boundaries() {
+        let (state, _dir) = crate::api::tests::test_state(true);
+        assert!(matches!(
+            state.store.create_account("short-pass", "一二三四五六七"),
+            Err(crate::error::CloudError::InvalidMetadata(_))
+        ));
+        state
+            .store
+            .create_account("unicode-pass", &"密码".repeat(512))
+            .unwrap();
+        state
+            .store
+            .issue_session(&crate::models::LoginRequest {
+                account_id: "unicode-pass".into(),
+                password: "密码".repeat(512),
+            })
+            .unwrap();
+        state
+            .store
+            .configure_provider(&crate::models::IdentityProviderUpdate {
+                provider_id: "unicode-provider".into(),
+                display_name: "星".repeat(128),
+                base_url: "https://example.com".into(),
+                enabled: true,
+                session_path: None,
+            })
+            .unwrap();
+    }
+    #[test]
+    fn registration_cannot_claim_an_existing_passwordless_account() {
+        let (state, _dir) = crate::api::tests::test_state(true);
+        let error = state
+            .store
+            .create_account("account_local", "attacker-password")
+            .unwrap_err();
+        assert_eq!(error.code(), "ACCOUNT_EXISTS");
+        assert_eq!(error.status(), axum::http::StatusCode::CONFLICT);
+        assert!(
+            state
+                .store
+                .issue_session(&crate::models::LoginRequest {
+                    account_id: "account_local".into(),
+                    password: "attacker-password".into()
+                })
+                .is_err()
+        );
+    }
+    #[test]
+    fn refresh_insertion_failure_preserves_previous_session() {
+        let (state, _dir) = crate::api::tests::test_state(false);
+        state
+            .store
+            .create_account("refresh-owner", "refresh-test-password")
+            .unwrap();
+        let session = state
+            .store
+            .issue_session(&crate::models::LoginRequest {
+                account_id: "refresh-owner".into(),
+                password: "refresh-test-password".into(),
+            })
+            .unwrap();
+        state.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER reject_session BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT,'test atomic refresh rollback'); END;").unwrap();
+        assert!(state.store.refresh_session(&session.refresh_token).is_err());
+        assert_eq!(
+            state
+                .store
+                .authenticate_access_token(&session.access_token)
+                .unwrap(),
+            "refresh-owner"
+        );
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_session;")
+            .unwrap();
+        assert!(state.store.refresh_session(&session.refresh_token).is_ok());
+    }
+    #[test]
+    fn official_provider_is_immutable_with_worker_error_contract() {
+        let (state, _dir) = crate::api::tests::test_state(false);
+        let error = state
+            .store
+            .configure_provider(&crate::models::IdentityProviderUpdate {
+                provider_id: "official".into(),
+                display_name: "Untrusted replacement".into(),
+                base_url: "https://example.com".into(),
+                enabled: true,
+                session_path: None,
+            })
+            .unwrap_err();
+        assert_eq!(error.code(), "ACCESS_DENIED");
+        assert_eq!(error.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+    #[test]
+    fn identity_registration_is_only_offline_and_requires_scope_editor() {
+        let (state, _dir) = crate::api::tests::test_state(false);
+        let profile = uuid::Uuid::new_v4();
+        for identity in [
+            format!("official:{profile}"),
+            format!("yggdrasil:littleskin:{profile}"),
+        ] {
+            assert!(matches!(
+                state.store.create_identity(
+                    "account_local",
+                    &crate::models::CreateIdentity {
+                        identity,
+                        display_name: "Self-reported".into()
+                    }
+                ),
+                Err(crate::error::CloudError::InvalidMetadata(_))
+            ));
+        }
+        let offline = crate::models::CreateIdentity {
+            identity: format!("offline:unowned:{profile}"),
+            display_name: "Offline".into(),
+        };
+        assert_eq!(
+            state
+                .store
+                .create_identity("account_local", &offline)
+                .unwrap_err()
+                .code(),
+            "SCOPE_ACCESS_DENIED"
+        );
+        assert_eq!(
+            state.store.list_identities("account_local").unwrap().len(),
+            0
+        );
+    }
     use super::*;
     use tempfile::tempdir;
 
@@ -2678,6 +2845,16 @@ mod tests {
                 )
                 .is_err()
         );
+        store
+            .set_scope_acl(
+                "account_local",
+                "scope",
+                &ScopeAclUpdate {
+                    account_id: "account_editor".into(),
+                    role: "editor".into(),
+                },
+            )
+            .unwrap();
         let offline_identity = store
             .create_identity(
                 "account_editor",
@@ -2741,6 +2918,16 @@ mod tests {
                     world_epoch: "epoch-1".into(),
                     entity_uuid: "12345678-1234-1234-1234-1234567890ad".into(),
                     expires_in_seconds: Some(600),
+                },
+            )
+            .unwrap();
+        store
+            .set_scope_acl(
+                "account_local",
+                "claim-scope",
+                &crate::models::ScopeAclUpdate {
+                    account_id: "account_editor".into(),
+                    role: "editor".into(),
                 },
             )
             .unwrap();

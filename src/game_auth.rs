@@ -138,7 +138,7 @@ fn create(
 ) -> Result<Json<Value>, CloudError> {
     crate::config::validate_slug(&input.provider_id, "provider_id")?;
     if input.username.is_empty()
-        || input.username.chars().count() > 64
+        || input.username.encode_utf16().count() > 64
         || input.username.chars().any(char::is_control)
     {
         return Err(CloudError::invalid_metadata("invalid username"));
@@ -245,7 +245,7 @@ async fn complete(
     id: &str,
     input: &CompleteInput,
 ) -> Result<Json<Value>, CloudError> {
-    if input.challenge_id.as_deref().is_some_and(|v| v != id) {
+    if input.challenge_id.as_deref() != Some(id) {
         return Err(CloudError::invalid_metadata(
             "challenge_id path/body mismatch",
         ));
@@ -506,6 +506,274 @@ impl CloudStore {
 mod tests {
     use super::*;
     use crate::api::tests::test_state;
+    #[tokio::test]
+    async fn http_game_registration_link_login_proofs_and_ownership() {
+        use std::io::Write;
+        let (state, _dir) = test_state(true);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, crate::api::router(state))
+                .await
+                .unwrap()
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://{address}");
+        async fn post(
+            client: &reqwest::Client,
+            base: &str,
+            path: &str,
+            body: Value,
+            token: Option<&str>,
+            status: u16,
+        ) -> Value {
+            let mut request = client.post(format!("{base}{path}")).json(&body);
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status().as_u16(), status, "{path}");
+            response.json().await.unwrap()
+        }
+        fn proof(
+            profile: Uuid,
+            challenge: &Value,
+        ) -> (Value, crate::profile_proof::test_certificate_roots::Guard) {
+            let mut command = std::process::Command::new("node");
+            command
+                .arg(format!(
+                    "{}/tools/gameauth_test_proof.mjs",
+                    env!("CARGO_MANIFEST_DIR")
+                ))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped());
+            let mut process = command.spawn().unwrap();
+            process
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(
+                    json!({"profile":profile,"payload":challenge["profile_key_payload"]})
+                        .to_string()
+                        .as_bytes(),
+                )
+                .unwrap();
+            let output = process.wait_with_output().unwrap();
+            assert!(output.status.success());
+            let fixture: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let guard =
+                crate::profile_proof::test_certificate_roots::install(profile, &fixture["root"]);
+            (fixture["profile_key"].clone(), guard)
+        }
+        let mut tokens = Vec::new();
+        for account in ["http-owner", "http-other"] {
+            post(
+                &client,
+                &base,
+                "/v1/accounts",
+                json!({"account_id":account,"password":"http-test-password"}),
+                None,
+                201,
+            )
+            .await;
+            let session = post(
+                &client,
+                &base,
+                "/v1/sessions",
+                json!({"account_id":account,"password":"http-test-password"}),
+                None,
+                200,
+            )
+            .await;
+            tokens.push(session["access_token"].as_str().unwrap().to_owned());
+        }
+        let profile = Uuid::new_v4();
+        let input = json!({"provider_id":"official","username":"Player","profile_uuid":profile});
+        // A valid certificate alone cannot log in an identity that is not linked.
+        let challenge = post(
+            &client,
+            &base,
+            "/v1/auth/login-challenges",
+            input.clone(),
+            None,
+            200,
+        )
+        .await;
+        let id = challenge["challenge_id"].as_str().unwrap();
+        let (key, guard) = proof(profile, &challenge);
+        let result = post(
+            &client,
+            &base,
+            &format!("/v1/auth/login-challenges/{id}/complete"),
+            json!({"challenge_id":id,"profile_key":key}),
+            None,
+            404,
+        )
+        .await;
+        assert_eq!(result["code"], "IDENTITY_NOT_LINKED");
+        drop(guard);
+        let challenge = post(
+            &client,
+            &base,
+            "/v1/auth/challenges",
+            input.clone(),
+            Some(&tokens[0]),
+            200,
+        )
+        .await;
+        let id = challenge["challenge_id"].as_str().unwrap();
+        let (key, guard) = proof(profile, &challenge);
+        let body = json!({"challenge_id":id,"profile_key":key});
+        let linked = post(
+            &client,
+            &base,
+            &format!("/v1/auth/challenges/{id}/complete"),
+            body.clone(),
+            Some(&tokens[0]),
+            200,
+        )
+        .await;
+        assert_eq!(linked["verification_status"], "VERIFIED");
+        let replay = post(
+            &client,
+            &base,
+            &format!("/v1/auth/challenges/{id}/complete"),
+            body,
+            Some(&tokens[0]),
+            401,
+        )
+        .await;
+        assert_eq!(replay["code"], "IDENTITY_CHALLENGE_REPLAYED");
+        drop(guard);
+        // The same proven UUID cannot move to another Cloud account.
+        let challenge = post(
+            &client,
+            &base,
+            "/v1/auth/challenges",
+            input.clone(),
+            Some(&tokens[1]),
+            200,
+        )
+        .await;
+        let id = challenge["challenge_id"].as_str().unwrap();
+        let (key, guard) = proof(profile, &challenge);
+        let refused = post(
+            &client,
+            &base,
+            &format!("/v1/auth/challenges/{id}/complete"),
+            json!({"challenge_id":id,"profile_key":key}),
+            Some(&tokens[1]),
+            409,
+        )
+        .await;
+        assert_eq!(refused["code"], "IDENTITY_ALREADY_LINKED");
+        drop(guard);
+        let challenge = post(
+            &client,
+            &base,
+            "/v1/auth/login-challenges",
+            input.clone(),
+            None,
+            200,
+        )
+        .await;
+        let id = challenge["challenge_id"].as_str().unwrap();
+        let (key, guard) = proof(profile, &challenge);
+        let logged_in = post(
+            &client,
+            &base,
+            &format!("/v1/auth/login-challenges/{id}/complete"),
+            json!({"challenge_id":id,"profile_key":key}),
+            None,
+            200,
+        )
+        .await;
+        assert_eq!(logged_in["account_id"], "http-owner");
+        let identities: Value = client
+            .get(format!("{base}/v1/identities"))
+            .bearer_auth(logged_in["access_token"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(identities.as_array().unwrap().len(), 1);
+        assert_eq!(identities[0]["identity_id"], linked["identity_id"]);
+        drop(guard);
+        // Keep the real payload binding: signing another domain must fail cryptography.
+        let mut challenge = post(
+            &client,
+            &base,
+            "/v1/auth/login-challenges",
+            input,
+            None,
+            200,
+        )
+        .await;
+        challenge["profile_key_payload"] = json!(
+            challenge["profile_key_payload"]
+                .as_str()
+                .unwrap()
+                .replace("https://localhost", "https://wrong.example")
+        );
+        let id = challenge["challenge_id"].as_str().unwrap();
+        let (key, guard) = proof(profile, &challenge);
+        let invalid = post(
+            &client,
+            &base,
+            &format!("/v1/auth/login-challenges/{id}/complete"),
+            json!({"challenge_id":id,"profile_key":key}),
+            None,
+            403,
+        )
+        .await;
+        assert_eq!(invalid["code"], "IDENTITY_PROFILE_MISMATCH");
+        drop(guard);
+        server.abort();
+    }
+    #[tokio::test]
+    async fn completion_requires_matching_body_challenge_id_without_consuming_nonce() {
+        let (state, _dir) = test_state(false);
+        let input = ChallengeInput {
+            provider_id: "official".into(),
+            username: "Player".into(),
+            profile_uuid: Uuid::new_v4(),
+        };
+        let challenge = create(&state, "login", None, &input, "test-client")
+            .unwrap()
+            .0;
+        let id = challenge["challenge_id"].as_str().unwrap();
+        let result = complete(
+            &state,
+            "login",
+            None,
+            id,
+            &CompleteInput {
+                challenge_id: None,
+                profile_key: Some(json!({})),
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(CloudError::InvalidMetadata(_))));
+        assert!(
+            claim(&state, "login", None, id).is_ok(),
+            "malformed requests must not consume a valid challenge"
+        );
+    }
+    #[test]
+    fn challenge_usernames_use_worker_utf16_length_limit() {
+        let (state, _dir) = test_state(false);
+        let input = ChallengeInput {
+            provider_id: "official".into(),
+            username: "🌊".repeat(33),
+            profile_uuid: Uuid::new_v4(),
+        };
+        assert!(matches!(
+            create(&state, "login", None, &input, "test-client"),
+            Err(CloudError::InvalidMetadata(_))
+        ));
+    }
     #[test]
     fn forwarded_client_ips_are_trusted_only_from_the_configured_proxy() {
         let (mut state, _dir) = test_state(false);

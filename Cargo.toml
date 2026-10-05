@@ -2,7 +2,7 @@
 name = "spm-cloud"
 version = "2.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "Standalone SPM Cloud service for SparkleMorpher clients"
 license = "MIT"
 

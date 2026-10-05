@@ -1,4 +1,6 @@
 /target/
+/.cargo/config.toml
+/rust-toolchain.toml
 /.env
 /data/
 *.db

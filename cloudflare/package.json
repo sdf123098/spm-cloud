@@ -13,6 +13,7 @@
     "test:player-motion": "node tests/player-motion-integration.mjs",
     "test:game-auth": "node tests/game-auth-smoke.mjs",
     "test:game-auth-integration": "node tests/game-auth-integration.mjs",
+    "test:login-parity": "node tests/login-parity-integration.mjs",
     "test:provider-egress": "node tests/provider-egress-smoke.mjs",
     "test:official-key-egress": "node tests/official-key-egress-smoke.mjs",
     "refresh:mojang-keys": "node tools/refresh-mojang-keys.mjs",

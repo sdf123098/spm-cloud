@@ -1,5 +1,6 @@
 pub const PROTOCOL_V1: &str = "spm.cloud.v1";
 pub const PLAYER_MOTION_CAPABILITY: &str = "player_motion_v1";
+pub const GAME_IDENTITY_AUTH_CAPABILITY: &str = "game_identity_auth_v1";
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const HEARTBEAT_INTERVAL_SECONDS: u64 = 15;
 pub const HEARTBEAT_TTL_SECONDS: u64 = 45;

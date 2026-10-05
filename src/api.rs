@@ -29,7 +29,8 @@ use crate::{
         RegisterEntityBinding, RevokeClaimCode, ScopeAclUpdate,
     },
     protocol::{
-        HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS, PLAYER_MOTION_CAPABILITY, PROTOCOL_V1,
+        GAME_IDENTITY_AUTH_CAPABILITY, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_TTL_SECONDS,
+        PLAYER_MOTION_CAPABILITY, PROTOCOL_V1,
     },
     store::CloudStore,
 };
@@ -230,7 +231,16 @@ async fn instance(State(state): State<AppState>) -> Json<InstanceResponse> {
         origin: state.config.origin.clone(),
         websocket_origin: websocket_origin(&state.config.origin),
         protocol: PROTOCOL_V1.to_owned(),
-        capabilities: vec![PLAYER_MOTION_CAPABILITY.to_owned()],
+        capabilities: vec![
+            PLAYER_MOTION_CAPABILITY.to_owned(),
+            GAME_IDENTITY_AUTH_CAPABILITY.to_owned(),
+        ],
+        auth: crate::models::InstanceAuth {
+            password_login: true,
+            game_identity_login: true,
+            game_identity_link: true,
+            self_registration: state.config.allow_self_registration,
+        },
         limits: Limits {
             max_message_bytes: state.config.max_message_bytes,
             max_snapshot_bytes: 16 * 1024 * 1024,
@@ -1042,10 +1052,32 @@ pub(crate) mod tests {
     async fn instance_advertises_player_motion_support() {
         let (state, _dir) = test_state(false);
         let response = serde_json::to_value(instance(State(state)).await.0).unwrap();
-        assert_eq!(
-            response["capabilities"],
-            serde_json::json!(["player_motion_v1"])
+        assert!(
+            response["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "player_motion_v1")
         );
+    }
+
+    #[tokio::test]
+    async fn instance_exposes_game_auth_and_registration_policy() {
+        for self_registration in [false, true] {
+            let (state, _dir) = test_state(self_registration);
+            let response = serde_json::to_value(instance(State(state)).await.0).unwrap();
+            assert_eq!(
+                response["auth"],
+                serde_json::json!({"password_login":true,"game_identity_login":true,"game_identity_link":true,"self_registration":self_registration})
+            );
+            assert!(
+                response["capabilities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|value| value == "game_identity_auth_v1")
+            );
+        }
     }
 
     #[test]

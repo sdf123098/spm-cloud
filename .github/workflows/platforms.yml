@@ -21,6 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo check --all-targets --all-features --locked
@@ -38,6 +41,16 @@ jobs:
             Caddyfile
             service-contract.json
           if-no-files-found: error
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.87.0"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --all-features --locked
 
   container:
     runs-on: ubuntu-latest

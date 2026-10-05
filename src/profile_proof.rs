@@ -211,6 +211,10 @@ pub async fn official_key(value: &Value, profile: Uuid, payload: &str) -> bool {
     {
         return false;
     }
+    #[cfg(test)]
+    if let Some(root) = test_certificate_roots::get(profile) {
+        return verify_key(value, profile, payload, crate::api::now_unix_ms(), &[root]);
+    }
     let pinned = roots(
         &serde_json::from_str(SNAPSHOT).unwrap(),
         "playerCertificateKeys",
@@ -226,6 +230,35 @@ pub async fn official_key(value: &Value, profile: Uuid, payload: &str) -> bool {
         crate::api::now_unix_ms(),
         &refreshed_roots("playerCertificateKeys").await,
     )
+}
+
+// Test-only trust-fetch seam: the same certificate and challenge verifier still runs.
+// No environment, request field, production setting or release symbol can install roots.
+#[cfg(test)]
+pub(crate) mod test_certificate_roots {
+    use super::*;
+    use std::{collections::HashMap, sync::Mutex};
+    static ROOTS: OnceLock<Mutex<HashMap<Uuid, RsaPublicKey>>> = OnceLock::new();
+    pub(crate) struct Guard(Uuid);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ROOTS.get().unwrap().lock().unwrap().remove(&self.0);
+        }
+    }
+    pub(crate) fn install(profile: Uuid, encoded: &Value) -> Guard {
+        let root = rsa_key(&decoded(encoded, 2048).unwrap()).unwrap();
+        ROOTS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .insert(profile, root);
+        Guard(profile)
+    }
+    pub(super) fn get(profile: Uuid) -> Option<RsaPublicKey> {
+        ROOTS
+            .get()
+            .and_then(|roots| roots.lock().unwrap().get(&profile).cloned())
+    }
 }
 
 pub async fn official_name(value: &Value, profile: Uuid) -> Option<String> {

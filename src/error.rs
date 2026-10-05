@@ -20,6 +20,12 @@ pub enum CloudError {
     NotFound,
     #[error("access denied")]
     AccessDenied,
+    #[error("scope access denied")]
+    ScopeAccessDenied,
+    #[error("provider configuration access denied")]
+    ProviderAccessDenied,
+    #[error("account already exists")]
+    AccountExists,
     #[error("invalid metadata: {0}")]
     InvalidMetadata(String),
     #[error("asset too large")]
@@ -79,6 +85,9 @@ impl CloudError {
             Self::RefreshReused => "REFRESH_REUSED",
             Self::NotFound => "ASSET_NOT_FOUND",
             Self::AccessDenied => "ASSET_ACCESS_DENIED",
+            Self::ScopeAccessDenied => "SCOPE_ACCESS_DENIED",
+            Self::ProviderAccessDenied => "ACCESS_DENIED",
+            Self::AccountExists => "ACCOUNT_EXISTS",
             Self::InvalidMetadata(_) => "INVALID_METADATA",
             Self::AssetTooLarge => "ASSET_TOO_LARGE",
             Self::AssetHashMismatch => "ASSET_HASH_MISMATCH",
@@ -106,10 +115,13 @@ impl CloudError {
             Self::IdentityProviderUnavailable => StatusCode::BAD_GATEWAY,
             Self::IdentityNotLinked => StatusCode::NOT_FOUND,
             Self::IdentityAlreadyLinked => StatusCode::CONFLICT,
+            Self::AccountExists => StatusCode::CONFLICT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::SearchRequired => StatusCode::BAD_REQUEST,
             Self::SessionExpired | Self::RefreshReused => StatusCode::UNAUTHORIZED,
-            Self::AccessDenied => StatusCode::FORBIDDEN,
+            Self::AccessDenied | Self::ScopeAccessDenied | Self::ProviderAccessDenied => {
+                StatusCode::FORBIDDEN
+            }
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::AssetRangeInvalid => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::AssetHashMismatch => StatusCode::UNPROCESSABLE_ENTITY,

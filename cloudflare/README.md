@@ -19,10 +19,11 @@ when called through that endpoint; arbitrary request hosts cannot change signing
 origins. Updated clients migrate saved official instance metadata automatically.
 
 This is deployed and suitable for controlled testing, but it is not yet a
-completed production release. Account provisioning still requires an operator
-using the bootstrap bearer (`SPM_CLOUD_ACCESS_TOKEN`); never give that secret to
-players. The official deployment currently has no trusted Minecraft/Yggdrasil
-identity provider configured. Durable Object realtime behavior has basic
+completed production release. This Worker permits public account registration;
+the bootstrap bearer (`SPM_CLOUD_ACCESS_TOKEN`) remains an operator secret and
+must never be given to players. Game identity providers are configured by D1
+migrations and operator settings; check the enabled provider list on the running
+instance. Durable Object realtime behavior has basic
 authenticated WebSocket and size/backpressure guards, but full protocol event
 recovery, lease/revocation semantics, and dual-client game validation remain
 open. Upload hashing currently buffers a bounded request body.
@@ -56,3 +57,67 @@ secret values in this repository or operator manuals.
 The Axum service at the repository root remains the cross-platform community
 self-hosting backend. This adapter is a separate official deployment target;
 it does not make SQLite or the local object directory suitable for Cloudflare.
+
+## Player animation synchronization and existing deployments
+
+Player wheel animations, explicit stop events, synchronized Molang variables and
+expressions, and automatic idle controller states use the player appearance API.
+They require both an updated client and a backend advertising
+`player_motion_v1` in `GET /v1/instance`. This works for the official deployment
+and independently configured community Cloud instances. A successful local
+build or dry run does not update an existing online service.
+
+For an existing Cloudflare deployment, apply all pending D1 migrations through
+`0009_player_motion.sql` before deploying the updated Worker. The migration adds
+the identity-scoped `player_motion` table; it preserves existing appearance data.
+For your own Worker, use your own Worker configuration, database, R2 bucket,
+instance ID and origin. The checked-in configuration targets the official
+service, so pass your configuration explicitly to every command:
+
+```bash
+npm ci
+npx wrangler deploy --dry-run --config <your-worker-config>
+npx wrangler d1 migrations apply <your-database-name> --remote --config <your-worker-config>
+npx wrangler deploy --config <your-worker-config>
+```
+
+After deployment, request your own origin's `/v1/instance` and verify that
+`capabilities` contains `player_motion_v1`. Then check with two updated clients
+that wheel playback, stop, model settings and idle states are visible to the
+other player. Private models remain local. Older clients that omit `motion`
+clear the previous action on their next appearance update.
+
+Community servers running the Rust backend must update and restart that backend
+instead. Its SQLite motion table is created during startup; Wrangler D1
+migrations apply only to this Cloudflare adapter. Keep each instance's existing
+identity and storage configuration when upgrading.
+
+## Account login and game identity binding
+
+Instance discovery advertises `game_identity_auth_v1` and an `auth` object with
+`password_login`, `game_identity_login`, `game_identity_link`, and
+`self_registration`. All four are true for this Worker. The Rust backend defaults
+to open registration on new installations and reports its configured policy;
+an explicit disabled setting remains valid.
+Clients should use these capabilities on each selected instance, including a
+self-hosted instance. The `official` identity provider refers to a Minecraft
+identity proof; it does not restrict the Cloud instance to the official service.
+
+Password login authenticates a Cloud account but does not bind a game identity.
+After login, obtain and complete an authenticated `/v1/auth/challenges` proof for
+the current game profile, then refresh `/v1/identities` and verify its `VERIFIED`
+status before enabling player synchronization. Subsequent game identity login
+uses `/v1/auth/login-challenges`. Proof completion must include the matching
+`challenge_id`; a verified identity already belonging to another account cannot
+be claimed. Proof payloads remain bound to the configured Cloud origin.
+
+Refresh tokens rotate atomically. Refreshing invalidates the previous access
+and refresh tokens; replay returns `401 REFRESH_REUSED`. Expired sessions return
+`401 SESSION_EXPIRED`. Logging out the current session invalidates its two
+tokens without changing another account's sessions. A replacement insertion
+failure rolls back revocation, so the original session remains usable.
+
+Run `npm run test:login-parity` to check both official and self-hosted instance
+IDs against real local Worker routing, sessions and D1, with fixture provider
+network responses. This test covers password login followed by binding, game
+identity login, replay prevention, account isolation and discovery capabilities.

@@ -33,7 +33,13 @@ export default {
         origin: cloudOrigin(request, env),
         websocket_origin: `${cloudOrigin(request, env).replace(/^http/, "ws")}/v1/realtime`,
         protocol: "spm.cloud.v1",
-        capabilities: ["player_motion_v1"],
+        capabilities: ["player_motion_v1", "game_identity_auth_v1"],
+        auth: {
+          password_login: true,
+          game_identity_login: true,
+          game_identity_link: true,
+          self_registration: true,
+        },
         limits: {
           max_message_bytes: 64 * 1024,
           max_snapshot_bytes: 16 * 1024 * 1024,
@@ -84,7 +90,7 @@ export default {
       const contentMatch = url.pathname.match(/^\/v1\/assets\/([^/]+)\/revisions\/(\d+)\/content$/);
       if (contentMatch && request.method === "GET") return downloadAsset(request, env, accountId, assetPathId(contentMatch[1]), Number(contentMatch[2]));
       if (url.pathname === "/v1/identities" && request.method === "GET") return listIdentities(env, accountId);
-      if (url.pathname === "/v1/identities" && request.method === "POST") return createIdentity(request, env, accountId);
+      if (url.pathname === "/v1/identities" && request.method === "POST") return await createIdentity(request, env, accountId);
       const identityBindings = url.pathname.match(/^\/v1\/identities\/([^/]+)\/offline-bindings$/);
       if (identityBindings && request.method === "POST") return createOfflineBinding(request, env, accountId, identityBindings[1]);
       const scopeOfflineBindings = url.pathname.match(/^\/v1\/scopes\/([^/]+)\/offline-bindings$/);
@@ -163,30 +169,45 @@ async function login(request: Request, env: RuntimeEnv): Promise<Response> {
 
 async function refreshSession(request: Request, env: RuntimeEnv): Promise<Response> {
   const body = await readJson(request);
-  const refreshToken = text(body.refresh_token, "refresh_token", 1, 512);
+  const refreshToken = body.refresh_token;
+  if (typeof refreshToken !== "string") throw bad("refresh_token is invalid");
+  if (refreshToken.length === 0 || refreshToken.length > 512) return json({ code: "REFRESH_REUSED", message: "refresh session is invalid" }, 401);
   const refreshHash = await sha256(new TextEncoder().encode(refreshToken));
   const now = Math.floor(Date.now() / 1000);
   const row = await env.DB.prepare(
-    "SELECT account_id FROM sessions WHERE refresh_hash = ?1 AND revoked = 0 AND refresh_expires_at > ?2",
-  ).bind(refreshHash, now).first<AccountRow>();
-  if (!row) return json({ code: "SESSION_EXPIRED", message: "refresh session is invalid" }, 401);
-  return json(await issueSession(env, row.account_id), 200);
+    "SELECT account_id, revoked, refresh_expires_at FROM sessions WHERE refresh_hash = ?1",
+  ).bind(refreshHash).first<AccountRow & { revoked: number; refresh_expires_at: number }>();
+  if (!row || row.revoked) return json({ code: "REFRESH_REUSED", message: "refresh session is invalid or was used" }, 401);
+  if (row.refresh_expires_at <= now) return json({ code: "SESSION_EXPIRED", message: "refresh session expired" }, 401);
+  return json(await issueSession(env, row.account_id, refreshHash), 200);
 }
 
-async function issueSession(env: RuntimeEnv, accountId: string): Promise<Record<string, unknown>> {
+async function issueSession(env: RuntimeEnv, accountId: string, previousRefreshHash?: string): Promise<Record<string, unknown>> {
   const accessToken = `spm_access_${crypto.randomUUID().replaceAll("-", "")}`;
   const refreshToken = `spm_refresh_${crypto.randomUUID().replaceAll("-", "")}`;
   const now = Math.floor(Date.now() / 1000);
-  await env.DB.prepare(
+  const insert = env.DB.prepare(
     `INSERT INTO sessions(session_id, account_id, access_hash, refresh_hash, access_expires_at, refresh_expires_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+     SELECT ?1, ?2, ?3, ?4, ?5, ?6${previousRefreshHash === undefined ? "" : " WHERE changes() = 1"}`,
   ).bind(
     crypto.randomUUID(), accountId,
     await sha256(new TextEncoder().encode(accessToken)),
     await sha256(new TextEncoder().encode(refreshToken)),
     now + ACCESS_TTL_SECONDS,
     now + REFRESH_TTL_SECONDS,
-  ).run();
+  );
+  if (previousRefreshHash === undefined) {
+    await insert.run();
+  } else {
+    // D1 batch is one transaction. Only the request that claims the live token
+    // may insert a replacement; a failed insert also rolls back revocation.
+    const result = await env.DB.batch([
+      env.DB.prepare("UPDATE sessions SET revoked = 1 WHERE refresh_hash = ?1 AND account_id = ?2 AND revoked = 0 AND refresh_expires_at > ?3")
+        .bind(previousRefreshHash, accountId, now),
+      insert,
+    ]);
+    if (result[0].meta.changes !== 1) throw json({ code: "REFRESH_REUSED", message: "refresh session was used" }, 401);
+  }
   return {
     access_token: accessToken,
     refresh_token: refreshToken,
@@ -211,8 +232,9 @@ async function authenticate(request: Request, env: RuntimeEnv): Promise<string |
   }
   const now = Math.floor(Date.now() / 1000);
   const row = await env.DB.prepare(
-    "SELECT account_id FROM sessions WHERE access_hash = ?1 AND revoked = 0 AND access_expires_at > ?2",
-  ).bind(await sha256(new TextEncoder().encode(token)), now).first<AccountRow>();
+    "SELECT account_id, revoked, access_expires_at FROM sessions WHERE access_hash = ?1",
+  ).bind(await sha256(new TextEncoder().encode(token))).first<AccountRow & { revoked: number; access_expires_at: number }>();
+  if (row && (row.revoked || row.access_expires_at <= now)) throw json({ code: "SESSION_EXPIRED", message: "access session expired or was revoked" }, 401);
   return row?.account_id ?? null;
 }
 
@@ -433,6 +455,7 @@ async function createGameChallenge(request: Request, env: RuntimeEnv, purpose: G
   const body = await readJson(request);
   const providerId = slug(body.provider_id, "provider_id");
   const username = text(body.username, "username", 1, 64);
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(username)) throw bad("username is invalid");
   const uuid = profileUuid(body.profile_uuid);
   const provider = await env.DB.prepare("SELECT provider_id FROM identity_providers WHERE provider_id = ?1 AND enabled = 1")
     .bind(providerId).first();

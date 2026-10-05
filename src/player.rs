@@ -38,7 +38,6 @@ pub struct PlayerSelection {
     raw_sha256: String,
     format: String,
     texture_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     motion: Option<serde_json::Value>,
 }
 #[derive(Serialize)]
@@ -155,8 +154,9 @@ fn validate_motion(value: &serde_json::Value) -> Result<(), CloudError> {
     {
         return Err(invalid());
     }
-    if let Some(roaming) = object.get("roaming")
-        && !motion_numbers(roaming, 32)
+    if object
+        .get("roaming")
+        .is_some_and(|roaming| !motion_numbers(roaming, 32))
     {
         return Err(invalid());
     }
@@ -311,7 +311,7 @@ impl CloudStore {
             VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(identity_id) DO UPDATE SET entity_uuid=excluded.entity_uuid,
             revision=excluded.revision,asset_id=excluded.asset_id,asset_revision=excluded.asset_revision,raw_sha256=excluded.raw_sha256,
             texture_id=excluded.texture_id,updated_at=excluded.updated_at",params![input.identity_id,input.entity_uuid.to_string(),next as i64,input.asset_id,asset_revision.map(|v| v as i64),sha,texture,now()])?;
-        if let Some(motion) = &input.motion {
+        if let Some(motion) = input.motion.as_ref().filter(|_| input.asset_id.is_some()) {
             let json = serde_json::to_string(motion)
                 .map_err(|_| CloudError::invalid_metadata("invalid player motion"))?;
             tx.execute("INSERT INTO player_motion(identity_id,motion_json) VALUES (?1,?2) ON CONFLICT(identity_id) DO UPDATE SET motion_json=excluded.motion_json", params![input.identity_id,json])?;
@@ -545,6 +545,13 @@ mod tests {
             observed_motion(&store, first).is_null(),
             "old clients must clear stale motion"
         );
+        let selected =
+            serde_json::to_value(store.query_players("observer", &[first]).unwrap()).unwrap();
+        assert_eq!(
+            selected[0]["selection"].get("motion"),
+            Some(&serde_json::Value::Null),
+            "empty motion must have the same null response shape as Worker"
+        );
         other.expected_revision = 1;
         other.motion = None;
         store.publish_player("account_local", &other).unwrap();
@@ -601,6 +608,32 @@ mod tests {
         body.asset_id = None;
         body.expected_revision = 2;
         store.publish_player("account_local", &body).unwrap();
+        assert!(observed_motion(&store, profile).is_null());
+        assert_eq!(
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM player_motion WHERE identity_id='motion'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0,
+            "clearing the model must delete its motion even if the request supplies an old motion object"
+        );
+    }
+
+    #[test]
+    fn failed_motion_write_rolls_back_player_appearance_cas() {
+        let (_dir, store, profile, body) = motion_fixture();
+        store.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_motion BEFORE INSERT ON player_motion BEGIN SELECT RAISE(ABORT, 'test atomic rollback'); END;").unwrap();
+        assert!(matches!(
+            store.publish_player("account_local", &body),
+            Err(CloudError::Sqlite(_))
+        ));
+        assert_eq!(store.player_revision("account_local", "motion").unwrap(), 0);
         assert!(observed_motion(&store, profile).is_null());
     }
 

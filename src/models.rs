@@ -8,7 +8,16 @@ pub struct InstanceResponse {
     pub websocket_origin: String,
     pub protocol: String,
     pub capabilities: Vec<String>,
+    pub auth: InstanceAuth,
     pub limits: Limits,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InstanceAuth {
+    pub password_login: bool,
+    pub game_identity_login: bool,
+    pub game_identity_link: bool,
+    pub self_registration: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

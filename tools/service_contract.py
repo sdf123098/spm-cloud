@@ -5,6 +5,7 @@ Uses only the Python standard library. Temporary credentials/data are never prin
 No request goes to the official Cloud. The optional --model checks original user model bytes.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import hashlib
 import json
@@ -21,7 +22,7 @@ import urllib.request
 import uuid
 
 
-def run(binary, model=None):
+def run(binary, model=None, registration_policy="restricted"):
     with tempfile.TemporaryDirectory(prefix="spm-contract-") as temporary:
         data=Path(temporary)
         with socket.socket() as sock:
@@ -32,8 +33,9 @@ def run(binary, model=None):
             if key.startswith("SPM_CLOUD_"): del env[key]
         env.update(SPM_CLOUD_BIND=f"127.0.0.1:{port}",SPM_CLOUD_ORIGIN="https://cloud.example.test",
             SPM_CLOUD_INSTANCE_ID="contract-test",SPM_CLOUD_DATABASE=str(data/"cloud.db"),
-            SPM_CLOUD_OBJECT_DIR=str(data/"objects"),SPM_CLOUD_ACCESS_TOKEN=secret,
-            SPM_CLOUD_ALLOW_SELF_REGISTRATION="false")
+            SPM_CLOUD_OBJECT_DIR=str(data/"objects"),SPM_CLOUD_ACCESS_TOKEN=secret)
+        if registration_policy != "default":
+            env["SPM_CLOUD_ALLOW_SELF_REGISTRATION"] = "true" if registration_policy == "open" else "false"
         with (data/"service.log").open("wb") as log:
             process=subprocess.Popen([str(binary.resolve())],cwd=data,env=env,stdout=log,stderr=subprocess.STDOUT,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
@@ -49,7 +51,7 @@ def run(binary, model=None):
                 except urllib.error.HTTPError as error: response=error
                 with response:
                     content=response.read();response_headers=response.headers;actual=response.status
-                assert actual==status,f"{method} {path}: expected {status}, received {actual}"
+                assert actual in (status if isinstance(status, tuple) else (status,)),f"{method} {path}: expected {status}, received {actual}"
                 checks.append(f"{method} {path} -> {actual}")
                 if raw: return content,response_headers
                 return json.loads(content) if content else None
@@ -62,25 +64,43 @@ def run(binary, model=None):
                         time.sleep(.1)
                 instance=request("GET","/v1/instance",token=None)
                 assert instance["websocket_origin"]=="wss://cloud.example.test/v1/realtime"
+                assert {"player_motion_v1","game_identity_auth_v1"}.issubset(instance["capabilities"])
+                public_registration = registration_policy != "restricted"
+                assert instance["auth"] == {"password_login":True,"game_identity_login":True,"game_identity_link":True,"self_registration":public_registration}
                 _,cors=request("OPTIONS","/v1/assets",token=None,status=204,raw=True)
                 assert cors["Access-Control-Allow-Origin"]=="*"
-                request("POST","/v1/accounts",{"account_id":"denied","password":"test-denied-password"},token=None,status=401)
+                request("POST","/v1/accounts",{"account_id":"anonymous","password":"test-anonymous-password"},token=None,status=201 if public_registration else 401)
+                duplicate=request("POST","/v1/accounts",{"account_id":"account_local","password":"cannot-claim-bootstrap"},status=409)
+                assert duplicate["code"]=="ACCOUNT_EXISTS"
                 sessions={}
                 for account in ["owner","observer"]:
                     request("POST","/v1/accounts",{"account_id":account,"password":"contract-password-123"},status=201)
                     sessions[account]=request("POST","/v1/sessions",{"account_id":account,"password":"contract-password-123"},token=None)
                 owner=sessions["owner"]["access_token"];observer=sessions["observer"]["access_token"]
+                assert request("GET","/v1/identities",token=owner)==[]
+                duplicate=request("POST","/v1/accounts",{"account_id":"owner","password":"other-test-password"},status=409)
+                assert duplicate["code"]=="ACCOUNT_EXISTS"
                 providers=request("GET","/v1/identity-providers",token=None)
                 assert {p["provider_id"] for p in providers}=={"official","littleskin","elyby","drasl_unmojang"}
                 request("POST","/v1/identity-providers",{"provider_id":"extra","display_name":"Extra","base_url":"https://example.com","session_path":"/session/hasJoined","enabled":True},token=owner,status=403)
                 request("POST","/v1/identity-providers",{"provider_id":"extra","display_name":"Extra","base_url":"https://example.com","session_path":"/session/hasJoined","enabled":True})
+                assert request("POST","/v1/identity-providers",{"provider_id":"official","display_name":"Replacement","base_url":"https://example.com","enabled":True},status=403)["code"]=="ACCESS_DENIED"
                 profile=str(uuid.uuid4())
                 challenge=request("POST","/v1/auth/login-challenges",{"provider_id":"official","username":"Player","profile_uuid":profile},token=None)
                 assert challenge["profile_key_payload"].split("\n")[1:6]==["https://cloud.example.test","login","","official",profile]
                 complete=f'/v1/auth/login-challenges/{challenge["challenge_id"]}/complete'
-                request("POST",complete,{"profile_key":{}},token=None,status=403)
-                replay=request("POST",complete,{"profile_key":{}},token=None,status=401)
+                request("POST",complete,{"profile_key":{}},token=None,status=400)
+                request("POST",complete,{"challenge_id":challenge["challenge_id"],"profile_key":{}},token=None,status=403)
+                replay=request("POST",complete,{"challenge_id":challenge["challenge_id"],"profile_key":{}},token=None,status=401)
                 assert replay["code"]=="IDENTITY_CHALLENGE_REPLAYED"
+                link=request("POST","/v1/auth/challenges",{"provider_id":"official","username":"Player","profile_uuid":profile},token=owner)
+                assert link["profile_key_payload"].split("\n")[1:6]==["https://cloud.example.test","link","owner","official",profile]
+                complete_link=f'/v1/auth/challenges/{link["challenge_id"]}/complete'
+                request("POST",complete_link,{"challenge_id":link["challenge_id"],"profile_key":{}},token=observer,status=401)
+                request("POST",complete_link,{"profile_key":{}},token=owner,status=400)
+                request("POST",complete_link,{"challenge_id":link["challenge_id"],"profile_key":{}},token=owner,status=403)
+                assert request("POST",complete_link,{"challenge_id":link["challenge_id"],"profile_key":{}},token=owner,status=401)["code"]=="IDENTITY_CHALLENGE_REPLAYED"
+                request("POST","/v1/identities",{"identity":f"official:{profile}","display_name":"Unverified"},token=owner,status=400)
                 content=model.read_bytes() if model else b"\x00original-model\xff\r\n"
                 sha=hashlib.sha256(content).hexdigest()
                 def upload(asset,visibility="PRIVATE"):
@@ -127,6 +147,7 @@ def run(binary, model=None):
                 request("POST","/v1/scopes",{"scope_id":"scope_contract","name":"Contract","world_epoch":"epoch_contract"},token=owner,status=201)
                 request("GET","/v1/scopes/scope_contract/targets",token=observer,status=403)
                 request("PUT","/v1/scopes/scope_contract/acl",{"account_id":"observer","role":"viewer"},token=owner)
+                assert request("POST","/v1/identities",{"identity":f"offline:scope_contract:{profile}","display_name":"Pending"},token=observer,status=403)["code"]=="SCOPE_ACCESS_DENIED"
                 request("POST","/v1/targets",{"scope_id":"scope_contract","target_id":"target_contract","kind":"DUMMY","display_name":"Dummy"},token=owner,status=201)
                 request("PUT","/v1/targets/target_contract/acl",{"account_id":"observer","role":"viewer"},token=owner)
                 request("GET","/v1/scopes/scope_contract/targets",token=observer)
@@ -139,12 +160,26 @@ def run(binary, model=None):
                 request("PUT","/v1/targets/target_contract/animation",animation,token=owner)
                 request("GET","/v1/targets/target_contract/animation",token=observer)
                 request("PUT","/v1/scopes/scope_contract/acl",{"account_id":"observer","role":"editor"},token=owner)
+                offline=request("POST","/v1/identities",{"identity":f"offline:scope_contract:{profile}","display_name":"Pending"},token=observer,status=201)
+                assert offline["verification_status"]=="PENDING_VERIFICATION"
                 request("POST","/v1/targets",{"scope_id":"scope_contract","target_id":"editor_contract","kind":"DUMMY","display_name":"Editor Dummy"},token=observer,status=201)
-                refresh=request("POST","/v1/sessions/refresh",{"refresh_token":sessions["observer"]["refresh_token"]},token=None)
+                # Actual release rollback: failed replacement insertion cannot revoke the old session.
+                with closing(sqlite3.connect(data/"cloud.db")) as conn, conn:
+                    conn.execute("CREATE TRIGGER reject_refresh BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT,'test refresh rollback'); END;")
+                request("POST","/v1/sessions/refresh",{"refresh_token":sessions["observer"]["refresh_token"]},token=None,status=500)
+                request("GET","/v1/assets?scope=mine",token=observer)
+                with closing(sqlite3.connect(data/"cloud.db")) as conn, conn:
+                    conn.execute("DROP TRIGGER reject_refresh")
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    results=list(executor.map(lambda _: request("POST","/v1/sessions/refresh",{"refresh_token":sessions["observer"]["refresh_token"]},token=None,status=(200,401)), range(2)))
+                assert sum("access_token" in result for result in results)==1
+                assert sum(result.get("code")=="REFRESH_REUSED" for result in results)==1
+                refresh=next(result for result in results if "access_token" in result)
+                request("GET","/v1/assets?scope=mine",token=observer,status=401)
                 request("POST","/v1/sessions/refresh",{"refresh_token":sessions["observer"]["refresh_token"]},token=None,status=401)
                 request("DELETE","/v1/sessions/current",token=refresh["access_token"],status=204)
                 request("GET","/v1/assets?scope=mine",token=refresh["access_token"],status=401)
-                return {"passed_requests":len(checks),"model_bytes":len(content),"model_sha256":sha,"checks":checks}
+                return {"passed_requests":len(checks),"model_bytes":len(content),"model_sha256":sha,"registration_policy":registration_policy,"checks":checks}
             finally:
                 process.terminate()
                 try: process.wait(timeout=10)
@@ -154,6 +189,7 @@ def run(binary, model=None):
 if __name__=="__main__":
     parser=argparse.ArgumentParser();parser.add_argument("--binary",type=Path,required=True)
     parser.add_argument("--model",type=Path);parser.add_argument("--output",type=Path)
-    args=parser.parse_args();result=run(args.binary,args.model)
+    parser.add_argument("--registration-policy",choices=["default","open","restricted"],default="restricted")
+    args=parser.parse_args();result=run(args.binary,args.model,args.registration_policy)
     if args.output: args.output.write_text(json.dumps(result,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
     print(f'Compiled service HTTP contract passed: {result["passed_requests"]} requests, model {result["model_bytes"]} bytes')

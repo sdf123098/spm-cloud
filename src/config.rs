@@ -57,12 +57,11 @@ impl CloudConfig {
         let bootstrap_password_hash = env::var("SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH")
             .ok()
             .filter(|v| !v.is_empty());
-        let allow_self_registration = env::var("SPM_CLOUD_ALLOW_SELF_REGISTRATION")
-            .unwrap_or_else(|_| "false".to_owned())
-            .parse::<bool>()
-            .map_err(|_| {
-                CloudError::configuration("SPM_CLOUD_ALLOW_SELF_REGISTRATION must be true or false")
-            })?;
+        let allow_self_registration = registration_policy(
+            env::var("SPM_CLOUD_ALLOW_SELF_REGISTRATION")
+                .ok()
+                .as_deref(),
+        )?;
         let max_asset_bytes = env::var("SPM_CLOUD_MAX_ASSET_BYTES")
             .ok()
             .map(|value| {
@@ -108,6 +107,12 @@ impl CloudConfig {
     }
 }
 
+fn registration_policy(value: Option<&str>) -> Result<bool, CloudError> {
+    value.unwrap_or("true").parse::<bool>().map_err(|_| {
+        CloudError::configuration("SPM_CLOUD_ALLOW_SELF_REGISTRATION must be true or false")
+    })
+}
+
 fn normalize_origin(origin: &str) -> Result<String, CloudError> {
     let url = reqwest::Url::parse(origin.trim())
         .map_err(|_| CloudError::configuration("SPM_CLOUD_ORIGIN must be a bare HTTPS origin"))?;
@@ -143,6 +148,13 @@ pub fn validate_slug(value: &str, field: &str) -> Result<(), CloudError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registration_defaults_to_official_open_policy_and_honors_operator_setting() {
+        assert!(registration_policy(None).unwrap());
+        assert!(registration_policy(Some("true")).unwrap());
+        assert!(!registration_policy(Some("false")).unwrap());
+        assert!(registration_policy(Some("yes")).is_err());
+    }
     #[test]
     fn signing_origin_is_normalized_and_cannot_include_credentials_or_paths() {
         assert_eq!(
