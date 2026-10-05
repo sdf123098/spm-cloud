@@ -7,7 +7,16 @@ use tower_http::trace::TraceLayer;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let config = CloudConfig::from_env()?;
+    let providers = spm_cloud::game_auth::providers_from_environment(
+        std::env::var("SPM_CLOUD_IDENTITY_PROVIDERS")
+            .ok()
+            .as_deref(),
+        std::env::var("SPM_CLOUD_HAS_JOINED_URL").ok().as_deref(),
+    )?;
     let store = CloudStore::open(&config)?;
+    for provider in providers {
+        store.configure_provider(&provider)?;
+    }
     let cleanup_store = store.clone();
     let cleanup_dir = config.object_dir.clone();
     tokio::spawn(async move {

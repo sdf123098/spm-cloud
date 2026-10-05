@@ -498,19 +498,14 @@ impl CloudStore {
                 "invalid provider display name",
             ));
         }
-        crate::game_auth::provider_url(&input.base_url)?;
-        let session_path = input
-            .session_path
-            .as_deref()
-            .unwrap_or("/sessionserver/session/minecraft/hasJoined");
-        crate::game_auth::session_path(session_path)?;
+        let (base_url, session_path) = crate::game_auth::provider_endpoint(input)?;
         let conn = self
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        conn.execute("INSERT INTO identity_providers(provider_id, display_name, base_url, enabled, session_path) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(provider_id) DO UPDATE SET display_name = excluded.display_name, base_url = excluded.base_url, enabled = excluded.enabled, session_path=excluded.session_path", params![input.provider_id, input.display_name, input.base_url, i64::from(input.enabled),session_path])?;
+        conn.execute("INSERT INTO identity_providers(provider_id, display_name, base_url, enabled, session_path) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(provider_id) DO UPDATE SET display_name = excluded.display_name, base_url = excluded.base_url, enabled = excluded.enabled, session_path=excluded.session_path", params![input.provider_id, input.display_name, base_url, i64::from(input.enabled),session_path])?;
         Ok(
-            serde_json::json!({"provider_id": input.provider_id, "display_name": input.display_name, "base_url": input.base_url, "enabled": input.enabled}),
+            serde_json::json!({"provider_id": input.provider_id, "display_name": input.display_name, "base_url": base_url, "session_path": session_path, "enabled": input.enabled}),
         )
     }
 
@@ -2539,6 +2534,7 @@ mod tests {
                 base_url: "https://example.com".into(),
                 enabled: true,
                 session_path: None,
+                has_joined_url: None,
             })
             .unwrap();
     }
@@ -2604,6 +2600,7 @@ mod tests {
                 base_url: "https://example.com".into(),
                 enabled: true,
                 session_path: None,
+                has_joined_url: None,
             })
             .unwrap_err();
         assert_eq!(error.code(), "ACCESS_DENIED");
@@ -2770,6 +2767,7 @@ mod tests {
         assert!(matches!(
             store.configure_provider(&crate::models::IdentityProviderUpdate {
                 session_path: None,
+                has_joined_url: None,
                 provider_id: "private".into(),
                 display_name: "Private".into(),
                 base_url: "https://127.0.0.1".into(),

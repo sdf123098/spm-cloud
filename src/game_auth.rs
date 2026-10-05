@@ -301,16 +301,94 @@ fn provider(store: &CloudStore, id: &str) -> Result<(String, String), CloudError
 }
 
 pub fn session_path(path: &str) -> Result<(), CloudError> {
-    if matches!(
-        path,
-        "/sessionserver/session/minecraft/hasJoined"
-            | "/session/minecraft/hasJoined"
-            | "/session/hasJoined"
-    ) {
+    if path.starts_with('/')
+        && !path.starts_with("//")
+        && path.len() <= 512
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
+        && !path.split('/').any(|part| part == "." || part == "..")
+    {
         Ok(())
     } else {
         Err(CloudError::IdentityProviderUntrusted)
     }
+}
+pub fn provider_endpoint(
+    input: &crate::models::IdentityProviderUpdate,
+) -> Result<(String, String), CloudError> {
+    if let Some(endpoint) = &input.has_joined_url {
+        if !input.base_url.is_empty() || input.session_path.is_some() {
+            return Err(CloudError::invalid_metadata(
+                "use has_joined_url or base_url/session_path, not both",
+            ));
+        }
+        let url = provider_url(endpoint)?;
+        session_path(url.path())?;
+        if url.path() == "/" {
+            return Err(CloudError::invalid_metadata(
+                "has_joined_url needs an endpoint path",
+            ));
+        }
+        return Ok((url.origin().ascii_serialization(), url.path().to_owned()));
+    }
+    let url = provider_url(&input.base_url)?;
+    let path = input
+        .session_path
+        .as_deref()
+        .unwrap_or("/sessionserver/session/minecraft/hasJoined");
+    session_path(path)?;
+    Ok((
+        url.as_str().trim_end_matches('/').to_owned(),
+        path.to_owned(),
+    ))
+}
+
+/// Operator-owned startup configuration; player requests cannot add trusted providers.
+pub fn providers_from_environment(
+    json: Option<&str>,
+    gateway: Option<&str>,
+) -> Result<Vec<crate::models::IdentityProviderUpdate>, CloudError> {
+    let json = json.filter(|v| !v.trim().is_empty());
+    let gateway = gateway.filter(|v| !v.trim().is_empty());
+    if json.is_some() && gateway.is_some() {
+        return Err(CloudError::configuration(
+            "set SPM_CLOUD_HAS_JOINED_URL or SPM_CLOUD_IDENTITY_PROVIDERS, not both",
+        ));
+    }
+    let providers: Vec<crate::models::IdentityProviderUpdate> = if let Some(json) = json {
+        serde_json::from_str(json).map_err(|_| {
+            CloudError::configuration("SPM_CLOUD_IDENTITY_PROVIDERS must be a provider JSON array")
+        })?
+    } else if let Some(url) = gateway {
+        vec![crate::models::IdentityProviderUpdate {
+            provider_id: "custom".into(),
+            display_name: "External login".into(),
+            base_url: String::new(),
+            enabled: true,
+            session_path: None,
+            has_joined_url: Some(url.trim().into()),
+        }]
+    } else {
+        Vec::new()
+    };
+    let mut ids = std::collections::HashSet::new();
+    for input in &providers {
+        crate::config::validate_slug(&input.provider_id, "provider_id")?;
+        if input.provider_id == "official" || !ids.insert(&input.provider_id) {
+            return Err(CloudError::configuration(
+                "provider IDs must be unique and cannot replace official",
+            ));
+        }
+        if input.display_name.is_empty()
+            || input.display_name.encode_utf16().count() > 128
+            || input.display_name.contains(['\r', '\n'])
+        {
+            return Err(CloudError::configuration("invalid provider display name"));
+        }
+        provider_endpoint(input)?;
+    }
+    Ok(providers)
 }
 pub fn provider_url(base: &str) -> Result<reqwest::Url, CloudError> {
     let url = reqwest::Url::parse(base).map_err(|_| CloudError::IdentityProviderUntrusted)?;
@@ -504,6 +582,57 @@ impl CloudStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn operator_environment_accepts_one_gateway_or_a_provider_list() {
+        let gateway =
+            providers_from_environment(None, Some("https://auth.example.com/all-in-one/hasJoined"))
+                .unwrap();
+        assert_eq!(gateway.len(), 1);
+        assert_eq!(gateway[0].provider_id, "custom");
+        let list = r#"[{"provider_id":"my-auth","display_name":"My Auth","base_url":"https://auth.example.com/api/yggdrasil","enabled":true}]"#;
+        assert_eq!(
+            providers_from_environment(Some(list), None).unwrap().len(),
+            1
+        );
+        assert!(providers_from_environment(None, None).unwrap().is_empty());
+        assert!(
+            providers_from_environment(Some(list), Some("https://auth.example.com/hasJoined"))
+                .is_err()
+        );
+        assert!(providers_from_environment(Some("not-json"), None).is_err());
+        assert!(
+            providers_from_environment(None, Some("http://auth.example.com/hasJoined")).is_err()
+        );
+    }
+    #[test]
+    fn full_has_joined_url_configures_a_gateway_without_path_splitting() {
+        let (state, _dir) = crate::api::tests::test_state(true);
+        let input: crate::models::IdentityProviderUpdate =
+            serde_json::from_value(serde_json::json!({
+                "provider_id": "gateway", "display_name": "External login", "enabled": true,
+                "has_joined_url": "https://auth.example.com/all-in-one/hasJoined"
+            }))
+            .unwrap();
+        state.store.configure_provider(&input).unwrap();
+        let (base, path) = provider(&state.store, "gateway").unwrap();
+        assert_eq!(
+            format!("{base}{path}"),
+            "https://auth.example.com/all-in-one/hasJoined"
+        );
+        session_path(&path).unwrap();
+        for endpoint in [
+            "http://auth.example.com/hasJoined",
+            "https://127.0.0.1/hasJoined",
+            "https://auth.example.com/hasJoined?token=secret",
+            "https://user:password@auth.example.com/hasJoined",
+        ] {
+            let input = serde_json::from_value(serde_json::json!({
+                "provider_id":"bad", "display_name":"Bad", "enabled":true, "has_joined_url":endpoint
+            }))
+            .unwrap();
+            assert!(state.store.configure_provider(&input).is_err());
+        }
+    }
     use super::*;
     use crate::api::tests::test_state;
     #[tokio::test]

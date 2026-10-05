@@ -126,6 +126,36 @@ try {
   assert.equal(session.status, 200, JSON.stringify(session.body));
   const token = session.body.access_token;
 
+  const gateway = await call("/v1/identity-providers", {
+    method: "POST", token: "integration-operator-secret", body: {
+      provider_id: "gateway", display_name: "External login", enabled: true,
+      has_joined_url: "https://auth.example.com/all-in-one/hasJoined",
+    },
+  });
+  assert.equal(gateway.status, 200, JSON.stringify(gateway.body));
+  assert.equal((await call("/v1/identity-providers", { method: "POST", body: {
+    provider_id: "untrusted", display_name: "Untrusted", enabled: true,
+    has_joined_url: "https://auth.example.com/hasJoined",
+  } })).status, 403);
+  const gatewayProfile = { provider_id: "gateway", username: "GatewayPlayer", profile_uuid: crypto.randomUUID() };
+  const gatewayLink = await challengeAndComplete(gatewayProfile, "link", token);
+  assert.equal(gatewayLink.completed.status, 200, JSON.stringify(gatewayLink.completed.body));
+  const gatewayLogin = await challengeAndComplete(gatewayProfile, "login");
+  assert.equal(gatewayLogin.completed.status, 200, JSON.stringify(gatewayLogin.completed.body));
+  assert.equal(gatewayLogin.completed.body.account_id, accountId);
+  assert.ok(outboundPaths.includes("auth.example.com/all-in-one/hasJoined"));
+  assert.ok(!outboundPaths.some(path => path.startsWith("auth.example.com/all-in-one/hasJoined/")));
+  for (const has_joined_url of ["http://auth.example.com/hasJoined", "https://127.0.0.1/hasJoined",
+    "https://user:password@auth.example.com/hasJoined", "https://auth.example.com/hasJoined?token=secret"]) {
+    assert.equal((await call("/v1/identity-providers", { method: "POST", token: "integration-operator-secret", body: {
+      provider_id: "bad-gateway", display_name: "Bad", enabled: true, has_joined_url,
+    } })).status, 400);
+  }
+  assert.equal((await call("/v1/identity-providers", { method: "POST", token: "integration-operator-secret", body: {
+    provider_id: "gateway", display_name: "External login", enabled: true,
+    has_joined_url: "https://auth.example.com/hasJoined", base_url: "https://auth.example.com",
+  } })).status, 400);
+
   for (const [provider_id, expectedPath] of [
     ["official", "sessionserver.mojang.com/session/minecraft/hasJoined"],
     ["littleskin", "littleskin.cn/api/yggdrasil/sessionserver/session/minecraft/hasJoined"],

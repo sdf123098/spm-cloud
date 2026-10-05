@@ -31,6 +31,38 @@ Production monitoring/alerting, load/cost validation, and recovery drills are
 also release gates. Do not treat this status as a claim of production
 readiness.
 
+## External identity providers / 外置认证
+
+Both the Rust backend and this Worker accept a complete `has_joined_url` in the
+operator-authenticated `POST /v1/identity-providers` request:
+
+```json
+{
+  "provider_id": "my-auth",
+  "display_name": "My external login",
+  "has_joined_url": "https://auth.example.com/all-in-one/hasJoined",
+  "enabled": true
+}
+```
+
+An all-in-one gateway can be configured once. `base_url` with an optional
+`session_path` remains supported; do not combine that form with `has_joined_url`.
+Keep existing provider IDs when updating their endpoint. Only the operator can
+add trusted services; players must verify and bind their game identities before
+automatic game-account login.
+
+Rust startup variables `SPM_CLOUD_HAS_JOINED_URL` and
+`SPM_CLOUD_IDENTITY_PROVIDERS` configure the Rust process, not this Worker.
+Configure the Worker through its operator API, then update the running service
+with the deployment workflow below. Pushing source to GitHub does not deploy a
+Worker. Self-hosted configuration does not add a provider to the official
+instance. Rust setup: [English](../README.md) / [中文](../README_zh.md).
+
+Rust 与官方 Worker 的管理员接口均支持完整 `has_joined_url`，all-in-one 网关
+只需配置一次。运营者启用认证服务、玩家完成首次身份验证与绑定后才能自动登录。
+两个环境变量用于 Rust 启动配置，Worker 通过管理员接口配置；源码推送与线上
+Worker 发布是独立步骤。自建实例的配置不会自动写入官方实例。
+
 ## Setup
 
 ```bash

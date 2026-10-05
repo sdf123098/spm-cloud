@@ -414,8 +414,18 @@ async function configureIdentityProvider(request: Request, env: RuntimeEnv): Pro
   const providerId = slug(body.provider_id, "provider_id");
   if (providerId === "official") return json({ code: "ACCESS_DENIED", message: "official provider is fixed" }, 403);
   const displayName = text(body.display_name, "display_name", 1, 128);
-  const baseUrl = trustedProviderUrl(text(body.base_url, "base_url", 8, 512));
-  const sessionPath = trustedSessionPath(body.session_path);
+  let baseUrl: string;
+  let sessionPath: string;
+  if (body.has_joined_url != null) {
+    if (body.base_url != null || body.session_path != null) throw bad("use has_joined_url or base_url/session_path, not both");
+    const endpoint = new URL(trustedProviderUrl(text(body.has_joined_url, "has_joined_url", 8, 1024)));
+    baseUrl = endpoint.origin;
+    sessionPath = trustedSessionPath(endpoint.pathname);
+    if (sessionPath === "/") throw bad("has_joined_url needs an endpoint path");
+  } else {
+    baseUrl = trustedProviderUrl(text(body.base_url, "base_url", 8, 512));
+    sessionPath = trustedSessionPath(body.session_path);
+  }
   const enabled = body.enabled === true;
   await env.DB.prepare(
     `INSERT INTO identity_providers(provider_id, display_name, base_url, session_path, enabled) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -426,10 +436,9 @@ async function configureIdentityProvider(request: Request, env: RuntimeEnv): Pro
 }
 
 function trustedSessionPath(value: unknown): string {
-  const path = value == null ? "/sessionserver/session/minecraft/hasJoined" : text(value, "session_path", 1, 128);
-  if (path !== "/sessionserver/session/minecraft/hasJoined"
-      && path !== "/session/minecraft/hasJoined"
-      && path !== "/session/hasJoined") throw bad("unsupported identity provider session path");
+  const path = value == null ? "/sessionserver/session/minecraft/hasJoined" : text(value, "session_path", 1, 512);
+  if (!/^\/[a-zA-Z0-9/_.-]*$/.test(path) || path.startsWith("//")
+      || path.split("/").some(part => part === "." || part === "..")) throw bad("invalid identity provider session path");
   return path;
 }
 

@@ -171,10 +171,13 @@ pub struct VerifyIdentityChallenge {
 pub struct IdentityProviderUpdate {
     pub provider_id: String,
     pub display_name: String,
+    #[serde(default)]
     pub base_url: String,
     pub enabled: bool,
     #[serde(default)]
     pub session_path: Option<String>,
+    #[serde(default)]
+    pub has_joined_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

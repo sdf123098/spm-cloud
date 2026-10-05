@@ -1,0 +1,7 @@
+# Native upstream / 原生后端上游
+# Replace the domain with your own / 替换为自己的域名
+cloud.example.com {
+    reverse_proxy 127.0.0.1:8787 {
+        header_up X-SPM-Client-IP {http.request.remote.host}
+    }
+}

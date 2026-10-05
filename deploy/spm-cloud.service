@@ -1,0 +1,23 @@
+[Unit]
+Description=SparkleMorpher Cloud
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=spm-cloud
+Group=spm-cloud
+WorkingDirectory=/var/lib/spm-cloud
+EnvironmentFile=/etc/spm-cloud.env
+ExecStart=/usr/local/bin/spm-cloud
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/spm-cloud
+
+[Install]
+WantedBy=multi-user.target

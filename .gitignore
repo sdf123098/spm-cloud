@@ -2,6 +2,7 @@
 /.cargo/config.toml
 /rust-toolchain.toml
 /.env
+/.env.native
 /data/
 *.db
 *.db-shm
