@@ -1,6 +1,6 @@
 # SPM Cloud
 
-**Self-hosted Rust release: 2.1.0.** JSON runtime settings reload automatically without restarting the service; the default per-model upload limit is 128 MiB. Docker Compose installations can enable periodic GitHub release updates; see [JSON deployment, migration and rollback](deploy/ADMIN_JSON.md).
+**Self-hosted Rust release: 2.1.1.** Releases provide prebuilt Linux, Windows and macOS packages; Docker deployments can use prebuilt amd64 and arm64 images. JSON runtime settings reload automatically without restarting the service, and the default per-model upload limit is 128 MiB. See [JSON deployment, migration and automatic updates](deploy/ADMIN_JSON.md).
 
 > **English** | [中文](README_zh.md)
 
@@ -12,7 +12,7 @@ Source: [sdf123098/spm-cloud](https://github.com/sdf123098/spm-cloud). The offic
 
 ## Configuration files
 
-Version 2.1.0 supports strict administrator JSON with [editor schema](config.schema.json) and [example](config.example.json). Initialize a configuration and persistent bootstrap token with `spm-cloud --init-config /etc/spm-cloud/config.json`, edit the public HTTPS origin and storage paths, then run `spm-cloud --config /etc/spm-cloud/config.json --check-config`. Start with the same `--config` argument. `--print-effective-config` reports merged values and their sources with credentials redacted; both inspection commands exit before database initialization or listening. A selected JSON file is checked every two seconds; runtime settings such as the 128 MiB default upload limit apply without restarting `spm-cloud`. Listener, identity, storage paths and logging changes require a restart.
+Version 2.1.1 supports strict administrator JSON with [editor schema](config.schema.json) and [example](config.example.json). Initialize a configuration and persistent bootstrap token with `spm-cloud --init-config /etc/spm-cloud/config.json`, edit the public HTTPS origin and storage paths, then run `spm-cloud --config /etc/spm-cloud/config.json --check-config`. Start with the same `--config` argument. `--print-effective-config` reports merged values and their sources with credentials redacted; both inspection commands exit before database initialization or listening. A selected JSON file is checked every two seconds; runtime settings such as the 128 MiB default upload limit apply without restarting `spm-cloud`. Listener, identity, storage paths and logging changes require a restart.
 
 Selection is `--config` > `SPM_CLOUD_CONFIG` > an existing working-directory `config.json`. Without a selected file, legacy environment startup remains supported. Explicit environment values override JSON; JSON paths are relative to its directory, environment paths to the working directory. Protect the generated `secrets/bootstrap-token.txt` with service-account permissions. Bootstrap password settings initialize missing credentials and do not reset existing passwords on restart. Player display state, explicit vehicle bindings and bound entity motion are opt-in and default off; projectile snapshots remain unavailable. New clients negotiate entity query limits; keep 64 when serving old clients. See [JSON deployment, migration and rollback](deploy/ADMIN_JSON.md).
 
@@ -85,28 +85,28 @@ Check your `instance_id`, the `player_motion_v1` and `game_identity_auth_v1` cap
 
 After editing `.env`, run `sudo docker compose up -d --force-recreate`; a simple `restart` does not replace container environment variables. The Docker Caddy upstream is `spm-cloud:8787`.
 
+### Optional automatic updates
+
+The release workflow publishes checksummed prebuilt amd64 and arm64 Docker images. The supplied systemd timer downloads and verifies the matching image every 30 minutes; it does not build source code on the server. Install it from `/opt/spm-cloud` using the steps in [automatic updates](deploy/ADMIN_JSON.md).
+
 ## 3. Native Linux
 
-Build with Rust **1.87 or newer** and a C compiler. Runtime does not require Rust, Node.js or a separately installed SQLite/OpenSSL. Build for your server's actual OS and CPU; a Windows executable cannot run on Linux.
+Install the prebuilt package for the server's architecture; the release includes x86_64 and ARM64 Linux builds, so the server does not need a Rust toolchain. Runtime does not require Node.js or a separately installed SQLite/OpenSSL.
 
-### Build and install
+### Install the release binary
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential ca-certificates curl git openssl nano
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
-sh rustup-init.sh -y --profile minimal
-. "$HOME/.cargo/env"
-rustc --version
-mkdir -p "$HOME/spm-build"
-cd "$HOME/spm-build"
-git clone https://github.com/sdf123098/spm-cloud.git
-cd spm-cloud
-cargo build --release --locked
-sudo install -m 755 target/release/spm-cloud /usr/local/bin/spm-cloud
+sudo apt install -y ca-certificates curl nano
+version=2.1.1
+curl --fail --location --proto '=https' --tlsv1.2 \
+  "https://github.com/sdf123098/spm-cloud/releases/download/v${version}/spm-cloud-installer.sh" \
+  --output /tmp/spm-cloud-installer.sh
+sudo env SPM_CLOUD_INSTALL_DIR=/usr/local sh /tmp/spm-cloud-installer.sh
+spm-cloud --version
 ```
 
-Skip rustup installation when already installed. Use the [official Rust installation guide](https://rust-lang.org/tools/install/) when another platform/toolchain is needed. Low-memory machines can build with `-j 1`.
+The installer selects the matching Linux build and installs `spm-cloud` under `/usr/local/bin`. The optional systemd updater described below downloads and verifies the prebuilt release archive before replacing it.
 
 On a first installation, create the dedicated account and directories; skip account creation if it already exists:
 
@@ -131,6 +131,27 @@ curl -fsS http://127.0.0.1:8787/health
 ```
 
 The unit loads `/etc/spm-cloud.env`. After changing it, run `sudo systemctl restart spm-cloud`. Diagnose startup failures with `sudo journalctl -u spm-cloud -n 100 --no-pager`.
+
+### Enable automatic native updates
+
+The optional systemd timer checks GitHub every 30 minutes. It downloads the matching prebuilt Linux archive, verifies its SHA-256 checksum and version, atomically replaces the binary, restarts the service and checks `/health`. If startup health fails, it restores the previous executable. Install it after the backend is running:
+
+```bash
+sudo install -d -m 755 /usr/local/libexec
+release=v2.1.1
+base="https://raw.githubusercontent.com/sdf123098/spm-cloud/${release}/deploy"
+for file in native-auto-update.sh spm-cloud-native-update.service spm-cloud-native-update.timer; do
+  curl --fail --location "$base/$file" --output "/tmp/$file"
+done
+sudo install -m 755 /tmp/native-auto-update.sh /usr/local/libexec/spm-cloud-native-update.sh
+sudo install -m 644 /tmp/spm-cloud-native-update.service /tmp/spm-cloud-native-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now spm-cloud-native-update.timer
+sudo systemctl start spm-cloud-native-update.service
+sudo systemctl list-timers spm-cloud-native-update.timer
+```
+
+If the backend does not listen on `127.0.0.1:8787`, set `SPM_CLOUD_AUTO_UPDATE_HEALTH_URL` in `/etc/spm-cloud-auto-update.env` to its local health URL. Check update runs with `sudo journalctl -u spm-cloud-native-update.service`.
 
 ### HTTPS with Caddy
 
@@ -167,7 +188,14 @@ Caddy proxies WebSockets automatically. Its overwritten `X-SPM-Client-IP` header
 
 ## 4. Native Windows
 
-Use a Windows binary package supplied by the project, or build with `cargo build --release --locked` and the C toolchain required by your Rust target. Put the executable in a directory such as `C:/SPMCloud`.
+Install the prebuilt Windows x64 package from the [GitHub Release](https://github.com/sdf123098/spm-cloud/releases/latest). The PowerShell installer places `spm-cloud.exe` in the user's Cargo bin directory; no Rust toolchain is required:
+
+```powershell
+$env:SPM_CLOUD_INSTALL_DIR = "$env:USERPROFILE\.cargo"
+irm https://github.com/sdf123098/spm-cloud/releases/download/v2.1.1/spm-cloud-installer.ps1 | iex
+```
+
+Use the installed executable from `$env:USERPROFILE\.cargo\bin\spm-cloud.exe`; keep mutable data in a separate directory such as `C:/SPMCloud`.
 
 Create a persistent startup script using this PowerShell configuration:
 
@@ -182,7 +210,7 @@ $env:SPM_CLOUD_ACCESS_TOKEN = 'replace-with-your-saved-random-secret'
 $env:SPM_CLOUD_BOOTSTRAP_ACCOUNT = 'account_local'
 $env:SPM_CLOUD_ALLOW_SELF_REGISTRATION = 'true'
 $env:SPM_CLOUD_TRUSTED_PROXY_IPS = '127.0.0.1'
-.\spm-cloud.exe
+& "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
 ```
 
 Generate a secret once with `-join (1..4 | ForEach-Object { [Guid]::NewGuid().ToString('N') })`, then save it in that script and reuse it. Keep the script private. A `.env` file alone has no effect on native Windows.
@@ -195,6 +223,8 @@ Invoke-RestMethod https://cloud.example.com/v1/instance
 ```
 
 Keep both processes running. For unattended operation, configure Task Scheduler to start each program with its working directory and restart behavior, or use Docker Compose.
+
+For unattended updates, run the backend from a Task Scheduler task named `SPM Cloud` under the same Windows account that installed the package. Schedule [deploy/windows-auto-update.ps1](deploy/windows-auto-update.ps1) daily under that account; it downloads the prebuilt Windows package, verifies its SHA-256 and version, stops the backend task, and replaces the executable. It then starts the task and checks `/health`, restoring the old executable if the check fails. If the backend is running interactively, stop it before invoking the updater.
 
 ## External login: custom Yggdrasil and all-in-one
 

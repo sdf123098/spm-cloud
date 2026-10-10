@@ -1,10 +1,12 @@
 [package]
 name = "spm-cloud"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2024"
 rust-version = "1.87"
 description = "Standalone SPM Cloud service for SparkleMorpher clients"
 license = "MIT"
+repository = "https://github.com/sdf123098/spm-cloud"
+homepage = "https://github.com/sdf123098/spm-cloud"
 
 [dependencies]
 anyhow = "1"
@@ -43,3 +45,8 @@ protoc-bin-vendored = "3"
 [dev-dependencies]
 tempfile = "3"
 tokio-tungstenite = "0.29"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

@@ -1,6 +1,6 @@
 # SPM Cloud
 
-**自建 Rust 后端版本：2.1.0。** JSON 运行时设置会自动热加载，无需重启服务；默认单模型上传上限为 128 MiB。Docker Compose 可启用定时检查 GitHub 新版本，见 [JSON 管理、迁移与回滚](deploy/ADMIN_JSON.md)。
+**自建 Rust 后端版本：2.1.1。** Release 提供 Linux、Windows、macOS 预构建程序包，以及 amd64/arm64 Docker 镜像包。JSON 运行时设置会自动热加载，无需重启服务；默认单模型上传上限为 128 MiB。部署和自动更新说明见 [JSON 管理文档](deploy/ADMIN_JSON.md)。
 
 > [English](README.md) | **中文**
 
@@ -12,7 +12,7 @@ SparkleMorpher 的独立 Rust 自建 Cloud 后端，使用与官方 Cloud 相同
 
 ## 配置文件
 
-2.1.0 支持严格管理员 JSON，提供[编辑器 Schema](config.schema.json) 和[示例](config.example.json)。先运行 `spm-cloud --init-config C:/spm-cloud/config.json` 生成配置和持久 bootstrap token，调整对外 HTTPS 域名与存储路径，再运行 `spm-cloud --config C:/spm-cloud/config.json --check-config`。启动使用相同的 `--config` 参数。`--print-effective-config` 输出合并后的字段与来源，凭据脱敏；两个检查命令均在数据库初始化、账户创建和监听前退出。选中的 JSON 文件每 2 秒检查一次；上传上限（默认 128 MiB）、请求大小、自助注册、身份提供方及视觉运行设置会热加载，无需重启 `spm-cloud`。监听地址、实例身份、存储路径和日志设置仍需重启。
+2.1.1 支持严格管理员 JSON，提供[编辑器 Schema](config.schema.json) 和[示例](config.example.json)。先运行 `spm-cloud --init-config C:/spm-cloud/config.json` 生成配置和持久 bootstrap token，调整对外 HTTPS 域名与存储路径，再运行 `spm-cloud --config C:/spm-cloud/config.json --check-config`。启动使用相同的 `--config` 参数。`--print-effective-config` 输出合并后的字段与来源，凭据脱敏；两个检查命令均在数据库初始化、账户创建和监听前退出。选中的 JSON 文件每 2 秒检查一次；上传上限（默认 128 MiB）、请求大小、自助注册、身份提供方及视觉运行设置会热加载，无需重启 `spm-cloud`。监听地址、实例身份、存储路径和日志设置仍需重启。
 
 文件选择顺序为 `--config` → `SPM_CLOUD_CONFIG` → 工作目录中已存在的 `config.json`；没有选中文件继续使用旧环境变量方式。显式环境变量覆盖 JSON；JSON 相对路径以配置目录为基准，环境变量路径以工作目录为基准。生成的 `secrets/bootstrap-token.txt` 应限服务账号访问。bootstrap 密码只初始化缺失凭据，重启不覆盖既有密码。玩家显示状态、坐骑独立绑定及绑定实体 motion 可显式启用，默认关闭；投射物快照仍不可启用。新客户端已协商查询限制，服务旧客户端时维持 `max_entity_query_count` 默认 64。完整配置和部署说明见 [JSON 管理](deploy/ADMIN_JSON.md)。
 
@@ -107,10 +107,10 @@ curl -fsS https://cloud.example.com/v1/instance
 
 ### 启用 GitHub 版本自动更新（可选）
 
-2.1.0 起可让 Docker Compose 部署每 30 分钟检查 GitHub 最新 Release，并仅重建 `spm-cloud` 容器，数据卷和 Caddy 不变。要求项目目录为 `/opt/spm-cloud`，且主机已安装 Docker Compose、`curl`、`jq`、`tar` 和 `flock`：
+2.1.1 起可让 Docker Compose 部署每 30 分钟检查 GitHub 最新 Release。更新器下载已构建的对应架构镜像包、核验 SHA-256 后切换容器，不会在服务器编译源码；数据卷和 Caddy 不变。支持 amd64 与 arm64。要求项目目录为 `/opt/spm-cloud`，且主机已安装 Docker Compose、`curl`、`jq`、`tar`、`gzip`、`sha256sum` 和 `flock`：
 
 ```bash
-sudo apt install -y curl jq tar util-linux
+sudo apt install -y curl jq gzip coreutils util-linux
 sudo cp deploy/spm-cloud-auto-update.service deploy/spm-cloud-auto-update.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now spm-cloud-auto-update.timer
@@ -118,42 +118,28 @@ sudo systemctl start spm-cloud-auto-update.service
 sudo systemctl list-timers spm-cloud-auto-update.timer
 ```
 
-如果项目目录不是 `/opt/spm-cloud`，请先修改 service 文件中的 `SPM_CLOUD_COMPOSE_DIR` 与脚本路径再安装。GitHub 发布新版本后，定时器会下载对应标签源码，在服务器本地构建并切换容器；首次运行也会升级到最新 Release。该自动更新器只用于 Docker Compose，Linux/Windows 原生部署仍需手动升级。
+如果项目目录不是 `/opt/spm-cloud`，请先修改 service 文件中的 `SPM_CLOUD_COMPOSE_DIR` 与脚本路径再安装。定时器首次运行会更新到最新 Release。Linux 原生部署也可安装下文的 systemd 更新器；Windows 原生部署可用下文的计划任务脚本更新。
 
 ## 3. 方式二：Linux 原生运行（不使用 Docker）
 
-以下是 Ubuntu/Debian 的完整流程。编译时需要 Rust 1.87 或更新版本、C 编译器；正式运行不需要 Rust、Node.js 或手动安装 SQLite/OpenSSL。首次编译在服务器上完成，得到该服务器平台的程序；不能把 Windows 的 `.exe` 改名后拿到 Linux 运行。
+以下是 Ubuntu/Debian 的完整流程。Release 提供 x86_64 和 ARM64 预构建包；服务器无需安装 Rust 或编译器。运行时也不需要 Node.js 或手动安装 SQLite/OpenSSL。
 
-### 3.1 安装编译工具与 Rust
+### 3.1 安装并检查预构建程序
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential ca-certificates curl git openssl nano
+sudo apt install -y ca-certificates curl nano
+version=2.1.1
+curl --fail --location --proto '=https' --tlsv1.2 \
+  "https://github.com/sdf123098/spm-cloud/releases/download/v${version}/spm-cloud-installer.sh" \
+  --output /tmp/spm-cloud-installer.sh
+sudo env SPM_CLOUD_INSTALL_DIR=/usr/local sh /tmp/spm-cloud-installer.sh
+spm-cloud --version
 ```
 
-如果尚未安装 Rust，按 [Rust 官方安装页](https://rust-lang.org/tools/install/) 安装 rustup，使用普通用户进行安装与编译：
+安装器会根据服务器架构选择二进制，并将 `spm-cloud` 放入 `/usr/local/bin`。下文的 systemd 更新器会下载并校验预构建程序包后再替换它。
 
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init.sh
-sh rustup-init.sh -y --profile minimal
-. "$HOME/.cargo/env"
-rustc --version
-```
-
-已安装 Rust 的确认版本至少为 1.87；过旧时可执行 `rustup update stable`。本教程在 Linux 使用该设备的原生工具链，不要求安装 Windows GNU 或 MSYS2。
-
-### 3.2 编译并安装程序
-
-```bash
-mkdir -p "$HOME/spm-build"
-cd "$HOME/spm-build"
-git clone https://github.com/sdf123098/spm-cloud.git
-cd spm-cloud
-cargo build --release --locked
-sudo install -m 755 target/release/spm-cloud /usr/local/bin/spm-cloud
-```
-
-只有最后一步需要 sudo。ARM64 服务器也应在自己的目标环境编译。第一次编译需下载依赖，服务器内存不足时可以改用 `cargo build --release --locked -j 1`。
+### 3.2 创建服务用户与数据目录
 
 首次部署创建服务专用用户和数据目录：
 
@@ -206,7 +192,28 @@ curl -fsS http://127.0.0.1:8787/health
 
 服务通过 `EnvironmentFile=/etc/spm-cloud.env` 读取配置，工作目录为 `/var/lib/spm-cloud`。日志用 `sudo journalctl -u spm-cloud -n 100 --no-pager` 查看；修改配置后执行 `sudo systemctl restart spm-cloud`。
 
-### 3.5 安装 Caddy 并配置 HTTPS
+### 3.5 启用 Linux 原生自动更新
+
+每 30 分钟检查一次 GitHub 最新 Release，下载对应架构的预构建包，核对 SHA-256 和程序版本后原子替换二进制，重启服务并检查 `/health`。启动检查失败会恢复之前的程序。服务正常运行后执行：
+
+```bash
+sudo install -d -m 755 /usr/local/libexec
+release=v2.1.1
+base="https://raw.githubusercontent.com/sdf123098/spm-cloud/${release}/deploy"
+for file in native-auto-update.sh spm-cloud-native-update.service spm-cloud-native-update.timer; do
+  curl --fail --location "$base/$file" --output "/tmp/$file"
+done
+sudo install -m 755 /tmp/native-auto-update.sh /usr/local/libexec/spm-cloud-native-update.sh
+sudo install -m 644 /tmp/spm-cloud-native-update.service /tmp/spm-cloud-native-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now spm-cloud-native-update.timer
+sudo systemctl start spm-cloud-native-update.service
+sudo systemctl list-timers spm-cloud-native-update.timer
+```
+
+默认健康检查地址是 `http://127.0.0.1:8787/health`。如果后端使用其他本机地址，在 `/etc/spm-cloud-auto-update.env` 中设置 `SPM_CLOUD_AUTO_UPDATE_HEALTH_URL`。查看运行记录：`sudo journalctl -u spm-cloud-native-update.service`。
+
+### 3.6 安装 Caddy 并配置 HTTPS
 
 下面采用 [Caddy 官方 Debian/Ubuntu 安装方式](https://caddyserver.com/docs/install)。已有 Caddy 的跳过安装，并在现有配置中增加 Cloud 站点。
 
@@ -244,7 +251,14 @@ Caddy 会代理 WebSocket，不需要另装插件。`X-SPM-Client-IP` 由 Caddy 
 
 ## 4. 方式三：Windows 原生运行
 
-向模组作者获取 Windows 程序包 `spm-cloud-windows-x64.zip` 并解压，例如放到 `C:\SPMCloud`。也可自行在 Windows 克隆源码并执行 `cargo build --release --locked`，但需要该设备 Rust 工具链对应的 C 编译环境。Windows、Linux、macOS 分别使用自己的程序。
+使用 Release 提供的 Windows x64 PowerShell 安装器；它会下载预构建程序，无需安装 Rust：
+
+```powershell
+$env:SPM_CLOUD_INSTALL_DIR = "$env:USERPROFILE\.cargo"
+irm https://github.com/sdf123098/spm-cloud/releases/download/v2.1.1/spm-cloud-installer.ps1 | iex
+```
+
+程序位于 `$env:USERPROFILE\.cargo\bin`；数据仍放在例如 `C:\SPMCloud` 的独立目录。
 
 在 PowerShell 中运行（替换域名）：
 
@@ -259,7 +273,7 @@ $env:SPM_CLOUD_ACCESS_TOKEN = '替换为已保存的随机管理密钥'
 $env:SPM_CLOUD_BOOTSTRAP_ACCOUNT = 'account_local'
 $env:SPM_CLOUD_ALLOW_SELF_REGISTRATION = 'true'
 $env:SPM_CLOUD_TRUSTED_PROXY_IPS = '127.0.0.1'
-.\spm-cloud.exe
+& "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
 ```
 
 先用 `-join (1..4 | ForEach-Object { [Guid]::NewGuid().ToString('N') })` 生成一次密钥，固定保存到仅服主可读的启动配置中，后续使用同一个值。把上述配置和启动命令存为 `start-cloud.ps1`，运行时窗口会持续显示日志。这个文件包含密钥，不要随教程发给玩家；程序不会自动读取解压目录中的 `.env`。
@@ -272,6 +286,8 @@ Set-Location C:\SPMCloud
 ```
 
 保持两个程序运行，验证 `Invoke-RestMethod https://cloud.example.com/v1/instance`。关闭窗口会停止前台程序；需要开机自启时，用 Windows 任务计划程序分别启动后端脚本和 Caddy，配置“系统启动时”、程序实际工作目录、失败后重试以及适当的运行权限。长期无人值守也可选择 Docker Compose。
+
+如需 Windows 原生自动更新，请将后端启动脚本配置为名为 `SPM Cloud` 的任务，并使用安装包的同一 Windows 账号运行。再把 [deploy/windows-auto-update.ps1](deploy/windows-auto-update.ps1) 设为每天运行的计划任务；脚本会下载 Windows 预构建包并校验 SHA-256 与版本，停止后端任务后替换程序，再启动任务并检查 `/health`；检查失败会恢复旧程序。若后端由当前桌面窗口直接运行，更新前需先关闭它。
 
 ## 外置登录配置：自建 Yggdrasil / all-in-one
 

@@ -1,5 +1,7 @@
 # Administrator JSON deployment
 
+GitHub Releases are built by `cargo-dist`: they include checksummed Linux x86_64/ARM64, Windows x64 and macOS binaries plus shell/PowerShell installers. The release pipeline also builds checksummed amd64/arm64 Docker image archives. It runs Rust validation and publishes the Release only after package builds succeed.
+
 When started with a selected JSON file, the binary polls it every two seconds. Valid changes to runtime settings apply in the existing process; invalid edits are logged and the last active settings remain in effect. Runtime settings include upload/message/entity limits, registration policy, bootstrap access token, identity-provider records, trusted proxies, feature switches and visual retention/publication settings. In particular, `limits.max_asset_bytes` defaults to 134217728 bytes (128 MiB) and changes apply without restarting `spm-cloud`. Explicit environment values continue to override JSON. Listener address, instance ID/origin, storage paths, bootstrap account/password initialization and logging settings require a service restart. Use `--check-config` to validate edits; `--print-effective-config` shows merged public settings and provenance without the bootstrap token or password hash.
 
 ## Native systemd
@@ -30,10 +32,10 @@ The Compose template preserves the existing data/object named volumes and Caddy 
 
 ### Automatic GitHub release updates (Docker Compose)
 
-The optional updater checks the public repository's latest GitHub Release every 30 minutes, downloads its tagged source, builds the image locally, verifies the embedded version, and updates only the `spm-cloud` Compose service. It keeps the data volumes and Caddy service. It requires Linux systemd plus Docker Compose, `curl`, `jq`, `tar` and `flock`. The supplied unit files assume the checkout and Compose `.env` are in `/opt/spm-cloud`:
+The optional updater checks the latest public GitHub Release every 30 minutes, downloads the prebuilt Docker archive for the host architecture, verifies SHA-256, loads the image, and updates only the `spm-cloud` Compose service. It does not compile the source on the server and leaves data volumes and Caddy running. It requires Linux systemd, Docker Compose, `curl`, `jq`, `gzip`, `sha256sum`, `flock` and a host architecture of amd64 or arm64. The supplied unit files assume the checkout and Compose `.env` are in `/opt/spm-cloud`:
 
 ```bash
-sudo apt install -y curl jq tar util-linux
+sudo apt install -y curl jq gzip coreutils util-linux
 sudo cp deploy/spm-cloud-auto-update.service deploy/spm-cloud-auto-update.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now spm-cloud-auto-update.timer
@@ -41,7 +43,38 @@ sudo systemctl start spm-cloud-auto-update.service
 sudo systemctl status spm-cloud-auto-update.timer
 ```
 
-Edit `SPM_CLOUD_COMPOSE_DIR` and both `/opt/spm-cloud` paths in the service if the checkout lives elsewhere. The timer applies the latest published release (including on its first run); failures leave the prior release tag recorded, and a container that exits during the startup check triggers a best-effort image rollback. This does not automatically update native systemd or Windows installations. GitHub Actions creates a Release when a matching `v*` tag is pushed; the tag must match the Cargo package version.
+Edit `SPM_CLOUD_COMPOSE_DIR` and both `/opt/spm-cloud` paths in the service if the checkout lives elsewhere. The timer applies the latest published release on its first run too. If container startup or the reported version check fails, it attempts to restore the previously running image. GitHub creates a Release from a matching `v*` tag after Rust checks and platform package builds pass.
+
+### Automatic native Linux updates
+
+Install the generated Linux package with the shell installer, forcing the install prefix to `/usr/local` so the backend lands in `/usr/local/bin`:
+
+```bash
+version=2.1.1
+curl --fail --location --proto '=https' --tlsv1.2 \
+  "https://github.com/sdf123098/spm-cloud/releases/download/v${version}/spm-cloud-installer.sh" \
+  --output /tmp/spm-cloud-installer.sh
+sudo env SPM_CLOUD_INSTALL_DIR=/usr/local sh /tmp/spm-cloud-installer.sh
+```
+
+After the `spm-cloud.service` backend is running, install the systemd updater. It downloads the matching prebuilt Linux archive and checksum, validates both the hash and embedded version, stages the binary on the same filesystem, restarts the service, then checks its local health endpoint. A failed health check restores the previous binary. Install `curl`, `jq`, `tar`, `xz-utils`, `coreutils` and `util-linux` if missing.
+
+```bash
+sudo install -d -m 755 /usr/local/libexec
+release=v2.1.1
+base="https://raw.githubusercontent.com/sdf123098/spm-cloud/${release}/deploy"
+for file in native-auto-update.sh spm-cloud-native-update.service spm-cloud-native-update.timer; do
+  curl --fail --location "$base/$file" --output "/tmp/$file"
+done
+sudo install -m 755 /tmp/native-auto-update.sh /usr/local/libexec/spm-cloud-native-update.sh
+sudo install -m 644 /tmp/spm-cloud-native-update.service /tmp/spm-cloud-native-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now spm-cloud-native-update.timer
+sudo systemctl start spm-cloud-native-update.service
+sudo systemctl list-timers spm-cloud-native-update.timer
+```
+
+The updater defaults to `/usr/local/bin/spm-cloud`, `spm-cloud.service`, and `http://127.0.0.1:8787/health`. Override them in `/etc/spm-cloud-auto-update.env` with `SPM_CLOUD_BINARY`, `SPM_CLOUD_SYSTEMD_SERVICE` or `SPM_CLOUD_AUTO_UPDATE_HEALTH_URL`. Review `journalctl -u spm-cloud-native-update.service` after the first run. Keep database and object backups before enabling unattended updates; database migrations may not be reversible by restoring only the executable.
 
 ## Visual capabilities and compatibility
 

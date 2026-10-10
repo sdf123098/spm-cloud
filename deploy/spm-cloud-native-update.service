@@ -1,0 +1,10 @@
+[Unit]
+Description=Check and install the latest prebuilt SPM Cloud release
+Wants=network-online.target
+After=network-online.target spm-cloud.service
+Requires=spm-cloud.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/spm-cloud-auto-update.env
+ExecStart=/usr/bin/flock -n /run/lock/spm-cloud-native-update.lock /usr/bin/bash /usr/local/libexec/spm-cloud-native-update.sh

@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "spm-cloud"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "argon2",
