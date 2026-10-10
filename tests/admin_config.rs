@@ -63,7 +63,10 @@ fn json_is_authoritative_and_json_paths_resolve_from_the_config_file() {
         loaded.cloud.database_path,
         dir.path().join("config/data/spm-cloud.db")
     );
-    assert_eq!(loaded.cloud.object_dir, dir.path().join("config/data/objects"));
+    assert_eq!(
+        loaded.cloud.object_dir,
+        dir.path().join("config/data/objects")
+    );
     assert_eq!(loaded.cloud.max_asset_bytes, 128 * 1024 * 1024);
     assert!(loaded.cloud.allow_self_registration);
     assert_eq!(
