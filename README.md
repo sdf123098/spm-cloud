@@ -1,72 +1,41 @@
 # SPM Cloud
 
-**Self-hosted Rust backend.** [Latest stable release and prebuilt downloads](https://github.com/sdf123098/spm-cloud/releases/latest) provide Linux, Windows and macOS packages, plus amd64/arm64 Docker images. Install commands below always follow the latest stable release; no version number needs editing. JSON runtime settings reload without restarting the service, and the default per-model upload limit is 128 MiB. See [JSON deployment, migration and automatic updates](deploy/ADMIN_JSON.md).
+**A self-hosted Rust backend for [SparkleMorpher](https://github.com/sdf123098/Sparkle-Morpher).** It shares the Cloud client protocol and supports model uploads/downloads, visibility, verified game identities, player appearances, textures and wheel actions. Players connect by selecting the same Cloud instance in the mod.
 
 > **English** | [中文](README_zh.md)
 
-A standalone Rust Cloud backend for [Sparkle's Morpher](https://github.com/sdf123098/Sparkle-Morpher). Self-host model uploads, downloads, public/private visibility, verified game identities, player models, textures, model settings, wheel actions, stop events and idle controller states using the same client protocol as the official Cloud.
+The backend runs independently of Minecraft. You can deploy it beside a Minecraft server or on a separate public server. Players need a current SparkleMorpher build and the HTTPS address of your instance.
 
-The Rust service runs independently of Minecraft. Players with updated SparkleMorpher clients can share their public models and actions on ordinary Minecraft servers when they select the same Cloud and bind their game identities.
+## Choose an installation method
 
-Source: [sdf123098/spm-cloud](https://github.com/sdf123098/spm-cloud). The official Cloudflare Worker source is in [cloudflare/](cloudflare/README.md). Rust startup variables below configure the self-hosted service; an existing Worker is updated through its own deployment workflow.
+| Method | Best for | Initial installation | Updates |
+|---|---|---|---|
+| Docker Compose | Most Linux servers; managed data volumes and automatic restarts | Clone this repository and build the container once with Docker Compose; Rust is not needed on the host | Optional Linux systemd updater downloads checksum-verified, prebuilt Docker images for amd64/arm64 |
+| Native Linux | Ubuntu/Debian servers that prefer a systemd service | Download the latest stable, prebuilt Linux installer; supports x86_64 and ARM64 | Optional systemd timer downloads a prebuilt package, verifies it, restarts the service and rolls back on failed health checks |
+| Native Windows | Windows servers without Docker | Run the latest stable PowerShell installer; prebuilt x64 executable | Optional Task Scheduler job downloads the verified prebuilt package and rolls back if health checks fail |
+| macOS package | Local or manual runs on Intel or Apple Silicon | Download the matching archive from [GitHub Releases](https://github.com/sdf123098/spm-cloud/releases/latest) | Manual replacement; the service updater tutorials below cover Linux and Windows |
 
-## Configuration files
+All release links below follow GitHub's **latest stable release**; commands do not contain a version number. For a tagged/older release, select a specific version on the [Releases page](https://github.com/sdf123098/spm-cloud/releases). Default model upload size is **128 MiB**. JSON runtime settings can be hot-reloaded; see [JSON configuration and deployment](deploy/ADMIN_JSON.md).
 
-The Rust backend supports strict administrator JSON with an [editor schema](config.schema.json) and [example](config.example.json). Use a path for your operating system. For native Linux (after installing the package and creating the `spm-cloud` service account):
+## Before you install
 
-```bash
-sudo install -d -o spm-cloud -g spm-cloud -m 750 /etc/spm-cloud
-sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.json
-# Edit /etc/spm-cloud/config.json: set the public HTTPS origin and absolute storage paths
-sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --check-config
-sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --print-effective-config
-```
-
-For native Windows, run these commands as the same account that will run the backend:
-
-```powershell
-$exe = "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
-$config = "C:\SPMCloud\config.json"
-New-Item -ItemType Directory -Force (Split-Path $config) | Out-Null
-& $exe --init-config $config
-# Edit C:\SPMCloud\config.json: set the public HTTPS origin and storage paths
-& $exe --config $config --check-config
-& $exe --config $config --print-effective-config
-```
-
-Initialization creates the persistent `secrets/bootstrap-token.txt` beside the config file; on Linux, keep both readable by the systemd service account. Start with the same `--config` argument. `--check-config` and `--print-effective-config` exit before database initialization or listening; the latter reports merged values and provenance with credentials redacted. A selected JSON file is checked every two seconds; runtime settings such as the 128 MiB default upload limit apply without restarting `spm-cloud`. Listener, identity, storage paths and logging changes require a restart.
-
-Selection is `--config` > `SPM_CLOUD_CONFIG` > an existing working-directory `config.json`. Without a selected file, legacy environment startup remains supported. Explicit environment values override JSON; JSON paths are relative to its directory, environment paths to the working directory. Protect the generated `secrets/bootstrap-token.txt` with service-account permissions. Bootstrap password settings initialize missing credentials and do not reset existing passwords on restart. Player display state, explicit vehicle bindings and bound entity motion are opt-in and default off; projectile snapshots remain unavailable. New clients negotiate entity query limits; keep 64 when serving old clients. See [JSON deployment, migration and rollback](deploy/ADMIN_JSON.md).
-
-| Deployment | Configuration | How it is loaded |
-|---|---|---|
-| Docker Compose | Copy [.env.example](.env.example) to `.env` | Compose passes the supported values to the backend and Caddy |
-| Native Linux | Copy [.env.native.example](.env.native.example) to `/etc/spm-cloud.env` | [deploy/spm-cloud.service](deploy/spm-cloud.service) loads it with systemd |
-| Native Windows | Persistent PowerShell startup script | Set `$env:SPM_CLOUD_...` before starting the executable |
-| Native HTTPS proxy | [deploy/Caddyfile.native](deploy/Caddyfile.native) | Caddy reads the edited file |
-
-The Rust executable does **not** read a `.env` file by itself. Choose one deployment method. Instance IDs, origins, provider IDs, storage locations and operator secrets should be preserved across upgrades.
-
-## 1. Prerequisites
-
-| Item | Requirement |
+| Requirement | What to prepare |
 |---|---|
-| Server | Publicly reachable; the native Linux instructions use Ubuntu/Debian with sudo |
-| Domain | Replace `cloud.example.com` with your domain |
-| DNS | Point the A record at the public IPv4; add AAAA only if IPv6 is reachable |
-| Ports | Allow TCP 80 and 443 through the firewall, security group and router |
-| Existing websites | Keep their configuration; add a Cloud site to the existing HTTPS proxy |
-| Players | Install the updated mod for the correct Minecraft version and loader |
+| Domain | For example, `cloud.example.com`, pointed at the server's public IP address |
+| HTTPS | Allow inbound TCP 80 and 443; use Caddy or add a site to your existing reverse proxy |
+| Backend port | Keep port 8787 private. The proxy connects to it over HTTP; players use the HTTPS origin only |
+| Instance identity | Choose a stable instance ID and keep it, the data directory and the operator secret when upgrading |
+| Client | Players install the matching SparkleMorpher version and select this same Cloud instance |
 
-Caddy issues and renews HTTPS certificates after DNS and connectivity are ready. See [automatic HTTPS](https://caddyserver.com/docs/automatic-https).
+Give players the bare origin, for example `https://cloud.example.com`. Do not add `/v1`, `/health` or `:8787`.
 
-Give players the bare HTTPS origin, such as `https://cloud.example.com`. Do not append `/v1`, `/health` or the internal port 8787. The backend uses internal HTTP on 8787; the proxy provides HTTPS/WSS.
+## Docker Compose
 
-## 2. Docker Compose
+The initial Compose deployment builds the container from the checked-out repository. Later automatic updates use prebuilt Release images, so the server does not rebuild the Rust backend for each update. Install Docker Engine and the Compose plugin using Docker's instructions for [Ubuntu](https://docs.docker.com/engine/install/ubuntu/) or [Debian](https://docs.docker.com/engine/install/debian/). Docker Desktop can run the same Compose setup in Linux container mode.
 
-The Compose template builds the Linux backend from the checked-out source on first install; Rust is not required on the host. Later automatic updates use prebuilt, checksummed Docker image archives from GitHub Releases. Install Docker Engine and the Compose plugin using the official [Ubuntu](https://docs.docker.com/engine/install/ubuntu/) or [Debian](https://docs.docker.com/engine/install/debian/) instructions. Windows/macOS can use Docker Desktop in Linux container mode.
+### 1. Download and configure
 
-### Download and configure
+Run on the Docker host:
 
 ```bash
 git clone https://github.com/sdf123098/spm-cloud.git
@@ -77,7 +46,7 @@ openssl rand -hex 32
 nano .env
 ```
 
-Replace the domain and paste the generated secret into `SPM_CLOUD_ACCESS_TOKEN`:
+Set your domain and paste the generated random value into `SPM_CLOUD_ACCESS_TOKEN`:
 
 ```dotenv
 SPM_CLOUD_HOST=cloud.example.com
@@ -86,13 +55,12 @@ SPM_CLOUD_INSTANCE_ID=my-server-cloud
 SPM_CLOUD_ACCESS_TOKEN=replace-with-your-generated-secret
 SPM_CLOUD_BOOTSTRAP_ACCOUNT=account_local
 SPM_CLOUD_ALLOW_SELF_REGISTRATION=true
+SPM_CLOUD_MAX_ASSET_BYTES=134217728
 ```
 
-`SPM_CLOUD_HOST` is a domain without `https://`. `SPM_CLOUD_ORIGIN` is the public HTTPS origin. IDs start with a letter or number and contain only letters, numbers, dots, underscores and hyphens, up to 128 characters.
+`SPM_CLOUD_HOST` is the hostname without `https://`; `SPM_CLOUD_ORIGIN` is the public HTTPS origin. Keep the operator token private. It is not a player's password. The 128 MiB upload limit is the default, so the final line can be omitted.
 
-The operator secret is not a player password. Leave `SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH` unset unless enabling password login for the bootstrap account; it requires a real Argon2id hash.
-
-### Start and verify
+### 2. Start and verify
 
 ```bash
 sudo docker compose config --quiet
@@ -103,33 +71,50 @@ curl -fsS https://cloud.example.com/health
 curl -fsS https://cloud.example.com/v1/instance
 ```
 
-Check your `instance_id`, the `player_motion_v1` and `game_identity_auth_v1` capabilities, and `auth.self_registration`. The backend port is not exposed publicly by Compose.
+Confirm `/v1/instance` returns your instance ID and capabilities. Compose exposes HTTPS through Caddy; it does not publish port 8787. After changing `.env`, recreate the container so it receives the new environment:
 
-After editing `.env`, run `sudo docker compose up -d --force-recreate`; a simple `restart` does not replace container environment variables. The Docker Caddy upstream is `spm-cloud:8787`.
+```bash
+sudo docker compose up -d --force-recreate spm-cloud
+```
 
-### Optional automatic updates
+A plain `docker compose restart` does not update container environment variables.
 
-The release workflow publishes checksummed prebuilt amd64 and arm64 Docker images. The supplied systemd timer downloads and verifies the matching image every 30 minutes; it does not build source code on the server. Install it from `/opt/spm-cloud` using the steps in [automatic updates](deploy/ADMIN_JSON.md).
+### 3. Optional automatic updates
 
-## 3. Native Linux
+The updater checks GitHub Releases every 30 minutes and downloads the matching amd64/arm64 Docker archive. It verifies the SHA-256 checksum, loads the image and updates only the backend service. Data volumes and Caddy remain in place. The supplied systemd units expect the repository at `/opt/spm-cloud`:
 
-Install the prebuilt package for the server's architecture; the release includes x86_64 and ARM64 Linux builds, so the server does not need a Rust toolchain. Runtime does not require Node.js or a separately installed SQLite/OpenSSL.
+```bash
+sudo apt install -y curl jq gzip coreutils util-linux
+sudo cp deploy/spm-cloud-auto-update.service deploy/spm-cloud-auto-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now spm-cloud-auto-update.timer
+sudo systemctl start spm-cloud-auto-update.service
+sudo systemctl list-timers spm-cloud-auto-update.timer
+```
 
-### Install the release binary
+If the checkout is elsewhere, change `/opt/spm-cloud` in the service and timer before enabling them. For manual updates, back up first, then run `git pull --ff-only` followed by `sudo SPM_CLOUD_COMPOSE_DIR="$PWD" bash deploy/docker-auto-update.sh` from the repository directory. The updater applies the latest prebuilt image.
+
+## Native Linux
+
+This path uses a prebuilt release package and systemd. No Rust toolchain, Node.js, SQLite package or OpenSSL package is needed at runtime. The examples use Ubuntu/Debian and install the binary under `/usr/local/bin`.
+
+### 1. Install the latest stable binary
 
 ```bash
 sudo apt update
 sudo apt install -y ca-certificates curl jq nano
 curl --fail --location --proto '=https' --tlsv1.2 \
-  "https://github.com/sdf123098/spm-cloud/releases/latest/download/spm-cloud-installer.sh" \
+  https://github.com/sdf123098/spm-cloud/releases/latest/download/spm-cloud-installer.sh \
   --output /tmp/spm-cloud-installer.sh
 sudo env SPM_CLOUD_INSTALL_DIR=/usr/local sh /tmp/spm-cloud-installer.sh
 spm-cloud --version
 ```
 
-The installer selects the matching Linux build and installs `spm-cloud` under `/usr/local/bin`. The optional systemd updater described below downloads and verifies the prebuilt release archive before replacing it.
+The installer selects the matching x86_64 or ARM64 package. It does not create a user or configure HTTPS.
 
-On a first installation, create the dedicated account and directories; skip account creation if it already exists:
+### 2. Create the service account and environment file
+
+Run user creation only on a first install. Keep the data and object directories persistent across upgrades:
 
 ```bash
 sudo useradd --system --user-group --home-dir /var/lib/spm-cloud --shell /usr/sbin/nologin spm-cloud
@@ -139,7 +124,7 @@ openssl rand -hex 32
 sudo nano /etc/spm-cloud.env
 ```
 
-Enter the following settings, replacing the domain, instance ID and generated secret. The Rust executable does not read `.env` automatically; the systemd unit loads this file as environment variables.
+Enter the settings below, replacing the hostname, instance ID and secret:
 
 ```dotenv
 SPM_CLOUD_ORIGIN=https://cloud.example.com
@@ -147,15 +132,17 @@ SPM_CLOUD_INSTANCE_ID=my-server-cloud
 SPM_CLOUD_BIND=127.0.0.1:8787
 SPM_CLOUD_ACCESS_TOKEN=replace-with-your-generated-secret
 SPM_CLOUD_DATA_DIR=/var/lib/spm-cloud/data
-SPM_CLOUD_OBJECT_DIR=/var/lib/spm-cloud/objects
 SPM_CLOUD_DATABASE=/var/lib/spm-cloud/data/spm-cloud.db
+SPM_CLOUD_OBJECT_DIR=/var/lib/spm-cloud/objects
 SPM_CLOUD_TRUSTED_PROXY_IPS=127.0.0.1
 SPM_CLOUD_MAX_ASSET_BYTES=134217728
 ```
 
-Keep the access token private. The 128 MiB upload limit is the default; the explicit line above documents the corresponding byte value and can be omitted.
+The 128 MiB limit is the default. Keep `SPM_CLOUD_ACCESS_TOKEN` private and stable. The backend does not load `.env` on its own; the systemd unit below reads `/etc/spm-cloud.env`.
 
-### systemd service
+### 3. Install and start the systemd service
+
+Fetch the service unit that matches the current stable release, then enable it:
 
 ```bash
 release_tag="$(curl --fail --silent --show-error https://api.github.com/repos/sdf123098/spm-cloud/releases/latest | jq -er '.tag_name')"
@@ -168,11 +155,34 @@ sudo systemctl status spm-cloud --no-pager
 curl -fsS http://127.0.0.1:8787/health
 ```
 
-The unit loads `/etc/spm-cloud.env`. After changing it, run `sudo systemctl restart spm-cloud`. Diagnose startup failures with `sudo journalctl -u spm-cloud -n 100 --no-pager`.
+Check logs with `sudo journalctl -u spm-cloud -n 100 --no-pager`. After editing `/etc/spm-cloud.env`, restart with `sudo systemctl restart spm-cloud`.
 
-### Enable automatic native updates
+### 4. Configure HTTPS
 
-The optional systemd timer checks GitHub every 30 minutes. It downloads the matching prebuilt Linux archive, verifies its SHA-256 checksum and version, atomically replaces the binary, restarts the service and checks `/health`. If startup health fails, it restores the previous executable. Install it after the backend is running:
+Install Caddy using its [official instructions](https://caddyserver.com/docs/install). Add this site to `/etc/caddy/Caddyfile`, replacing the hostname and preserving any existing site blocks:
+
+```caddyfile
+cloud.example.com {
+    reverse_proxy 127.0.0.1:8787 {
+        header_up X-SPM-Client-IP {http.request.remote.host}
+    }
+}
+```
+
+Validate and reload Caddy:
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl enable --now caddy
+sudo systemctl reload caddy
+curl -fsS https://cloud.example.com/v1/instance
+```
+
+DNS must point to the server and ports 80/443 must be reachable for certificate issuance. Caddy handles HTTPS and WebSockets. The proxy header works with `SPM_CLOUD_TRUSTED_PROXY_IPS=127.0.0.1` above.
+
+### 5. Optional automatic updates
+
+The systemd timer checks GitHub every 30 minutes. It downloads the matching prebuilt Linux archive, verifies its checksum and version, replaces the binary, restarts the service and checks `/health`. It restores the previous binary if the health check fails. Enable it after the backend is healthy:
 
 ```bash
 sudo install -d -m 755 /usr/local/libexec
@@ -189,61 +199,26 @@ sudo systemctl start spm-cloud-native-update.service
 sudo systemctl list-timers spm-cloud-native-update.timer
 ```
 
-If the backend does not listen on `127.0.0.1:8787`, set `SPM_CLOUD_AUTO_UPDATE_HEALTH_URL` in `/etc/spm-cloud-auto-update.env` to its local health URL. Check update runs with `sudo journalctl -u spm-cloud-native-update.service`.
+Review update logs with `sudo journalctl -u spm-cloud-native-update.service`. Back up the database and objects before unattended updates; an application database migration may not be reversible by restoring only the executable.
 
-### HTTPS with Caddy
+## Native Windows
 
-Install Caddy using its [official installation instructions](https://caddyserver.com/docs/install). On Debian/Ubuntu:
-
-```bash
-sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
-curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
-sudo apt update
-sudo apt install -y caddy
-sudo nano /etc/caddy/Caddyfile
-```
-
-Add this site block to the existing Caddyfile, replacing the domain and preserving existing sites:
-
-```caddyfile
-cloud.example.com {
-    reverse_proxy 127.0.0.1:8787 {
-        header_up X-SPM-Client-IP {http.request.remote.host}
-    }
-}
-```
-
-```bash
-sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-sudo systemctl enable --now caddy
-sudo systemctl reload caddy
-curl -fsS https://cloud.example.com/v1/instance
-```
-
-Caddy proxies WebSockets automatically. Its overwritten `X-SPM-Client-IP` header and `SPM_CLOUD_TRUSTED_PROXY_IPS=127.0.0.1` let the backend rate-limit by the real player address. Native deployment uses `127.0.0.1:8787`, not the Docker service name.
-
-## 4. Native Windows
-
-Install the prebuilt Windows x64 package from the [GitHub Release](https://github.com/sdf123098/spm-cloud/releases/latest). The PowerShell installer places `spm-cloud.exe` in the user's Cargo bin directory; no Rust toolchain is required:
+The PowerShell installer downloads the latest stable, prebuilt Windows x64 package. Run it as the Windows account that will own the backend process:
 
 ```powershell
 $env:SPM_CLOUD_INSTALL_DIR = "$env:USERPROFILE\.cargo"
 irm https://github.com/sdf123098/spm-cloud/releases/latest/download/spm-cloud-installer.ps1 | iex
 ```
 
-Use the installed executable from `$env:USERPROFILE\.cargo\bin\spm-cloud.exe`; keep mutable data in a separate directory such as `C:/SPMCloud`.
-
-Create a persistent startup script using this PowerShell configuration:
+Keep the executable under `$env:USERPROFILE\.cargo\bin` and mutable data in a separate directory, for example `C:\SPMCloud`. Save a private startup script as `C:\SPMCloud\start-cloud.ps1`:
 
 ```powershell
-Set-Location C:/SPMCloud
+Set-Location C:\SPMCloud
 $env:SPM_CLOUD_INSTANCE_ID = 'my-server-cloud'
 $env:SPM_CLOUD_ORIGIN = 'https://cloud.example.com'
 $env:SPM_CLOUD_BIND = '127.0.0.1:8787'
-$env:SPM_CLOUD_DATA_DIR = 'C:/SPMCloud/data'
-$env:SPM_CLOUD_OBJECT_DIR = 'C:/SPMCloud/objects'
+$env:SPM_CLOUD_DATA_DIR = 'C:\SPMCloud\data'
+$env:SPM_CLOUD_OBJECT_DIR = 'C:\SPMCloud\objects'
 $env:SPM_CLOUD_ACCESS_TOKEN = 'replace-with-your-saved-random-secret'
 $env:SPM_CLOUD_BOOTSTRAP_ACCOUNT = 'account_local'
 $env:SPM_CLOUD_ALLOW_SELF_REGISTRATION = 'true'
@@ -251,18 +226,13 @@ $env:SPM_CLOUD_TRUSTED_PROXY_IPS = '127.0.0.1'
 & "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
 ```
 
-Generate a secret once with `-join (1..4 | ForEach-Object { [Guid]::NewGuid().ToString('N') })`, then save it in that script and reuse it. Keep the script private. A `.env` file alone has no effect on native Windows.
+Generate a secret once with `-join (1..4 | ForEach-Object { [Guid]::NewGuid().ToString('N') })`, save it in the script, and keep that file private. A `.env` file alone does not configure a native Windows process.
 
-In another terminal check `Invoke-RestMethod http://127.0.0.1:8787/health`. Download Windows Caddy from [caddyserver.com](https://caddyserver.com/download), copy and edit `deploy/Caddyfile.native`, and run:
+For HTTPS, download Caddy from [caddyserver.com](https://caddyserver.com/download). Put `caddy.exe` in `C:\SPMCloud`, create a `Caddyfile` with the same site block as the Linux section, then run the backend script and Caddy in separate terminals. Confirm `http://127.0.0.1:8787/health` locally and `https://cloud.example.com/v1/instance` through the proxy. Configure Task Scheduler to start both at boot for unattended operation.
 
-```powershell
-.\caddy.exe run --config .\Caddyfile.native --adapter caddyfile
-Invoke-RestMethod https://cloud.example.com/v1/instance
-```
+### Optional automatic updates
 
-Keep both processes running. For unattended operation, configure Task Scheduler to start each program with its working directory and restart behavior, or use Docker Compose.
-
-For unattended updates, run the backend from a Task Scheduler task named `SPM Cloud` under the same Windows account that installed the package. Download the updater script from the current stable release and schedule it daily under that account:
+Run the backend from a Task Scheduler task named `SPM Cloud` under the installer account. Download the latest updater script:
 
 ```powershell
 $release = Invoke-RestMethod https://api.github.com/repos/sdf123098/spm-cloud/releases/latest
@@ -272,186 +242,111 @@ New-Item -ItemType Directory -Force (Split-Path $updater) | Out-Null
 Invoke-WebRequest $url -OutFile $updater
 ```
 
-The script downloads the prebuilt Windows package, verifies its SHA-256 and version, stops the backend task, replaces the executable, then starts the task and checks `/health`. If the check fails it restores the old executable. If the backend is running interactively, stop it before invoking the updater.
+Create a daily Task Scheduler job that runs `powershell.exe` with `-NoProfile -ExecutionPolicy Bypass -File "C:\ProgramData\SPMCloud\windows-auto-update.ps1"`, using the same account as the backend task. The updater verifies the package checksum and version, stops the backend task, replaces the executable, restarts it and checks `/health`; it restores the old executable if health does not recover. Stop an interactively running backend before manually invoking the updater.
 
-## External login: custom Yggdrasil and all-in-one
+## Configuration and JSON hot reload
 
-### One full hasJoined URL
+Environment variables are the simplest option for Docker and small native deployments. The Rust executable does not read `.env` itself; Compose or your service/startup script must pass the variables to it.
 
-Add this to the Docker `.env` or Linux `/etc/spm-cloud.env`:
+The alternative is strict administrator JSON, with an [editor schema](config.schema.json), [example](config.example.json) and full [deployment guide](deploy/ADMIN_JSON.md). JSON is checked every two seconds. Runtime settings such as upload/request limits, registration policy, identity providers and visual runtime settings hot-reload without restarting the process. Listener address, instance identity/origin, storage paths and logging settings require a restart. Explicit environment variables override matching JSON values.
+
+The default `limits.max_asset_bytes` / `SPM_CLOUD_MAX_ASSET_BYTES` is `134217728` bytes (128 MiB). To accept larger models, raise the backend limit and the reverse proxy's request-body limit together. A JSON limit change hot-reloads; an environment change requires a container recreation or service restart.
+
+For a Linux JSON service, the native path is `/etc/spm-cloud/config.json`. Create the directory for the service account, then initialize, edit and validate with the installed binary:
+
+```bash
+sudo install -d -o spm-cloud -g spm-cloud -m 750 /etc/spm-cloud
+sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.json
+# Edit the JSON: set the HTTPS origin and absolute storage paths
+sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --check-config
+sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --print-effective-config
+```
+
+On Windows, use a Windows path and run as the backend account:
+
+```powershell
+$exe = "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
+$config = 'C:\SPMCloud\config.json'
+New-Item -ItemType Directory -Force (Split-Path $config) | Out-Null
+& $exe --init-config $config
+# Edit the JSON: set the HTTPS origin and storage paths
+& $exe --config $config --check-config
+& $exe --config $config --print-effective-config
+```
+
+Initialization creates `secrets/bootstrap-token.txt` beside the config. Keep the config and token readable by the service account and private from players. `--print-effective-config` redacts credentials. Do not move a live instance to a new data path unless you also move its existing database and object files.
+
+## Connect players and accounts
+
+1. Each player updates SparkleMorpher and opens the model panel's **Instance Management** tab.
+2. Select **Add Instance** and enter the HTTPS origin, such as `https://cloud.example.com`. The mod reads the instance ID from the server.
+3. Select the new instance, open account management, then register or log in. Accounts are separate for every Cloud instance.
+4. After login, use **Bind Current Game Identity** to verify the game account. A Cloud account session alone does not complete game identity binding.
+5. Upload a model, mark it public, then test with another player on the same instance. Private models are not shared.
+
+Self-registration is enabled by default. If disabled, the operator must create player accounts through `POST /v1/accounts`; see [API notes](#api-and-development).
+
+## Optional external Yggdrasil login
+
+For one external authentication endpoint, add this environment variable to `.env`, `/etc/spm-cloud.env` or the Windows startup script:
 
 ```dotenv
 SPM_CLOUD_HAS_JOINED_URL=https://auth.example.com/all-in-one/hasJoined
 ```
 
-This creates/enables provider `custom`. Use the complete HTTPS endpoint; no root/path splitting is needed. An all-in-one gateway can verify all the accounts it supports through this one configuration.
+Use the complete HTTPS `hasJoined` URL. The backend appends `username` and `serverId`; the service must return the verified Yggdrasil player ID and name. For multiple providers or stable provider IDs, configure `SPM_CLOUD_IDENTITY_PROVIDERS` or use JSON. Keep provider IDs when changing the service: they identify existing account bindings. Full details are in the [JSON deployment guide](deploy/ADMIN_JSON.md).
 
-Cloud appends `username` and `serverId`. The service must return the verified Yggdrasil player `id` and `name`, matching the challenge. The game's access token stays with the launcher's configured Session Service and is never sent to Cloud.
+## Backup and upgrade
 
-On Windows, set `$env:SPM_CLOUD_HAS_JOINED_URL = 'https://auth.example.com/all-in-one/hasJoined'` before starting the executable. Recreate Docker containers or restart the native service to apply changes.
+Back up configuration and the entire data and object storage before upgrading. For SQLite, stop the service before copying the database so its WAL is included consistently. Keep backups private because they contain credentials and player data.
 
-### Multiple services, existing IDs and disabling
-
-Use a JSON array instead of the shortcut; the two non-empty options are mutually exclusive:
-
-```dotenv
-SPM_CLOUD_IDENTITY_PROVIDERS='[{"provider_id":"my-auth","display_name":"My Auth","has_joined_url":"https://auth.example.com/all-in-one/hasJoined","enabled":true}]'
-```
-
-Standard services can instead specify `base_url` and optional `session_path`. The default path is `/sessionserver/session/minecraft/hasJoined` appended to the root. For example:
-
-```json
-{"provider_id":"skin-site","display_name":"Skin Site","base_url":"https://auth.example.com/api/yggdrasil","enabled":true}
-```
-
-Provider IDs namespace existing identities: keep an existing ID when updating its configuration. Gateway accounts must not collide on UUID. Set `enabled:false` to disable a provider; deleting an environment variable does not remove its persisted database configuration. The reserved `official` provider cannot be replaced.
-
-Both Rust and Worker support the operator-authenticated `POST /v1/identity-providers` with one such JSON object. `has_joined_url` is mutually exclusive with `base_url` / `session_path`. Verification URLs require a public HTTPS hostname, with no non-default port, credentials, query or fragment. Players cannot add trusted services themselves.
-
-The official Cloud operator configures providers for the official instance. Self-hosted settings do not automatically register that service on the official Cloud. The two backends share source-level support; updating a running Rust service or a running Worker requires its own release step.
-
-## 5. Player setup and model sharing
-
-1. Update SparkleMorpher. Open **Instance Management → Add Instance**, enter the Cloud HTTPS origin and optionally a name. The instance ID is discovered automatically; the Cloud tab's **+** opens the same form.
-2. Select the instance and open **Account Management**. Connect/create an account using the game identity, or use password login/registration. Accounts belong to that Cloud instance.
-3. After password login, click **Bind current game identity**. A connected Cloud account alone does not prove the game identity is bound.
-4. Once bound, the client automatically restores login. It retries failures at intervals and resumes after selecting another Cloud; manual logout disables automatic restoration until an instance is selected again. Automatic restoration does not register new accounts.
-5. Upload a model, make it **public**, select it and check models, textures, wheel playback/stop, model settings and idle states with another player using the same Cloud.
-
-Community **All Models** lists accessible models without a search term. Recent, Favorites, My Models and Public Models are also available; the separate Public Models view requires a search. Only owners can change visibility.
-
-Official Minecraft accounts use certificate/session proofs; third-party accounts require a trusted enabled provider corresponding to the launcher. An offline name/UUID cannot become a verified global identity by self-reporting. Scope-specific offline approval is separate from ordinary player identity verification.
-
-Private models do not publish appearance or actions to other players. Selecting a different Cloud, an unverified identity or an unavailable model prevents sharing. With registration disabled, an operator must first create the account through `POST /v1/accounts`.
-
-## Configuration reference
-
-Defaults below describe the Rust process; Compose overrides bind, storage and proxy settings for its container network.
-
-| Variable | Default | Purpose |
+| Deployment | Update path | Data to preserve |
 |---|---|---|
-| `SPM_CLOUD_INSTANCE_ID` | `local-dev` | Stable instance ID; the templates use `self-hosted` |
-| `SPM_CLOUD_ORIGIN` | `https://localhost` | Bare public HTTPS origin |
-| `SPM_CLOUD_BIND` | `127.0.0.1:8787` | HTTP listener; Compose fixes `0.0.0.0:8787` |
-| `SPM_CLOUD_DATA_DIR` | `data` | Data directory |
-| `SPM_CLOUD_DATABASE` | `<DATA_DIR>/spm-cloud.db` | SQLite database |
-| `SPM_CLOUD_OBJECT_DIR` | `<DATA_DIR>/objects` | Model object directory; templates use `objects` |
-| `SPM_CLOUD_ACCESS_TOKEN` | Unset | Operator bearer secret |
-| `SPM_CLOUD_BOOTSTRAP_ACCOUNT` | `account_local` | Bootstrap account ID |
-| `SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH` | Unset | Optional Argon2id password hash |
-| `SPM_CLOUD_ALLOW_SELF_REGISTRATION` | `true` | `true` or `false` |
-| `SPM_CLOUD_TRUSTED_PROXY_IPS` | Empty | Comma-separated trusted proxy IPs |
-| `SPM_CLOUD_HAS_JOINED_URL` | Unset | One complete endpoint; provider `custom` |
-| `SPM_CLOUD_IDENTITY_PROVIDERS` | Unset | Operator provider JSON array |
-| `SPM_CLOUD_MAX_ASSET_BYTES` | `134217728` | Asset bytes, allowed 1 through 4 GiB |
-| `SPM_CLOUD_MAX_MESSAGE_BYTES` | `65536` | Protocol message bytes, allowed 1 KiB through 1 MiB |
+| Docker Compose | Use the optional systemd updater, or pull repository changes and run `deploy/docker-auto-update.sh` to load the latest prebuilt image | Docker data/object volumes, `.env`, Caddy data/config volumes |
+| Linux native | Use the systemd timer, or run the latest shell installer and restart `spm-cloud` | `/var/lib/spm-cloud`, `/etc/spm-cloud.env` or JSON config/secrets, systemd overrides and Caddy config |
+| Windows native | Use the scheduled updater or install the latest PowerShell package after stopping the process | `data`, `objects`, startup script, Caddy config and any JSON/token files |
 
-Compose-only variables are `SPM_CLOUD_HOST`, `SPM_CLOUD_DATA_VOLUME`, `SPM_CLOUD_OBJECTS_VOLUME`, `SPM_CLOUD_NETWORK_SUBNET` and `SPM_CLOUD_PROXY_IP`. If the subnet conflicts with another network, change subnet and proxy IP together.
+Never run `docker compose down -v` when you intend to keep volumes. Normal upgrades retain accounts and model files; database schema changes may require a newer binary. To roll back, restore a matching data/config backup together with the compatible binary. See [backup, migration and rollback details](deploy/ADMIN_JSON.md).
 
-## 6. Backup and upgrade
-
-Back up the database, model objects and original configuration together. Stop the backend before a file-level backup and include the entire database directory, including any SQLite WAL files.
-
-### Docker
-
-Use a new backup directory each time, substituting your existing volume names if customized:
-
-```bash
-mkdir -p backup
-chmod 700 backup
-sudo docker compose stop spm-cloud
-sudo docker run --rm -v spm-cloud-data:/from:ro -v "$PWD/backup:/to" alpine sh -c 'tar czf /to/data.tgz -C /from .'
-sudo docker run --rm -v spm-cloud-objects:/from:ro -v "$PWD/backup:/to" alpine sh -c 'tar czf /to/objects.tgz -C /from .'
-cp .env backup/instance.env
-chmod 600 backup/instance.env
-sudo docker compose start spm-cloud
-git pull --ff-only
-sudo SPM_CLOUD_COMPOSE_DIR="$PWD" bash deploy/docker-auto-update.sh
-```
-
-Copy the backup off the server. Preserve existing volume names; `docker compose down -v` deletes persistent volumes. Restore archives to new volumes and update the two volume names in `.env` to retain the originals for comparison.
-
-### Native
-
-On Linux, stop the service and archive `/var/lib/spm-cloud`, `/etc/spm-cloud.env`, the systemd unit and Caddy configuration. Restrict access to the archive because it contains the operator secret. Then start the service again. The release installer downloads the latest prebuilt package; no source build is required:
-
-```bash
-backup_file="$HOME/spm-cloud-backup-$(date +%Y%m%d-%H%M%S).tgz"
-sudo systemctl stop spm-cloud
-sudo tar -czf "$backup_file" -C / var/lib/spm-cloud etc/spm-cloud.env etc/systemd/system/spm-cloud.service etc/caddy/Caddyfile
-sudo chmod 600 "$backup_file"
-sudo systemctl start spm-cloud
-```
-
-```bash
-curl --fail --location --proto '=https' --tlsv1.2 \
-  https://github.com/sdf123098/spm-cloud/releases/latest/download/spm-cloud-installer.sh \
-  --output /tmp/spm-cloud-installer.sh
-sudo env SPM_CLOUD_INSTALL_DIR=/usr/local sh /tmp/spm-cloud-installer.sh
-sudo systemctl restart spm-cloud
-curl -fsS https://cloud.example.com/health
-```
-
-On Windows stop the executable, back up `data`, `objects` and the startup configuration, replace the binary and restart with the same settings. Normal upgrades migrate the database incrementally. Restore matching storage/configuration and a compatible binary; never mix an old WAL with a different database.
-
-## 7. Troubleshooting
+## Troubleshooting
 
 | Symptom | Check |
 |---|---|
-| HTTPS/certificate failure | DNS, reachable ports 80/443, occupied ports and Caddy logs |
-| Caddy 502 | Backend running; native upstream `127.0.0.1:8787`, Docker upstream `spm-cloud:8787` |
-| Native service exits | Origin syntax, directory permissions, EnvironmentFile and journal logs |
-| Third-party login fails | Enabled provider, exact hasJoined URL, matching launcher and first identity binding |
-| Identity already linked | Log into the original account; avoid repeatedly creating new accounts |
-| Registration denied | `auth.self_registration`; explicit disabled registration requires operator-created accounts |
-| Other players cannot see the model/action | Same Cloud, updated clients/backend, verified identities and a public model |
-| Empty Public Models results | Enter a search term; use All Models on a community instance for the accessible catalog |
-| Large upload rejected | The default is 128 MiB. Check `SPM_CLOUD_MAX_ASSET_BYTES` and any proxy body-size limits; JSON limit changes hot reload, while environment changes require container recreation or a service restart |
-| Configuration edits have no effect | Confirm the process started with the intended `--config` file. Runtime JSON settings hot reload; environment settings and restart-only JSON fields require a restart |
+| HTTPS or certificate failure | DNS points to this server; ports 80/443 are open; Caddy logs and configuration |
+| Caddy returns 502 | Backend health; native upstream is `127.0.0.1:8787`, Docker upstream is `spm-cloud:8787` |
+| Native Linux service exits | `sudo journalctl -u spm-cloud -n 100`; origin syntax, environment file, file ownership and storage permissions |
+| Port already in use | Identify what uses 8787/80/443 before changing the listener or proxy |
+| Player cannot log in or bind | Same Cloud selected; account session works; game identity binding completed; external provider matches the launcher |
+| Other players cannot see a model/action | Both players use the same instance; identity is verified; model is public; client and backend are current |
+| Upload rejected | Backend default is 128 MiB; check `limits.max_asset_bytes` or `SPM_CLOUD_MAX_ASSET_BYTES` and the proxy body-size cap |
+| JSON edit has no effect | Process started with the intended `--config`; effective environment variables may override JSON; restart-only fields need a restart |
+| `.env` edit has no effect | Docker: recreate the container. Native: ensure the service/startup script loads the file, then restart the process |
 
-One Rust instance uses SQLite and a local object directory. Do not run multiple backends against the same SQLite file. Validate with two real players, including rejoining the world; a successful health response only verifies service reachability.
+One instance uses SQLite and a local object directory. Do not point multiple backend processes at the same SQLite file. Validate the deployment with two real players; `/health` only confirms reachability.
 
-## Development and API
+## API and development
 
-The Rust service uses Axum, SQLite WAL and local objects. The official adapter uses Worker, D1, R2 and Durable Objects. The protocol is shared; storage and deployment configuration are separate.
+The Rust backend uses Axum, SQLite WAL and local object storage. The official adapter uses Cloudflare Worker, D1, R2 and Durable Objects. The clients share a protocol; deployment and storage are separate.
 
-| Area | Endpoints |
+| Feature | Endpoint |
 |---|---|
-| Health/discovery | `GET /health`, `GET /v1/instance` |
-| Registration/password login | `POST /v1/accounts`, `POST /v1/sessions` |
-| Refresh/logout | `POST /v1/sessions/refresh`, `DELETE /v1/sessions/current` |
-| Game login | `POST /v1/auth/login-challenges` and its `/complete` |
-| Identity binding | `POST /v1/auth/challenges` and its `/complete` |
-| Identities/providers | `/v1/identities`, `/v1/identity-providers` |
-| Model catalog/uploads | `GET/POST /v1/assets` |
+| Health and discovery | `GET /health`, `GET /v1/instance` |
+| Create account / password login | `POST /v1/accounts`, `POST /v1/sessions` |
+| Refresh / log out | `POST /v1/sessions/refresh`, `DELETE /v1/sessions/current` |
+| Game login and identity binding | `/v1/auth/login-challenges` and `/v1/auth/challenges` |
+| Providers and identities | `/v1/identity-providers`, `/v1/identities` |
+| Model catalog and upload | `GET/POST /v1/assets` |
 | Player appearance/actions | `PUT /v1/players/me/appearance`, `POST /v1/players/appearances/query` |
 
-Operator example for creating an account when registration is closed; set the operator secret in your terminal first:
+When self-registration is disabled, an operator can create an account using the bearer token:
 
 ```bash
-curl -fsS https://cloud.example.com/v1/accounts -H "Authorization: Bearer $SPM_CLOUD_ACCESS_TOKEN" -H 'Content-Type: application/json' --data '{"account_id":"alice","password":"replace-with-initial-password"}'
+curl -fsS https://cloud.example.com/v1/accounts \
+  -H "Authorization: Bearer $SPM_CLOUD_ACCESS_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"account_id":"alice","password":"replace-with-initial-password"}'
 ```
 
-An account password creates a Cloud session; the game identity still requires a challenge. Player `motion` shares the appearance revision transaction and carries wheel events, Molang settings/expressions and controller state. Omitted/cleared motion or a cleared model removes old actions. Private, expired, unverified or unavailable appearances are hidden.
-
-Scope-local `STRICT_APPROVAL`, `CLAIM_CODE`, `FIRST_CLAIM` and `DISABLED` offline policies do not replace ordinary player verification.
-
-### Build and checks
-
-Tests additionally require Node.js 22+ for synthetic RSA fixtures; runtime does not. SQLite is bundled, TLS uses Rustls and protoc is provided by build dependencies.
-
-```text
-cargo fmt --check
-cargo check --all-targets --all-features --locked
-cargo test --all-targets --all-features --locked
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo build --release --locked
-```
-
-Explicit-target binaries are under `target/<target>/release`; native builds normally use `target/release`. Developer-specific GNU/MSYS2 settings are ignored by Git and are not required on other devices.
-
-[Cross-platform CI](.github/workflows/platforms.yml) checks Ubuntu, Windows and macOS builds and HTTP contracts, the Rust minimum version and a Linux container build. Local Windows checks do not establish that native systemd, macOS or Docker have been run locally.
-
-Official certificate trust is built in or fetched from fixed official HTTPS endpoints. No environment/request option replaces production trust roots. See [Worker deployment](cloudflare/README.md) and [test fixtures](tests/README.md). `tools/migrate_legacy.py` audits legacy catalogs without importing files, deleting originals or granting access.
+Rust development requires Rust 1.87 or newer. Tests additionally need Node.js 22+ for test fixtures; production runtime does not. Build and CI details are in [platform CI](.github/workflows/platforms.yml); Worker deployment is documented in [cloudflare/README.md](cloudflare/README.md).
 
 **License:** MIT.
