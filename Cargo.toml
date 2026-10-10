@@ -1,6 +1,6 @@
 [package]
 name = "spm-cloud"
-version = "2.1.1"
+version = "2.1.2"
 edition = "2024"
 rust-version = "1.87"
 description = "Standalone SPM Cloud service for SparkleMorpher clients"

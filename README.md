@@ -15,7 +15,7 @@ The backend runs independently of Minecraft. You can deploy it beside a Minecraf
 | Native Windows | Windows servers without Docker | Run the latest stable PowerShell installer; prebuilt x64 executable | Optional Task Scheduler job downloads the verified prebuilt package and rolls back if health checks fail |
 | macOS package | Local or manual runs on Intel or Apple Silicon | Download the matching archive from [GitHub Releases](https://github.com/sdf123098/spm-cloud/releases/latest) | Manual replacement; the service updater tutorials below cover Linux and Windows |
 
-All release links below follow GitHub's **latest stable release**; commands do not contain a version number. For a tagged/older release, select a specific version on the [Releases page](https://github.com/sdf123098/spm-cloud/releases). Default model upload size is **128 MiB**. New installations use JSON as the required backend configuration; environment-only startup remains available for existing deployments during migration. Prebuilt archives ship `config.example.json` and `config.schema.json`; initialize an instance-specific config and token on the target machine. See [JSON configuration and deployment](deploy/ADMIN_JSON.md).
+All release links below follow GitHub's **latest stable release**; commands do not contain a version number. For a tagged/older release, select a specific version on the [Releases page](https://github.com/sdf123098/spm-cloud/releases). Default model upload size is **128 MiB** (134217728 bytes), and the reverse proxy must allow at least the same request size. New installations use JSON as the required backend configuration; environment-only startup remains available for existing deployments during migration. Prebuilt archives ship `config.example.json`, `config.schema.json`, and `nginx-cloud.conf.example`; initialize an instance-specific config and token on the target machine. See [JSON configuration and deployment](deploy/ADMIN_JSON.md).
 
 ## Before you install
 
@@ -51,7 +51,7 @@ sudo nano deploy/runtime/config.json
 
 Edit `instance.instance_id`, `instance.origin`, `instance.bind`, `instance.trusted_proxy_ips`, and `storage` in the generated JSON. For this Compose network, use `0.0.0.0:8787`, the proxy address `172.30.10.3`, and persistent container paths `/var/lib/spm-cloud/data`, `/var/lib/spm-cloud/data/spm-cloud.db`, `/var/lib/spm-cloud/objects`. Set the public origin to your HTTPS domain. Also replace `cloud.example.com` in `Caddyfile.compose` with the same hostname. The generated bootstrap token is in `deploy/runtime/secrets/bootstrap-token.txt`; keep it private.
 
-`limits.max_asset_bytes` defaults to 134217728 bytes (128 MiB). The example config and schema are included in the image at `/usr/share/doc/spm-cloud/` and in the native prebuilt archives.
+`limits.max_asset_bytes` defaults to 134217728 bytes (128 MiB). The example config, schema and Nginx proxy snippet are included in the image at `/usr/share/doc/spm-cloud/` and in the native prebuilt archives.
 
 ### 2. Start and verify
 
@@ -178,6 +178,8 @@ curl -fsS https://cloud.example.com/v1/instance
 
 DNS must point to the server and ports 80/443 must be reachable for certificate issuance. Caddy handles HTTPS and WebSockets. The proxy header works with `instance.trusted_proxy_ips` set to `127.0.0.1` above.
 
+If you use Nginx instead of Caddy, the prebuilt archive includes `nginx-cloud.conf.example`. Include its contents inside the HTTPS `server` block for this hostname. It sets `client_max_body_size 128m` and forwards HTTP/WebSocket requests to the backend. Keep the Nginx limit at least as high as `limits.max_asset_bytes`; otherwise Nginx will return 413 before the request reaches SPM Cloud. After editing Nginx, run `sudo nginx -t` and reload it.
+
 ### 5. Optional automatic updates
 
 The systemd timer checks GitHub every 30 minutes. It downloads the matching prebuilt Linux archive, verifies its checksum and version, replaces the binary, restarts the service and checks `/health`. It restores the previous binary if the health check fails. Enable it after the backend is healthy:
@@ -248,7 +250,7 @@ Create a daily Task Scheduler job that runs `powershell.exe` with `-NoProfile -E
 
 **New installations use JSON as the required backend configuration.** The Rust executable does not read `.env` itself. Existing installations that started with environment variables can keep using that legacy mode during migration; once a JSON file is selected, its values are authoritative and environment variables do not override them.
 
-`spm-cloud --init-config <path>` creates a starter file and a unique bootstrap token; edit instance-specific values such as HTTPS origin and storage paths. Prebuilt archives include `config.example.json` and `config.schema.json`; the Docker image also contains both under `/usr/share/doc/spm-cloud/`. The token and paths are unique to each deployment, so initialize them on the target machine instead of sharing a generated file. JSON is checked every two seconds. Runtime settings such as upload/request limits, registration policy, identity providers and visual runtime settings hot-reload without restarting the process. Listener address, instance identity/origin, storage paths and logging settings require a restart. The default `limits.max_asset_bytes` is 128 MiB.
+`spm-cloud --init-config <path>` creates a starter file and a unique bootstrap token; edit instance-specific values such as HTTPS origin and storage paths. Prebuilt archives include `config.example.json`, `config.schema.json` and `nginx-cloud.conf.example`; the Docker image also contains these under `/usr/share/doc/spm-cloud/`. The token and paths are unique to each deployment, so initialize them on the target machine instead of sharing a generated file. JSON is checked every two seconds. Runtime settings such as upload/request limits, registration policy, identity providers and visual runtime settings hot-reload without restarting the process. Listener address, instance identity/origin, storage paths and logging settings require a restart. The default `limits.max_asset_bytes` is 128 MiB.
 
 To accept larger models, raise the JSON upload limit and the reverse proxy's request-body limit together.
 

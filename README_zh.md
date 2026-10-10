@@ -15,7 +15,7 @@
 | Windows 原生 | 不使用 Docker 的 Windows 服务器 | 运行 GitHub 最新稳定版 PowerShell 安装器，提供 x64 预构建程序 | 可选任务计划程序下载并校验预构建包，健康检查失败时恢复旧程序 |
 | macOS 程序包 | Intel 或 Apple Silicon 上本地/手动运行 | 从 [GitHub Releases](https://github.com/sdf123098/spm-cloud/releases/latest) 下载对应架构压缩包 | 手动替换程序；下文自动更新教程覆盖 Linux 和 Windows |
 
-下文发布下载链接均指向 GitHub **最新稳定版**，安装命令不需要修改版本号。需要旧版时，请从 [Releases 页面](https://github.com/sdf123098/spm-cloud/releases)选择指定版本。默认单模型上传上限为 **128 MiB**。新安装必须使用 JSON 作为后端配置；已有部署可在迁移期间继续使用旧 ENV 模式。预构建压缩包包含 `config.example.json` 和 `config.schema.json`；每台机器都应自行初始化实例配置和 token。详见[JSON 配置和部署指南](deploy/ADMIN_JSON.md)。
+下文发布下载链接均指向 GitHub **最新稳定版**，安装命令不需要修改版本号。需要旧版时，请从 [Releases 页面](https://github.com/sdf123098/spm-cloud/releases)选择指定版本。默认单模型上传上限为 **128 MiB（134217728 字节）**，反向代理也必须允许至少这么大的请求体。新安装必须使用 JSON 作为后端配置；已有部署可在迁移期间继续使用旧 ENV 模式。预构建压缩包包含 `config.example.json`、`config.schema.json` 和 `nginx-cloud.conf.example`；每台机器都应自行初始化实例配置和 token。详见[JSON 配置和部署指南](deploy/ADMIN_JSON.md)。
 
 ## 部署前准备
 
@@ -51,7 +51,7 @@ sudo nano deploy/runtime/config.json
 
 编辑生成的 JSON：设置 `instance.instance_id`、`instance.origin`、`instance.bind`、`instance.trusted_proxy_ips` 和 `storage`。Compose 网络下，监听地址使用 `0.0.0.0:8787`，代理地址使用 `172.30.10.3`，持久化容器路径使用 `/var/lib/spm-cloud/data`、`/var/lib/spm-cloud/data/spm-cloud.db` 和 `/var/lib/spm-cloud/objects`。`instance.origin` 填公网 HTTPS 域名；同时把 `Caddyfile.compose` 中的 `cloud.example.com` 替换为同一域名。bootstrap token 位于 `deploy/runtime/secrets/bootstrap-token.txt`，应妥善保管。
 
-上传上限默认是 134217728 字节（128 MiB）。示例 JSON 和 schema 也在 Docker 镜像的 `/usr/share/doc/spm-cloud/` 中。
+上传上限默认是 134217728 字节（128 MiB）。示例 JSON、schema 和 Nginx 代理片段也在 Docker 镜像的 `/usr/share/doc/spm-cloud/` 中以及原生预构建包中。
 
 ### 2. 启动并检查
 
@@ -178,6 +178,8 @@ curl -fsS https://cloud.example.com/v1/instance
 
 申请 HTTPS 证书前，DNS 必须指向服务器，80/443 端口必须可以从公网访问。Caddy 会代理 HTTPS 和 WebSocket；上面的代理头配合 `instance.trusted_proxy_ips` 中的 `127.0.0.1` 传递玩家 IP。
 
+如果使用 Nginx 代替 Caddy，预构建包内附有 `nginx-cloud.conf.example`。将文件内容放进该域名的 HTTPS `server` 块；它会设置 `client_max_body_size 128m`，并代理 HTTP/WebSocket 请求到后端。Nginx 限制必须不低于 `limits.max_asset_bytes`，否则请求会在到达 SPM Cloud 前被 Nginx 返回 413。修改后先运行 `sudo nginx -t`，再重载 Nginx。
+
 ### 5. 可选：启用 Linux 自动更新
 
 systemd 定时器每 30 分钟检查一次。它下载匹配架构的预构建 Linux 包，校验 SHA-256 和版本，替换程序、重启服务并检查 `/health`；健康检查失败会恢复旧程序。后端正常运行后安装：
@@ -248,7 +250,7 @@ Invoke-WebRequest $url -OutFile $updater
 
 **新安装必须使用 JSON 作为后端配置。**Rust 程序本身不会读取 `.env`。已有环境变量部署可以在迁移期间继续使用旧模式；选中 JSON 后，JSON 中的值为准，环境变量不会覆盖它。
 
-运行 `spm-cloud --init-config <路径>` 生成初始配置和本机专属的 bootstrap token，再修改 HTTPS 地址、存储路径等实例信息。预构建压缩包包含 `config.example.json` 和 `config.schema.json`；Docker 镜像在 `/usr/share/doc/spm-cloud/` 下也提供两者。每台服务器都应独立生成 token 和路径，不要共用已初始化的配置。JSON 文件每 2 秒检查一次。上传/请求限制、注册策略、身份提供方和视觉运行设置等运行时字段会热加载；监听地址、实例身份/地址、存储路径和日志设置需要重启。默认上传上限为 128 MiB。
+运行 `spm-cloud --init-config <路径>` 生成初始配置和本机专属的 bootstrap token，再修改 HTTPS 地址、存储路径等实例信息。预构建压缩包包含 `config.example.json`、`config.schema.json` 和 `nginx-cloud.conf.example`；Docker 镜像在 `/usr/share/doc/spm-cloud/` 下也提供这些文件。每台服务器都应独立生成 token 和路径，不要共用已初始化的配置。JSON 文件每 2 秒检查一次。上传/请求限制、注册策略、身份提供方和视觉运行设置等运行时字段会热加载；监听地址、实例身份/地址、存储路径和日志设置需要重启。默认上传上限为 128 MiB。
 
 上传更大的模型时，还需同步提高反向代理的请求体限制。
 
