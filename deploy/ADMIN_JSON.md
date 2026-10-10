@@ -50,9 +50,8 @@ Edit `SPM_CLOUD_COMPOSE_DIR` and both `/opt/spm-cloud` paths in the service if t
 Install the generated Linux package with the shell installer, forcing the install prefix to `/usr/local` so the backend lands in `/usr/local/bin`:
 
 ```bash
-version=2.1.1
 curl --fail --location --proto '=https' --tlsv1.2 \
-  "https://github.com/sdf123098/spm-cloud/releases/download/v${version}/spm-cloud-installer.sh" \
+  https://github.com/sdf123098/spm-cloud/releases/latest/download/spm-cloud-installer.sh \
   --output /tmp/spm-cloud-installer.sh
 sudo env SPM_CLOUD_INSTALL_DIR=/usr/local sh /tmp/spm-cloud-installer.sh
 ```
@@ -61,7 +60,7 @@ After the `spm-cloud.service` backend is running, install the systemd updater. I
 
 ```bash
 sudo install -d -m 755 /usr/local/libexec
-release=v2.1.1
+release="$(curl --fail --silent --show-error https://api.github.com/repos/sdf123098/spm-cloud/releases/latest | jq -er '.tag_name')"
 base="https://raw.githubusercontent.com/sdf123098/spm-cloud/${release}/deploy"
 for file in native-auto-update.sh spm-cloud-native-update.service spm-cloud-native-update.timer; do
   curl --fail --location "$base/$file" --output "/tmp/$file"
