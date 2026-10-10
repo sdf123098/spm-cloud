@@ -6,7 +6,12 @@ When started with a selected JSON file, the binary polls it every two seconds. V
 
 ## Native systemd
 
-Initialize `/etc/spm-cloud/config.json` using `spm-cloud --init-config /etc/spm-cloud/config.json`. This creates a persistent `secrets/bootstrap-token.txt`; initialization refuses to overwrite either file. Restrict the directory to the service account and administrators. Set the public HTTPS origin and use these absolute storage paths so the read-only configuration directory contains no mutable database:
+After installing the binary and creating the `spm-cloud` service account, initialize the config as that account. This creates `/etc/spm-cloud/secrets/bootstrap-token.txt`; initialization refuses to overwrite either file. Keep the config directory writable during initialization and readable by the service account. Edit the generated JSON to set the public HTTPS origin and use these absolute storage paths so the read-only configuration directory contains no mutable database:
+
+```bash
+sudo install -d -o spm-cloud -g spm-cloud -m 750 /etc/spm-cloud
+sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.json
+```
 
 ```json
 "storage": {
@@ -17,6 +22,13 @@ Initialize `/etc/spm-cloud/config.json` using `spm-cloud --init-config /etc/spm-
 ```
 
 Preserve the paths of an existing database and object directory instead of creating a new empty instance. `deploy/spm-cloud-json.service` uses the explicit JSON path and optional `/etc/spm-cloud/overrides.env`. The existing `spm-cloud.service` keeps environment-only compatibility. Check file ownership under the service account before installing either unit.
+
+After editing the JSON, validate it and inspect the merged, redacted settings before enabling the service:
+
+```bash
+sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --check-config
+sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --print-effective-config
+```
 
 ## Docker Compose
 

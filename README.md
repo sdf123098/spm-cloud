@@ -12,7 +12,29 @@ Source: [sdf123098/spm-cloud](https://github.com/sdf123098/spm-cloud). The offic
 
 ## Configuration files
 
-The Rust backend supports strict administrator JSON with an [editor schema](config.schema.json) and [example](config.example.json). Initialize a configuration and persistent bootstrap token with `spm-cloud --init-config /etc/spm-cloud/config.json`, edit the public HTTPS origin and storage paths, then run `spm-cloud --config /etc/spm-cloud/config.json --check-config`. Start with the same `--config` argument. `--print-effective-config` reports merged values and their sources with credentials redacted; both inspection commands exit before database initialization or listening. A selected JSON file is checked every two seconds; runtime settings such as the 128 MiB default upload limit apply without restarting `spm-cloud`. Listener, identity, storage paths and logging changes require a restart.
+The Rust backend supports strict administrator JSON with an [editor schema](config.schema.json) and [example](config.example.json). Use a path for your operating system. For native Linux (after installing the package and creating the `spm-cloud` service account):
+
+```bash
+sudo install -d -o spm-cloud -g spm-cloud -m 750 /etc/spm-cloud
+sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.json
+# Edit /etc/spm-cloud/config.json: set the public HTTPS origin and absolute storage paths
+sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --check-config
+sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --print-effective-config
+```
+
+For native Windows, run these commands as the same account that will run the backend:
+
+```powershell
+$exe = "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
+$config = "C:\SPMCloud\config.json"
+New-Item -ItemType Directory -Force (Split-Path $config) | Out-Null
+& $exe --init-config $config
+# Edit C:\SPMCloud\config.json: set the public HTTPS origin and storage paths
+& $exe --config $config --check-config
+& $exe --config $config --print-effective-config
+```
+
+Initialization creates the persistent `secrets/bootstrap-token.txt` beside the config file; on Linux, keep both readable by the systemd service account. Start with the same `--config` argument. `--check-config` and `--print-effective-config` exit before database initialization or listening; the latter reports merged values and provenance with credentials redacted. A selected JSON file is checked every two seconds; runtime settings such as the 128 MiB default upload limit apply without restarting `spm-cloud`. Listener, identity, storage paths and logging changes require a restart.
 
 Selection is `--config` > `SPM_CLOUD_CONFIG` > an existing working-directory `config.json`. Without a selected file, legacy environment startup remains supported. Explicit environment values override JSON; JSON paths are relative to its directory, environment paths to the working directory. Protect the generated `secrets/bootstrap-token.txt` with service-account permissions. Bootstrap password settings initialize missing credentials and do not reset existing passwords on restart. Player display state, explicit vehicle bindings and bound entity motion are opt-in and default off; projectile snapshots remain unavailable. New clients negotiate entity query limits; keep 64 when serving old clients. See [JSON deployment, migration and rollback](deploy/ADMIN_JSON.md).
 

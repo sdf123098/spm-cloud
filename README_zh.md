@@ -12,7 +12,29 @@ SparkleMorpher 的独立 Rust 自建 Cloud 后端，使用与官方 Cloud 相同
 
 ## 配置文件
 
-Rust 后端支持严格管理员 JSON，提供[编辑器 Schema](config.schema.json) 和[示例](config.example.json)。先运行 `spm-cloud --init-config C:/spm-cloud/config.json` 生成配置和持久 bootstrap token，调整对外 HTTPS 域名与存储路径，再运行 `spm-cloud --config C:/spm-cloud/config.json --check-config`。启动使用相同的 `--config` 参数。`--print-effective-config` 输出合并后的字段与来源，凭据脱敏；两个检查命令均在数据库初始化、账户创建和监听前退出。选中的 JSON 文件每 2 秒检查一次；上传上限（默认 128 MiB）、请求大小、自助注册、身份提供方及视觉运行设置会热加载，无需重启 `spm-cloud`。监听地址、实例身份、存储路径和日志设置仍需重启。
+Rust 后端支持严格管理员 JSON，提供[编辑器 Schema](config.schema.json) 和[示例](config.example.json)。初始化命令要使用当前操作系统的路径。Linux 原生部署示例（先完成下文的安装程序和 `spm-cloud` 服务账号创建）：
+
+```bash
+sudo install -d -o spm-cloud -g spm-cloud -m 750 /etc/spm-cloud
+sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.json
+# 编辑 /etc/spm-cloud/config.json，设置 HTTPS origin 和绝对存储路径
+sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --check-config
+sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --print-effective-config
+```
+
+Windows 原生部署使用 Windows 路径，并以运行后端的同一账号执行：
+
+```powershell
+$exe = "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
+$config = "C:\SPMCloud\config.json"
+New-Item -ItemType Directory -Force (Split-Path $config) | Out-Null
+& $exe --init-config $config
+# 编辑 C:\SPMCloud\config.json，设置 HTTPS origin 和数据目录
+& $exe --config $config --check-config
+& $exe --config $config --print-effective-config
+```
+
+初始化会在配置文件旁生成持久 token：`secrets/bootstrap-token.txt`；Linux 下确保它和配置文件可由 systemd 服务账号读取。启动程序时使用相同的 `--config` 参数。`--check-config` 与 `--print-effective-config` 会在数据库初始化、账户创建和监听前退出；后者输出合并后的字段与来源，并隐藏凭据。选中的 JSON 文件每 2 秒检查一次；上传上限（默认 128 MiB）、请求大小、自助注册、身份提供方及视觉运行设置会热加载，无需重启 `spm-cloud`。监听地址、实例身份、存储路径和日志设置仍需重启。
 
 文件选择顺序为 `--config` → `SPM_CLOUD_CONFIG` → 工作目录中已存在的 `config.json`；没有选中文件继续使用旧环境变量方式。显式环境变量覆盖 JSON；JSON 相对路径以配置目录为基准，环境变量路径以工作目录为基准。生成的 `secrets/bootstrap-token.txt` 应限服务账号访问。bootstrap 密码只初始化缺失凭据，重启不覆盖既有密码。玩家显示状态、坐骑独立绑定及绑定实体 motion 可显式启用，默认关闭；投射物快照仍不可启用。新客户端已协商查询限制，服务旧客户端时维持 `max_entity_query_count` 默认 64。完整配置和部署说明见 [JSON 管理](deploy/ADMIN_JSON.md)。
 
