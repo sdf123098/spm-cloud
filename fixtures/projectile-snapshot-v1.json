@@ -1,0 +1,19 @@
+{
+  "world_epoch": "world-reset-3",
+  "dimension_id": "minecraft:overworld",
+  "entity_uuid": "11111111-1111-4111-8111-111111111111",
+  "entity_kind": "minecraft:arrow",
+  "source_identity_id": "identity-shooter",
+  "source_entity_uuid": "22222222-2222-4222-8222-222222222222",
+  "event_id": "shot-1",
+  "resource": {
+    "asset_id": "model-arrow",
+    "asset_revision": 1,
+    "raw_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "texture_id": "default",
+    "format": "ysm"
+  },
+  "projectile_bundle_key": "minecraft:arrow",
+  "variables": { "arrow_variant": 2.0 },
+  "firing_item_id": null
+}

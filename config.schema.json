@@ -1,0 +1,283 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "default": 1
+    },
+    "instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "instance_id": {
+          "type": "string",
+          "default": "self-hosted",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "maxLength": 128
+        },
+        "origin": {
+          "type": "string",
+          "default": "https://localhost",
+          "description": "Bare HTTPS origin, no credentials, path, query or fragment. Set the public hostname before deployment."
+        },
+        "bind": {
+          "type": "string",
+          "default": "127.0.0.1:8787"
+        },
+        "trusted_proxy_ips": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "data_dir": {
+          "type": "string",
+          "default": "data"
+        },
+        "database_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "minLength": 1,
+          "description": "Relative to the config directory. When omitted/null, derived from data_dir. Environment overrides use process working directory."
+        },
+        "object_dir": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "minLength": 1,
+          "description": "Relative to the config directory. When omitted/null, derived from data_dir. Environment overrides use process working directory."
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow_self_registration": {
+          "type": "boolean",
+          "default": true
+        },
+        "bootstrap_account_id": {
+          "type": "string",
+          "default": "account_local",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "maxLength": 128
+        },
+        "bootstrap_access_token_file": {
+          "type": "string",
+          "default": null,
+          "minLength": 1,
+          "description": "Relative credential file reference; secret never appears in effective output. Explicit environment secret overrides skip reading this file."
+        },
+        "bootstrap_password_hash_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "minLength": 1,
+          "description": "Relative credential file reference; secret never appears in effective output. Explicit environment secret overrides skip reading this file."
+        },
+        "identity_providers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "provider_id",
+              "display_name"
+            ],
+            "properties": {
+              "provider_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                "maxLength": 128
+              },
+              "display_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "base_url": {
+                "type": "string",
+                "default": ""
+              },
+              "enabled": {
+                "type": "boolean",
+                "default": true
+              },
+              "session_path": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "has_joined_url": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            }
+          },
+          "default": []
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_asset_bytes": {
+          "type": "integer",
+          "default": 134217728,
+          "minimum": 1,
+          "maximum": 4294967296
+        },
+        "max_message_bytes": {
+          "type": "integer",
+          "default": 65536,
+          "minimum": 1024,
+          "maximum": 1048576
+        },
+        "max_entity_query_count": {
+          "type": "integer",
+          "default": 64,
+          "minimum": 1,
+          "maximum": 256
+        },
+        "max_visual_state_bytes": {
+          "type": "integer",
+          "default": 8192,
+          "minimum": 1024,
+          "maximum": 65536
+        },
+        "max_visual_variables": {
+          "type": "integer",
+          "default": 32,
+          "minimum": 0,
+          "maximum": 128
+        },
+        "max_projectile_snapshots_per_publisher": {
+          "type": "integer",
+          "default": 256,
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "max_projectile_snapshots_per_world": {
+          "type": "integer",
+          "default": 4096,
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "visual_publish_requests_per_second": {
+          "type": "integer",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "visual_publish_burst": {
+          "type": "integer",
+          "default": 40,
+          "minimum": 1,
+          "maximum": 2000
+        }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entity_motion": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable explicit bound maid and fake-player display timelines with scope/target edit ACL, exact appearance identity, CAS and short renewable leases. Defaults to false."
+        },
+        "player_display_state": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable verified player display inputs with explicit scope, epoch and dimension checks. Defaults to false."
+        },
+        "vehicle_bindings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable explicit vehicle bindings with scope and VEHICLE target edit ACL, exact resource ACL and revision CAS. Defaults to false."
+        },
+        "projectile_snapshots": {
+          "type": "boolean",
+          "default": false,
+          "const": false,
+          "description": "Reserved capability. Not implemented in this build; enabling is rejected."
+        }
+      }
+    },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projectile_idle_ttl_seconds": {
+          "type": "integer",
+          "default": 600,
+          "minimum": 30,
+          "maximum": 86400
+        },
+        "projectile_max_lifetime_seconds": {
+          "type": "integer",
+          "default": 86400,
+          "minimum": 60,
+          "maximum": 604800
+        },
+        "cleanup_interval_seconds": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 1,
+          "maximum": 3600
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "string",
+          "default": "info",
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ]
+        },
+        "format": {
+          "type": "string",
+          "default": "text",
+          "enum": [
+            "text",
+            "json"
+          ]
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sparkle-morpher.local/spm-cloud/config.schema.json",
+  "title": "SPM Cloud administrator configuration (schema 1)"
+}

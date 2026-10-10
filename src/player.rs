@@ -26,6 +26,7 @@ pub struct PlayerAppearanceUpdate {
     pub texture_id: Option<String>,
     pub profile_name_proof: Option<serde_json::Value>,
     pub motion: Option<serde_json::Value>,
+    pub display_state: Option<crate::display::PlayerDisplayUpdate>,
 }
 #[derive(Deserialize)]
 pub struct PlayerQuery {
@@ -39,6 +40,7 @@ pub struct PlayerSelection {
     format: String,
     texture_id: String,
     motion: Option<serde_json::Value>,
+    display_state: Option<serde_json::Value>,
 }
 #[derive(Serialize)]
 pub struct PlayerAppearance {
@@ -60,9 +62,16 @@ pub async fn get(
 pub async fn put(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<PlayerAppearanceUpdate>,
+    payload: Result<Json<PlayerAppearanceUpdate>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<serde_json::Value>, CloudError> {
     let account = authenticate(&state, &headers)?;
+    let Json(body) = payload.map_err(|error| {
+        if error.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+            CloudError::MessageTooLarge
+        } else {
+            CloudError::invalid_metadata("invalid player appearance JSON")
+        }
+    })?;
     let (profile, _, kind) = {
         let conn = state
             .store
@@ -257,6 +266,20 @@ impl CloudStore {
         if let Some(motion) = &input.motion {
             validate_motion(motion)?;
         }
+        if let Some(display) = &input.display_state {
+            if !self.visual.features.player_display_state {
+                return Err(CloudError::ProtocolUnsupported);
+            }
+            crate::display::validate(display, &self.visual)?;
+            crate::display::context(
+                &tx,
+                account,
+                &display.scope_id,
+                &display.world_epoch,
+                &display.dimension_id,
+            )?;
+            crate::visual::rate(&tx, account, &self.visual, now() * 1000)?;
+        }
         if let Some(id) = &input.asset_id {
             let allowed: Option<(String, String)>=tx.query_row("SELECT r.raw_sha256,r.format FROM asset_revisions r JOIN assets a ON a.asset_id=r.asset_id
                 LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?1
@@ -321,12 +344,29 @@ impl CloudStore {
                 [&input.identity_id],
             )?;
         }
+        if input.asset_id.is_none() {
+            tx.execute("UPDATE projectile_snapshots SET withdrawn=1,expires_at_ms=?2 WHERE source_identity_id=?1",params![input.identity_id,now()*1000])?;
+        }
+        if let Some(display) = input
+            .display_state
+            .as_ref()
+            .filter(|_| input.asset_id.is_some())
+        {
+            let text = serde_json::to_string(display)
+                .map_err(|_| CloudError::invalid_metadata("invalid display JSON"))?;
+            tx.execute("INSERT INTO player_display_states(identity_id,display_json) VALUES (?1,?2) ON CONFLICT(identity_id) DO UPDATE SET display_json=excluded.display_json",params![input.identity_id,text])?;
+        } else {
+            tx.execute(
+                "DELETE FROM player_display_states WHERE identity_id=?1",
+                [&input.identity_id],
+            )?;
+        }
         tx.commit()?;
         Ok(next)
     }
     pub fn query_players(
         &self,
-        _account: &str,
+        account: &str,
         ids: &[uuid::Uuid],
     ) -> Result<Vec<PlayerAppearance>, CloudError> {
         if ids.len() > 64 {
@@ -338,11 +378,12 @@ impl CloudStore {
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let mut statement=conn.prepare("SELECT p.revision,p.asset_id,p.asset_revision,p.raw_sha256,p.texture_id,r.format,a.visibility,a.owner_account_id,m.motion_json
+        let mut statement=conn.prepare("SELECT p.revision,p.asset_id,p.asset_revision,p.raw_sha256,p.texture_id,r.format,a.visibility,a.owner_account_id,m.motion_json,d.display_json,p.updated_at,i.account_id
             FROM player_appearances p JOIN identities i ON i.identity_id=p.identity_id AND i.verified=1
             JOIN identity_providers provider ON provider.provider_id=COALESCE(i.provider_id,'official') AND provider.enabled=1
             LEFT JOIN assets a ON a.asset_id=p.asset_id LEFT JOIN asset_revisions r ON r.asset_id=p.asset_id AND r.revision=p.asset_revision AND r.raw_sha256=p.raw_sha256
             LEFT JOIN player_motion m ON m.identity_id=p.identity_id
+            LEFT JOIN player_display_states d ON d.identity_id=p.identity_id
             WHERE p.entity_uuid=?1 AND p.updated_at>?2")?;
         let mut result = Vec::new();
         for id in ids {
@@ -363,6 +404,36 @@ impl CloudStore {
                             motion: row
                                 .get::<_, Option<String>>(8)?
                                 .and_then(|json| serde_json::from_str(&json).ok()),
+                            display_state: row
+                                .get::<_, Option<String>>(9)?
+                                .filter(|_| self.visual.features.player_display_state)
+                                .and_then(|text| {
+                                    let display: crate::display::PlayerDisplayUpdate =
+                                        serde_json::from_str(&text).ok()?;
+                                    let publisher: String = row.get(11).ok()?;
+                                    crate::display::context(
+                                        &conn,
+                                        &publisher,
+                                        &display.scope_id,
+                                        &display.world_epoch,
+                                        &display.dimension_id,
+                                    )
+                                    .ok()?;
+                                    crate::display::context(
+                                        &conn,
+                                        account,
+                                        &display.scope_id,
+                                        &display.world_epoch,
+                                        &display.dimension_id,
+                                    )
+                                    .ok()?;
+                                    let mut value = serde_json::to_value(display).ok()?;
+                                    value["server_time_unix_ms"] = serde_json::json!(now() * 1000);
+                                    value["expires_at_unix_ms"] = serde_json::json!(
+                                        (row.get::<_, i64>(10).ok()? + 60) * 1000
+                                    );
+                                    Some(value)
+                                }),
                         })
                     } else {
                         None
@@ -708,6 +779,8 @@ mod tests {
             allow_self_registration: false,
             max_asset_bytes: 128 * 1024 * 1024,
             max_message_bytes: 64 * 1024,
+            max_entity_query_count: 64,
+            visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
         };
         let store = CloudStore::open(&config).unwrap();
@@ -813,6 +886,7 @@ mod tests {
         let mut body = PlayerAppearanceUpdate {
             profile_name_proof: None,
             motion: None,
+            display_state: None,
             identity_id: "id".into(),
             entity_uuid: uuid,
             expected_revision: 0,

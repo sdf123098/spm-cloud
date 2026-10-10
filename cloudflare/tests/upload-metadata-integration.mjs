@@ -23,14 +23,14 @@ const miniflare = new Miniflare({ workers: [{ config: {
   },
 } }] });
 
-async function upload(id, name, body, encoding = "utf-8-percent", visibility = "PRIVATE", requestId = crypto.randomUUID()) {
+async function upload(id, name, body, encoding = "utf-8-percent", visibility = "PRIVATE", requestId = crypto.randomUUID(), format = "ysm") {
   const sha = createHash("sha256").update(body).digest("hex");
   const encoded = value => encoding ? encodeURIComponent(value) : value;
   const response = await miniflare.dispatchFetch("https://cloud.example.test/v1/assets", {
     method: "POST", body,
     headers: {
       authorization: "Bearer isolated-upload-secret", "idempotency-key": requestId,
-      "x-asset-id": encoded(id), "x-asset-name": encoded(name), "x-asset-format": "ysm",
+      "x-asset-id": encoded(id), "x-asset-name": encoded(name), "x-asset-format": format,
       "x-asset-sha256": sha, ...(encoding ? { "x-asset-metadata-encoding": encoding } : {}),
       "x-asset-visibility": visibility,
     },
@@ -45,11 +45,12 @@ async function setVisibility(id, visibility, authorization = "Bearer isolated-up
   return { status: response.status, body: await response.json() };
 }
 
-async function verifyDownloadAndAcl(id, revision, body) {
+async function verifyDownloadAndAcl(id, revision, body, format = "ysm") {
   const assetPath = `/v1/assets/${encodeURIComponent(id)}`;
   const headers = { authorization: "Bearer isolated-upload-secret" };
   const download = await miniflare.dispatchFetch(`https://cloud.example.test${assetPath}/revisions/${revision}/content`, { headers });
   assert.equal(download.status, 200, `${id} uploaded asset must be downloadable`);
+  assert.equal(download.headers.get("x-asset-format"), format);
   assert.deepEqual(Buffer.from(await download.arrayBuffer()), body);
   const acl = await miniflare.dispatchFetch(`https://cloud.example.test${assetPath}/acl`, { headers });
   assert.equal(acl.status, 200);
@@ -169,7 +170,22 @@ try {
   }
   const options = await miniflare.dispatchFetch("https://cloud.example.test/v1/assets", { method: "OPTIONS" });
   assert.ok(options.headers.get("access-control-allow-headers").includes("x-asset-metadata-encoding"));
-  console.log("Cloudflare upload metadata integration passed");
+  const changedFormat = "revision-format-change";
+  assert.equal((await upload(changedFormat, "old.ysm", repeatBytes)).response.status, 201);
+  assert.equal((await upload(changedFormat, "new.zip", repeatBytes, "utf-8-percent", "PRIVATE", crypto.randomUUID(), "zip")).response.status, 201);
+  await verifyDownloadAndAcl(changedFormat, 1, repeatBytes, "ysm");
+  await verifyDownloadAndAcl(changedFormat, 2, repeatBytes, "zip");
+  const conditionalUrl = `https://cloud.example.test/v1/assets/${changedFormat}/revisions/1/content`;
+  const conditionalHeaders = { authorization: "Bearer isolated-upload-secret", "if-none-match": `"${original.sha}"` };
+  const cached = await miniflare.dispatchFetch(conditionalUrl, { headers: conditionalHeaders });
+  assert.equal(cached.status, 304, "authorized exact revision uses body-free cache validation");
+  assert.equal(cached.headers.get("etag"), `"${original.sha}"`);
+  assert.equal((await cached.arrayBuffer()).byteLength, 0);
+  const deniedCached = await miniflare.dispatchFetch(conditionalUrl, {
+    headers: { ...conditionalHeaders, authorization: foreignAuthorization },
+  });
+  assert.equal(deniedCached.status, 403, "conditional cache validation never bypasses PRIVATE ACL");
+  console.log("Cloudflare upload metadata integration passed; exact historical revision formats preserved");
 } finally {
   await miniflare.dispose();
 }

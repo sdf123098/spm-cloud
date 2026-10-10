@@ -38,7 +38,36 @@ def copy_tree(source: Path, destination: Path) -> int:
     return count
 
 
+def object_inventory(root: Path) -> list[dict]:
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("object directory is missing or is a symbolic link")
+    entries = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("object directory contains a symbolic link")
+        if path.is_file():
+            entries.append({"path": path.relative_to(root).as_posix(),
+                            "bytes": path.stat().st_size, "sha256": digest(path)})
+    return entries
+
+
+def validate_destinations(database: Path, objects: Path) -> None:
+    if database.is_symlink() or objects.is_symlink():
+        raise ValueError("restore destinations must not be symbolic links")
+    resolved_database, resolved_objects = database.resolve(), objects.resolve()
+    if resolved_objects == Path(resolved_objects.anchor) or resolved_database.is_relative_to(resolved_objects):
+        raise ValueError("object destination is a filesystem root or contains the database")
+
+
 def backup(database: Path, objects: Path, destination: Path) -> dict:
+    if database.is_symlink() or not database.is_file():
+        raise ValueError("database is missing or is a symbolic link")
+    validate_destinations(database, objects)
+    entries = object_inventory(objects)
+    if destination.is_symlink() or destination.resolve().is_relative_to(objects.resolve()):
+        raise ValueError("backup destination must be outside the object directory")
+    if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
+        raise FileExistsError("backup destination is not empty")
     destination.mkdir(parents=True, exist_ok=True)
     db_backup = destination / "spm-cloud.db"
     source = sqlite3.connect(database)
@@ -50,11 +79,12 @@ def backup(database: Path, objects: Path, destination: Path) -> dict:
         target.close()
         source.close()
     object_backup = destination / "objects"
+    object_backup.mkdir()
     files = copy_tree(objects, object_backup)
     manifest = {
         "schema": "spm.cloud.backup.v1",
         "database": {"path": str(db_backup), "sha256": digest(db_backup)},
-        "objects": {"path": str(object_backup), "file_count": files},
+        "objects": {"path": str(object_backup), "file_count": files, "entries": entries},
         "operator_note": "Service was expected to be stopped during backup.",
     }
     (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -67,15 +97,30 @@ def restore(backup_root: Path, database: Path, objects: Path, force: bool) -> No
     object_source = backup_root / "objects"
     if not manifest_path.is_file() or not db_source.is_file():
         raise ValueError("backup is missing manifest.json or spm-cloud.db")
-    expected = json.loads(manifest_path.read_text(encoding="utf-8"))["database"]["sha256"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("schema") != "spm.cloud.backup.v1":
+        raise ValueError("unsupported backup manifest schema")
+    expected = manifest["database"]["sha256"]
     if digest(db_source) != expected:
         raise ValueError("backup database SHA-256 does not match manifest")
+    entries = object_inventory(object_source)
+    if len(entries) != manifest["objects"]["file_count"]:
+        raise ValueError("backup object count does not match manifest")
+    if "entries" in manifest["objects"] and entries != manifest["objects"]["entries"]:
+        raise ValueError("backup object contents do not match manifest")
+    validate_destinations(database, objects)
+    if database.exists() and not database.is_file() or objects.exists() and not objects.is_dir():
+        raise ValueError("restore destination types do not match database/object storage")
+    for target in (database.resolve(), objects.resolve()):
+        if target.is_relative_to(backup_root.resolve()) or backup_root.resolve().is_relative_to(target):
+            raise ValueError("restore destinations must not overlap the backup")
     if not force and (database.exists() or objects.exists()):
         raise FileExistsError("restore destination exists; pass --force after stopping the service")
     database.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(db_source, database)
     if objects.exists():
         shutil.rmtree(objects)
+    objects.mkdir(parents=True, exist_ok=True)
     copy_tree(object_source, objects)
 
 

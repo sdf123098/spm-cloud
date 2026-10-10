@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from backup_restore import backup, restore
 
 
 def run(binary, model=None, registration_policy="restricted"):
@@ -179,9 +180,51 @@ def run(binary, model=None, registration_policy="restricted"):
                 request("POST","/v1/sessions/refresh",{"refresh_token":sessions["observer"]["refresh_token"]},token=None,status=401)
                 request("DELETE","/v1/sessions/current",token=refresh["access_token"],status=204)
                 request("GET","/v1/assets?scope=mine",token=refresh["access_token"],status=401)
-                return {"passed_requests":len(checks),"model_bytes":len(content),"model_sha256":sha,"registration_policy":registration_policy,"checks":checks}
+                # Stop the real service, restore both stores, and restart using JSON.
+                # This tests local data recovery, not compatibility with an older binary.
+                upload("restore_private")
+                private_path="/v1/assets/restore_private/revisions/1/content"
+                fresh_observer=request("POST","/v1/sessions",{"account_id":"observer","password":"contract-password-123"},token=None)["access_token"]
+                request("GET",private_path,token=fresh_observer,status=403)
+                process.terminate();process.wait(timeout=10)
+                manifest=backup(data/"cloud.db",data/"objects",data/"backup")
+                recovered=data/"restored"
+                restore(data/"backup",recovered/"cloud.db",recovered/"objects",False)
+                with closing(sqlite3.connect(recovered/"cloud.db")) as conn:
+                    assert conn.execute("PRAGMA integrity_check").fetchone()[0]=="ok"
+                token_file=data/"bootstrap-token.txt"
+                token_file.write_text(secret,encoding="utf-8")
+                with socket.socket() as sock:
+                    sock.bind(("127.0.0.1",0));restored_port=sock.getsockname()[1]
+                config=data/"restored-config.json"
+                config.write_text(json.dumps({"schema_version":1,"instance":{"instance_id":"contract-test","origin":"https://cloud.example.test",
+                    "bind":f"127.0.0.1:{restored_port}"},
+                    "storage":{"database_path":str(recovered/"cloud.db"),"object_dir":str(recovered/"objects")},
+                    "auth":{"bootstrap_access_token_file":str(token_file),"allow_self_registration":public_registration}}),encoding="utf-8")
+                restored_env={key:value for key,value in env.items() if not key.startswith("SPM_CLOUD_")}
+                process=subprocess.Popen([str(binary.resolve()),"--config",str(config)],cwd=data,env=restored_env,stdout=log,stderr=subprocess.STDOUT,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
+                base=f"http://127.0.0.1:{restored_port}"
+                deadline=time.monotonic()+15
+                while True:
+                    try: request("GET","/health",token=None);break
+                    except (urllib.error.URLError,ConnectionError):
+                        if time.monotonic()>deadline or process.poll() is not None: raise RuntimeError("restored JSON service did not start")
+                        time.sleep(.1)
+                restored_instance=request("GET","/v1/instance",token=None)
+                assert restored_instance["instance_id"]=="contract-test"
+                assert restored_instance["origin"]==instance["origin"]
+                assert request("GET",private_path,token=owner,raw=True)[0]==content
+                request("GET",private_path,token=fresh_observer,status=403)
+                assert request("GET",content_path,token=fresh_observer,raw=True)[0]==content
+                assert request("GET","/v1/targets/target_contract/appearance",token=fresh_observer)["texture_id"]=="贴图 B"
+                assert "extra" in {entry["provider_id"] for entry in request("GET","/v1/identity-providers",token=None)}
+                assert request("POST","/v1/sessions",{"account_id":"owner","password":"contract-password-123"},token=None)["access_token"]
+                return {"passed_requests":len(checks),"model_bytes":len(content),"model_sha256":sha,"registration_policy":registration_policy,
+                        "local_backup_restore":{"integrity_check":"ok","objects":manifest["objects"]["file_count"],
+                            "json_restart":True,"sessions_acl_provider_exact_bytes_preserved":True,"older_binary_rollback_tested":False},"checks":checks}
             finally:
-                process.terminate()
+                if process.poll() is None: process.terminate()
                 try: process.wait(timeout=10)
                 except subprocess.TimeoutExpired: process.kill();process.wait()
 

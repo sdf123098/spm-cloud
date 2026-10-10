@@ -1,0 +1,8 @@
+{
+  "world_epoch":"world-reset-3", "dimension_id":"minecraft:overworld",
+  "entity_kind":"MAID", "target_id":"target-maid", "binding_revision":1,
+  "appearance_revision":1, "expected_revision":0,
+  "motion":{"event_id":"play-1","animation_key":"wave","started_at_unix_ms":1000,
+    "roaming":{"variable.pose":1},"expressions":[],
+    "controllers":{"idle":{"state":"idle","started_at_unix_ms":1000,"variables":{}}}}
+}

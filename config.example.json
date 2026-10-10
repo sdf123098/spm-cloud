@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "instance": {
+    "instance_id": "self-hosted",
+    "origin": "https://cloud.example.com",
+    "bind": "127.0.0.1:8787",
+    "trusted_proxy_ips": [
+      "127.0.0.1"
+    ]
+  },
+  "storage": {
+    "data_dir": "data",
+    "database_path": "data/spm-cloud.db",
+    "object_dir": "data/objects"
+  },
+  "auth": {
+    "allow_self_registration": true,
+    "bootstrap_account_id": "account_local",
+    "bootstrap_access_token_file": "secrets/bootstrap-token.txt",
+    "bootstrap_password_hash_file": null,
+    "identity_providers": []
+  },
+  "limits": {
+    "max_asset_bytes": 134217728,
+    "max_message_bytes": 65536,
+    "max_entity_query_count": 64,
+    "max_visual_state_bytes": 8192,
+    "max_visual_variables": 32,
+    "max_projectile_snapshots_per_publisher": 256,
+    "max_projectile_snapshots_per_world": 4096,
+    "visual_publish_requests_per_second": 20,
+    "visual_publish_burst": 40
+  },
+  "features": {
+    "entity_motion": false,
+    "player_display_state": false,
+    "vehicle_bindings": false,
+    "projectile_snapshots": false
+  },
+  "retention": {
+    "projectile_idle_ttl_seconds": 600,
+    "projectile_max_lifetime_seconds": 86400,
+    "cleanup_interval_seconds": 60
+  },
+  "logging": {
+    "level": "info",
+    "format": "text"
+  }
+}

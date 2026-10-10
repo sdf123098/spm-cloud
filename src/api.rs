@@ -2,7 +2,7 @@ use std::{sync::Arc, time::SystemTime};
 
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, to_bytes},
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
@@ -38,6 +38,7 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<CloudConfig>,
+    runtime_config: Arc<std::sync::RwLock<CloudConfig>>,
     pub store: CloudStore,
     pub events: broadcast::Sender<CloudEvent>,
 }
@@ -68,15 +69,59 @@ impl AppState {
     pub fn new(config: CloudConfig, store: CloudStore) -> Self {
         let (events, _) = broadcast::channel(512);
         Self {
-            config: Arc::new(config),
+            config: Arc::new(config.clone()),
+            runtime_config: Arc::new(std::sync::RwLock::new(config)),
             store,
             events,
         }
+    }
+
+    pub fn runtime_config(&self) -> CloudConfig {
+        self.runtime_config
+            .read()
+            .expect("runtime configuration lock poisoned")
+            .clone()
+    }
+
+    pub fn update_runtime_config(&self, config: CloudConfig) {
+        *self
+            .runtime_config
+            .write()
+            .expect("runtime configuration lock poisoned") = config;
     }
 }
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route(
+            "/v1/scopes/{scope_id}/entity-motion/{entity_uuid}",
+            put(crate::entity_motion::put).delete(crate::entity_motion::withdraw),
+        )
+        .route(
+            "/v1/scopes/{scope_id}/entity-motion/query",
+            post(crate::entity_motion::query),
+        )
+        .route(
+            "/v1/scopes/{scope_id}/entity-motion/revisions",
+            post(crate::entity_motion::revisions),
+        )
+        .route(
+            "/v1/scopes/{scope_id}/vehicles/{entity_uuid}",
+            put(crate::vehicle::put),
+        )
+        .route(
+            "/v1/scopes/{scope_id}/vehicles/query",
+            post(crate::vehicle::query),
+        )
+        .route("/v1/scopes/{scope_id}/projectiles", put(crate::visual::put))
+        .route(
+            "/v1/scopes/{scope_id}/projectiles/query",
+            post(crate::visual::query),
+        )
+        .route(
+            "/v1/scopes/{scope_id}/projectiles/{entity_uuid}/lease",
+            put(crate::visual::renew).delete(crate::visual::withdraw),
+        )
         .route(
             "/v1/players/me/appearance",
             get(crate::player::get).put(crate::player::put),
@@ -144,6 +189,7 @@ pub fn router(state: AppState) -> Router {
             put(approve_offline_binding),
         )
         .route("/v1/scopes", get(list_scopes).post(create_scope))
+        .route("/v1/scopes/{scope_id}/permissions", get(scope_permissions))
         .route(
             "/v1/scopes/{scope_id}/acl",
             get(list_scope_acl).put(set_scope_acl),
@@ -191,8 +237,33 @@ pub fn router(state: AppState) -> Router {
             get(get_animation).put(update_animation),
         )
         .route("/v1/targets/{target_id}/acl", get(list_acl).put(set_acl))
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            dynamic_body_limit,
+        ))
         .layer(axum::middleware::from_fn(api_headers))
+}
+
+/// Enforce the current JSON body limit on every request. Asset uploads are
+/// streamed and have their own independently reloadable byte budget.
+async fn dynamic_body_limit(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if request.method() == axum::http::Method::POST && request.uri().path() == "/v1/assets" {
+        return next.run(request).await;
+    }
+    let limit = state.runtime_config().max_message_bytes;
+    let (parts, body) = request.into_parts();
+    match to_bytes(body, limit).await {
+        Ok(bytes) => {
+            next.run(axum::extract::Request::from_parts(parts, Body::from(bytes)))
+                .await
+        }
+        Err(_) => CloudError::MessageTooLarge.into_response(),
+    }
 }
 
 async fn api_headers(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
@@ -213,39 +284,56 @@ async fn api_headers(request: axum::extract::Request, next: axum::middleware::Ne
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let runtime = state.runtime_config();
     Json(serde_json::json!({
         "ok": true,
         "instance_id": state.config.instance_id,
         "protocol": PROTOCOL_V1,
         "storage": "sqlite-wal-cas",
         "limits": {
-            "max_asset_bytes": state.config.max_asset_bytes,
-            "max_message_bytes": state.config.max_message_bytes
+            "max_asset_bytes": runtime.max_asset_bytes,
+            "max_message_bytes": runtime.max_message_bytes
         }
     }))
 }
 
 async fn instance(State(state): State<AppState>) -> Json<InstanceResponse> {
+    let runtime = state.runtime_config();
     Json(InstanceResponse {
         instance_id: state.config.instance_id.clone(),
         origin: state.config.origin.clone(),
         websocket_origin: websocket_origin(&state.config.origin),
         protocol: PROTOCOL_V1.to_owned(),
-        capabilities: vec![
-            PLAYER_MOTION_CAPABILITY.to_owned(),
-            GAME_IDENTITY_AUTH_CAPABILITY.to_owned(),
-        ],
+        capabilities: {
+            let mut capabilities = vec![
+                PLAYER_MOTION_CAPABILITY.to_owned(),
+                GAME_IDENTITY_AUTH_CAPABILITY.to_owned(),
+            ];
+            if runtime.visual.features.player_display_state {
+                capabilities.push("player_display_state_v1".to_owned());
+            }
+            if runtime.visual.features.vehicle_bindings {
+                capabilities.push("vehicle_appearance_v1".to_owned());
+            }
+            if runtime.visual.features.entity_motion {
+                capabilities.push("entity_motion_v1".to_owned());
+            }
+            capabilities
+        },
         auth: crate::models::InstanceAuth {
             password_login: true,
             game_identity_login: true,
             game_identity_link: true,
-            self_registration: state.config.allow_self_registration,
+            self_registration: runtime.allow_self_registration,
         },
         limits: Limits {
-            max_message_bytes: state.config.max_message_bytes,
+            max_entity_query_count: runtime.max_entity_query_count,
+            max_visual_state_bytes: runtime.visual.limits.max_visual_state_bytes,
+            max_visual_variables: runtime.visual.limits.max_visual_variables,
+            max_message_bytes: runtime.max_message_bytes,
             max_snapshot_bytes: 16 * 1024 * 1024,
             max_snapshot_chunk_bytes: 256 * 1024,
-            max_asset_bytes: state.config.max_asset_bytes,
+            max_asset_bytes: runtime.max_asset_bytes,
             max_subscriptions: 128,
             heartbeat_interval_seconds: HEARTBEAT_INTERVAL_SECONDS,
             heartbeat_ttl_seconds: HEARTBEAT_TTL_SECONDS,
@@ -264,9 +352,9 @@ async fn configure_identity_provider(
     headers: HeaderMap,
     Json(input): Json<IdentityProviderUpdate>,
 ) -> Result<Json<serde_json::Value>, CloudError> {
+    let runtime = state.runtime_config();
     let token = bearer_token(&headers)?;
-    if state
-        .config
+    if runtime
         .access_token
         .as_deref()
         .is_none_or(|configured| configured.as_bytes().ct_eq(token.as_bytes()).unwrap_u8() != 1)
@@ -293,7 +381,7 @@ async fn create_account(
 }
 
 fn authorize_account_registration(state: &AppState, headers: &HeaderMap) -> Result<(), CloudError> {
-    if state.config.allow_self_registration {
+    if state.runtime_config().allow_self_registration {
         return Ok(());
     }
     let account = authenticate(state, headers)?;
@@ -431,6 +519,15 @@ async fn create_scope(
         StatusCode::CREATED,
         Json(state.store.create_scope(&account, &input)?),
     ))
+}
+
+async fn scope_permissions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(scope_id): Path<String>,
+) -> Result<Json<serde_json::Value>, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    Ok(Json(state.store.scope_permissions(&account, &scope_id)?))
 }
 
 async fn list_scope_acl(
@@ -747,7 +844,8 @@ async fn upload_asset(
         .begin_upload_operation(&account, &request_id, &asset_id)?;
     let operation_header = HeaderValue::from_str(&operation_id)
         .map_err(|_| CloudError::invalid_metadata("invalid upload operation id"))?;
-    if content_length.is_some_and(|length| length > state.config.max_asset_bytes) {
+    let max_asset_bytes = state.runtime_config().max_asset_bytes;
+    if content_length.is_some_and(|length| length > max_asset_bytes) {
         state
             .store
             .fail_upload_operation(&operation_id, "ASSET_TOO_LARGE")?;
@@ -771,7 +869,7 @@ async fn upload_asset(
         let chunk = chunk
             .map_err(|_| CloudError::Internal(anyhow::anyhow!("request body stream failed")))?;
         total = total.saturating_add(chunk.len() as u64);
-        if total > state.config.max_asset_bytes {
+        if total > max_asset_bytes {
             let _ = fs::remove_file(&temp_path).await;
             let _ = state
                 .store
@@ -890,6 +988,7 @@ async fn download_asset(
         .header(header::ETAG, etag)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, length.to_string())
+        .header("x-asset-format", content.format)
         .header(header::CONTENT_TYPE, "application/octet-stream");
     if partial {
         response = response.header(
@@ -944,9 +1043,10 @@ fn parse_range(value: Option<&HeaderValue>, total: u64) -> Result<(u64, u64, boo
 
 pub fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<String, CloudError> {
     let token = bearer_token(headers)?;
-    if let Some(configured) = state.config.access_token.as_deref() {
+    let runtime = state.runtime_config();
+    if let Some(configured) = runtime.access_token.as_deref() {
         if configured.as_bytes().ct_eq(token.as_bytes()).unwrap_u8() == 1 {
-            return Ok(state.config.bootstrap_account_id.clone());
+            return Ok(runtime.bootstrap_account_id);
         }
     }
     state.store.authenticate_access_token(token)
@@ -1159,12 +1259,15 @@ pub(crate) mod tests {
             allow_self_registration,
             max_asset_bytes: 128 * 1024 * 1024,
             max_message_bytes: 64 * 1024,
+            max_entity_query_count: 64,
+            visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
         });
         let store = CloudStore::open(&config).unwrap();
         let (events, _) = broadcast::channel(8);
         (
             AppState {
+                runtime_config: Arc::new(std::sync::RwLock::new(config.as_ref().clone())),
                 config,
                 store,
                 events,
@@ -1393,6 +1496,7 @@ pub(crate) mod tests {
             ),
         );
         headers.insert("x-asset-sha256", HeaderValue::from_str(&sha).unwrap());
+        headers.insert("x-asset-format", HeaderValue::from_static("ysm"));
         let response = upload_asset(
             State(state.clone()),
             headers.clone(),
@@ -1415,14 +1519,24 @@ pub(crate) mod tests {
                 .unwrap(),
             content
         );
+        headers.insert("idempotency-key", HeaderValue::from_static("second-format"));
+        headers.insert("x-asset-format", HeaderValue::from_static("zip"));
+        upload_asset(
+            State(state.clone()),
+            headers.clone(),
+            Body::from(content.to_vec()),
+        )
+        .await
+        .unwrap();
         let download = download_asset(
-            State(state),
-            headers,
+            State(state.clone()),
+            headers.clone(),
             Path(("模型 100%+test".to_owned(), 1)),
         )
         .await
         .unwrap();
         assert_eq!(download.status(), StatusCode::OK);
+        assert_eq!(download.headers()["x-asset-format"], "ysm");
         assert_eq!(
             axum::body::to_bytes(download.into_body(), 16 * 1024)
                 .await
@@ -1430,6 +1544,14 @@ pub(crate) mod tests {
                 .as_ref(),
             content
         );
+        let latest = download_asset(
+            State(state),
+            headers,
+            Path(("模型 100%+test".to_owned(), 2)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(latest.headers()["x-asset-format"], "zip");
     }
 
     #[test]
@@ -1643,6 +1765,92 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
         assert_eq!(fs::read(&object).await.unwrap(), bytes);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn own_scope_permissions_are_authenticated_and_do_not_expose_acl() {
+        let (state, _dir) = test_state(false);
+        state
+            .store
+            .create_account("permission_user", "permission-user-password")
+            .unwrap();
+        let session = state
+            .store
+            .issue_session(&crate::models::LoginRequest {
+                account_id: "permission_user".into(),
+                password: "permission-user-password".into(),
+            })
+            .unwrap();
+        state
+            .store
+            .create_scope(
+                "account_local",
+                &CreateScope {
+                    scope_id: "permission_scope".into(),
+                    name: "Permissions".into(),
+                    world_epoch: "epoch".into(),
+                    offline_policy: Some("CLAIM_CODE".into()),
+                },
+            )
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = router(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/v1/scopes/permission_scope/permissions");
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .get(&url)
+                .bearer_auth(&session.access_token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::FORBIDDEN
+        );
+        for role in ["viewer", "editor", "manage"] {
+            state
+                .store
+                .set_scope_acl(
+                    "account_local",
+                    "permission_scope",
+                    &ScopeAclUpdate {
+                        account_id: "permission_user".into(),
+                        role: role.into(),
+                    },
+                )
+                .unwrap();
+            let response = client
+                .get(&url)
+                .bearer_auth(&session.access_token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"scope_id":"permission_scope","role":role,"offline_policy":"CLAIM_CODE"})
+            );
+        }
+        assert_eq!(
+            client
+                .get(format!(
+                    "http://{address}/v1/scopes/other_scope/permissions"
+                ))
+                .bearer_auth(&session.access_token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::FORBIDDEN
+        );
         server.abort();
     }
 

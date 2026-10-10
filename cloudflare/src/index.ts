@@ -1,5 +1,9 @@
 import { offlinePlayerUuid } from "./player-uuid";
+import { vehicleRoute, vehicleEnabled } from "./vehicle-appearances";
+import { entityMotionRoute, entityMotionEnabled } from "./entity-motion";
 import { entityWorldRoute } from "./entity-world";
+import { prepareDisplay, displayForReader, displayEnabled } from "./player-display";
+import { projectileRoute, visualDefaults, readVisualJson, visualBucket, cleanupVisualStates } from "./projectile-snapshots";
 import { ScopeRoom } from "./scope-room";
 import { profileKeyPayload, verifyOfficialProfileKey, verifyOfficialProfileName } from "./profile-key-proof";
 
@@ -19,6 +23,9 @@ function cloudOrigin(request: Request, env: Env): string {
 }
 
 export default {
+  async scheduled(_controller: ScheduledController, env: RuntimeEnv, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(cleanupVisualStates(env));
+  },
   async fetch(request: Request, env: RuntimeEnv, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") {
@@ -33,7 +40,8 @@ export default {
         origin: cloudOrigin(request, env),
         websocket_origin: `${cloudOrigin(request, env).replace(/^http/, "ws")}/v1/realtime`,
         protocol: "spm.cloud.v1",
-        capabilities: ["player_motion_v1", "game_identity_auth_v1"],
+        capabilities: ["player_motion_v1", "game_identity_auth_v1", ...(displayEnabled(env) ? ["player_display_state_v1"] : []),
+          ...(vehicleEnabled(env) ? ["vehicle_appearance_v1"] : []), ...(entityMotionEnabled(env) ? ["entity_motion_v1"] : [])],
         auth: {
           password_login: true,
           game_identity_login: true,
@@ -41,6 +49,9 @@ export default {
           self_registration: true,
         },
         limits: {
+          max_entity_query_count: visualDefaults.max_entity_query_count,
+          max_visual_state_bytes: visualDefaults.max_visual_state_bytes,
+          max_visual_variables: visualDefaults.max_visual_variables,
           max_message_bytes: 64 * 1024,
           max_snapshot_bytes: 16 * 1024 * 1024,
           max_snapshot_chunk_bytes: 256 * 1024,
@@ -66,6 +77,12 @@ export default {
       if (!accountId) return json({ code: "UNAUTHENTICATED", message: "Cloud bearer is required" }, 401);
       const entityResponse = await entityWorldRoute(request, env, accountId);
       if (entityResponse) return entityResponse;
+      const projectileResponse = await projectileRoute(request, env, accountId);
+      if (projectileResponse) return projectileResponse;
+      const vehicleResponse = await vehicleRoute(request, env, accountId);
+      if (vehicleResponse) return vehicleResponse;
+      const entityMotionResponse = await entityMotionRoute(request, env, accountId);
+      if (entityMotionResponse) return entityMotionResponse;
 
       if (url.pathname === "/v1/sessions/current" && request.method === "DELETE") {
         await revokeSession(request, env);
@@ -92,19 +109,25 @@ export default {
       if (url.pathname === "/v1/identities" && request.method === "GET") return listIdentities(env, accountId);
       if (url.pathname === "/v1/identities" && request.method === "POST") return await createIdentity(request, env, accountId);
       const identityBindings = url.pathname.match(/^\/v1\/identities\/([^/]+)\/offline-bindings$/);
-      if (identityBindings && request.method === "POST") return createOfflineBinding(request, env, accountId, identityBindings[1]);
+      if (identityBindings && request.method === "POST") return await createOfflineBinding(request, env, accountId, identityBindings[1]);
       const scopeOfflineBindings = url.pathname.match(/^\/v1\/scopes\/([^/]+)\/offline-bindings$/);
-      if (scopeOfflineBindings && request.method === "GET") return listOfflineBindings(env, accountId, scopeOfflineBindings[1]);
+      if (scopeOfflineBindings && request.method === "GET") return await listOfflineBindings(env, accountId, scopeOfflineBindings[1]);
       const bindingApproval = url.pathname.match(/^\/v1\/scoped-identity-bindings\/([^/]+)$/);
-      if (bindingApproval && request.method === "PUT") return approveOfflineBinding(request, env, accountId, bindingApproval[1]);
-      if (url.pathname === "/v1/claim-codes/redeem" && request.method === "POST") return redeemClaimCode(request, env, accountId);
-      if (url.pathname === "/v1/claim-codes/revoke" && request.method === "POST") return revokeClaimCode(request, env, accountId);
+      if (bindingApproval && request.method === "PUT") return await approveOfflineBinding(request, env, accountId, bindingApproval[1]);
+      if (url.pathname === "/v1/claim-codes/redeem" && request.method === "POST") return await redeemClaimCode(request, env, accountId);
+      if (url.pathname === "/v1/claim-codes/revoke" && request.method === "POST") return await revokeClaimCode(request, env, accountId);
       const targetClaimCodes = url.pathname.match(/^\/v1\/targets\/([^/]+)\/claim-codes$/);
-      if (targetClaimCodes && request.method === "POST") return createClaimCode(request, env, accountId, targetClaimCodes[1]);
+      if (targetClaimCodes && request.method === "POST") return await createClaimCode(request, env, accountId, targetClaimCodes[1]);
       if (url.pathname === "/v1/auth/challenges" && request.method === "POST") return await createGameChallenge(request, env, "link", accountId);
       const challengeComplete = url.pathname.match(/^\/v1\/auth\/challenges\/([^/]+)\/(?:complete|verify)$/);
       if (challengeComplete && request.method === "POST") return await completeGameChallenge(request, env, "link", accountId, challengeComplete[1]);
       if (url.pathname === "/v1/scopes" && request.method === "GET") return listScopes(env, accountId);
+      const ownScopePermissions = url.pathname.match(/^\/v1\/scopes\/([^/]+)\/permissions$/);
+      if (ownScopePermissions && request.method === "GET") {
+        const scopeId = slug(ownScopePermissions[1], "scope_id");
+        const scope = await requireScope(env, accountId, scopeId, "viewer");
+        return json({ scope_id: scopeId, role: scope.role, offline_policy: scope.offline_policy }, 200);
+      }
       if (url.pathname === "/v1/scopes" && request.method === "POST") return createScope(request, env, accountId);
       const scopeAcl = url.pathname.match(/^\/v1\/scopes\/([^/]+)\/acl$/);
       if (scopeAcl && request.method === "GET") return await listScopeAcl(env, accountId, scopeAcl[1]);
@@ -302,8 +325,8 @@ async function createOfflineBinding(request: Request, env: Env, accountId: strin
 async function listOfflineBindings(env: Env, accountId: string, scopeId: string): Promise<Response> {
   await requireScope(env, accountId, scopeId, "viewer");
   const result = await env.DB.prepare(
-    `SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision
-     FROM scoped_identity_bindings WHERE scope_id = ?1 ORDER BY binding_id`,
+    `SELECT b.*, i.display_name AS identity_display_name, t.display_name AS target_display_name
+     FROM scoped_identity_bindings b LEFT JOIN identities i ON i.identity_id=b.identity_id LEFT JOIN targets t ON t.target_id=b.target_id WHERE b.scope_id = ?1 ORDER BY b.binding_id`,
   ).bind(scopeId).all();
   return json(result.results, 200);
 }
@@ -1053,12 +1076,19 @@ async function downloadAsset(request: Request, env: Env, accountId: string, asse
   const row = await env.DB.prepare("SELECT r.object_key, r.raw_sha256, r.byte_length, r.format, a.visibility FROM asset_revisions r JOIN assets a ON a.asset_id = r.asset_id WHERE r.asset_id = ?1 AND r.revision = ?2").bind(assetId, revision).first<{ object_key: string; raw_sha256: string; byte_length: number; format: string; visibility: string }>();
   if ((!acl || !["manage", "use", "render_read", "discover"].includes(acl.permission)) && row?.visibility !== "PUBLIC") return json({ code: "ASSET_ACCESS_DENIED", message: "asset access denied" }, 403);
   if (!row) return json({ code: "NOT_FOUND", message: "asset revision not found" }, 404);
+  // ACL is checked before conditional cache validation, including resident assets.
+  if (request.headers.get("if-none-match") === `"${row.raw_sha256}"`) {
+    const headers = new Headers(corsHeaders());
+    headers.set("etag", `"${row.raw_sha256}"`);
+    return new Response(null, { status: 304, headers });
+  }
   const object = await env.ASSETS.get(row.object_key);
   if (!object) return json({ code: "NOT_FOUND", message: "asset object not found" }, 404);
   const headers = new Headers(corsHeaders());
   headers.set("etag", `"${row.raw_sha256}"`);
   headers.set("accept-ranges", "bytes");
   headers.set("content-type", row.format);
+  headers.set("x-asset-format", row.format);
   headers.set("content-length", String(object.size));
   return new Response(object.body, { status: 200, headers });
 }
@@ -1230,7 +1260,7 @@ async function getPlayerAppearance(env: Env, accountId: string, url: URL): Promi
 }
 
 async function setPlayerAppearance(request: Request, env: Env, accountId: string): Promise<Response> {
-  const body = await readJson(request);
+  const body = await readVisualJson(request, 128 * 1024);
   const identityId = slug(body.identity_id, "identity_id");
   const identity = await playerIdentity(env, accountId, identityId);
   if (!identity) return json({ code: "ACCESS_DENIED", message: "verified game identity is required" }, 403);
@@ -1247,6 +1277,7 @@ async function setPlayerAppearance(request: Request, env: Env, accountId: string
   const expected = integer(body.expected_revision, "expected_revision", 0);
   if (!Number.isSafeInteger(expected) || expected < 0) throw bad("expected_revision is invalid");
   const motionJson = playerMotionJson(body.motion);
+  const displayJson = await prepareDisplay(env, accountId, body.display_state);
   let assetId: string | null = null, assetRevision: number | null = null, sha: string | null = null, texture: string | null = null;
   if (body.asset_id != null) {
     assetId = assetPathId(encodeURIComponent(text(body.asset_id, "asset_id", 1, 128)));
@@ -1263,21 +1294,29 @@ async function setPlayerAppearance(request: Request, env: Env, accountId: string
   }
   const now = Math.floor(Date.now()/1000);
   const appearanceWrite = expected === 0 ? env.DB.prepare(`INSERT INTO player_appearances(identity_id, entity_uuid, revision, asset_id, asset_revision, raw_sha256, texture_id, updated_at)
-    SELECT ?1, ?2, 1, ?3, ?4, ?5, ?6, ?7 WHERE ?8 = 0
+    SELECT ?1, ?2, 1, ?3, ?4, ?5, ?6, ?7 WHERE ?8 = 0 AND (?9=0 OR changes()=1)
     ON CONFLICT(identity_id) DO UPDATE SET entity_uuid = excluded.entity_uuid, revision = player_appearances.revision + 1,
       asset_id = excluded.asset_id, asset_revision = excluded.asset_revision, raw_sha256 = excluded.raw_sha256,
-      texture_id = excluded.texture_id, updated_at = excluded.updated_at WHERE player_appearances.revision = ?8`)
-    .bind(identityId, entityUuid, assetId, assetRevision, sha, texture, now, expected) : env.DB.prepare(`UPDATE player_appearances SET entity_uuid = ?1, revision = revision + 1,
-      asset_id = ?2, asset_revision = ?3, raw_sha256 = ?4, texture_id = ?5, updated_at = ?6 WHERE identity_id = ?7 AND revision = ?8`)
-    .bind(entityUuid, assetId, assetRevision, sha, texture, now, identityId, expected);
+      texture_id = excluded.texture_id, updated_at = excluded.updated_at WHERE player_appearances.revision = ?8 AND (?9=0 OR changes()=1)`)
+    .bind(identityId, entityUuid, assetId, assetRevision, sha, texture, now, expected, displayJson === null ? 0 : 1) : env.DB.prepare(`UPDATE player_appearances SET entity_uuid = ?1, revision = revision + 1,
+      asset_id = ?2, asset_revision = ?3, raw_sha256 = ?4, texture_id = ?5, updated_at = ?6 WHERE identity_id = ?7 AND revision = ?8 AND (?9=0 OR changes()=1)`)
+    .bind(entityUuid, assetId, assetRevision, sha, texture, now, identityId, expected, displayJson === null ? 0 : 1);
   // Keep appearance CAS and motion atomic; stale clients cannot replace a newer motion.
-  const [updated] = await env.DB.batch([
+  const results = await env.DB.batch([
+    ...(displayJson === null ? [] : [visualBucket(env, accountId, visualDefaults, now*1000)]),
     appearanceWrite,
     env.DB.prepare(`INSERT INTO player_motion(identity_id, motion_json)
       SELECT ?1, ?2 WHERE changes() = 1
       ON CONFLICT(identity_id) DO UPDATE SET motion_json = excluded.motion_json`)
       .bind(identityId, assetId ? motionJson : null),
+    env.DB.prepare(`INSERT INTO player_display_states(identity_id,display_json)
+      SELECT ?1,?2 WHERE changes()=1 ON CONFLICT(identity_id) DO UPDATE SET display_json=excluded.display_json`)
+      .bind(identityId, assetId ? displayJson : null),
+    env.DB.prepare("UPDATE projectile_snapshots SET withdrawn=1,expires_at_ms=?2 WHERE source_identity_id=?1 AND ?3 IS NULL AND changes()=1")
+      .bind(identityId, now*1000, assetId),
   ]);
+  if (displayJson !== null && results[0].meta.changes !== 1) return json({code:"RATE_LIMITED"},429);
+  const updated = results[displayJson === null ? 0 : 1];
   if (updated.meta.changes !== 1) return json({ code: "REVISION_CONFLICT", message: "player appearance changed; read its revision and retry" }, 409);
   return json({ revision: expected + 1 }, 200);
 }
@@ -1288,15 +1327,16 @@ async function queryPlayerAppearances(request: Request, env: Env, accountId: str
   const uuids = [...new Set(body.entity_uuids.map(profileUuid))];
   if (!uuids.length) return json({ entries: [] }, 200);
   const now = Math.floor(Date.now()/1000);
-  const result = await env.DB.prepare(`SELECT p.*, m.motion_json, r.format, a.visibility, a.owner_account_id FROM player_appearances p
+  const result = await env.DB.prepare(`SELECT p.*, m.motion_json, d.display_json, i.account_id AS publisher_account_id, r.format, a.visibility, a.owner_account_id FROM player_appearances p
     JOIN identities i ON i.identity_id = p.identity_id AND i.verified = 1
     JOIN identity_providers provider ON provider.provider_id = COALESCE(i.provider_id, 'official') AND provider.enabled = 1
     LEFT JOIN player_motion m ON m.identity_id = p.identity_id
+    LEFT JOIN player_display_states d ON d.identity_id = p.identity_id
     LEFT JOIN assets a ON a.asset_id = p.asset_id
     LEFT JOIN asset_revisions r ON r.asset_id = p.asset_id AND r.revision = p.asset_revision AND r.raw_sha256 = p.raw_sha256
     WHERE p.updated_at > ? AND p.entity_uuid IN (${uuids.map(() => "?").join(",")})`)
-    .bind(now - PLAYER_TTL_SECONDS, ...uuids).all<PlayerAppearanceRow & { motion_json: string | null; format: string | null; visibility: string | null; owner_account_id: string | null }>();
-  const entries = uuids.map(uuid => {
+    .bind(now - PLAYER_TTL_SECONDS, ...uuids).all<PlayerAppearanceRow & { motion_json: string | null; display_json: string | null; publisher_account_id: string; format: string | null; visibility: string | null; owner_account_id: string | null }>();
+  const entries = await Promise.all(uuids.map(async uuid => {
     const candidates = result.results.filter(row => row.entity_uuid === uuid);
     // Provider namespaces can collide. Ambiguous identities never arbitrarily win.
     if (candidates.length !== 1) return { entity_uuid: uuid, revision: 0, selection: null };
@@ -1305,7 +1345,8 @@ async function queryPlayerAppearances(request: Request, env: Env, accountId: str
     return { entity_uuid: uuid, revision: row.revision, selection: allowed && row.asset_id && row.format ? {
       asset_id: row.asset_id, asset_revision: row.asset_revision, raw_sha256: row.raw_sha256,
       format: row.format, texture_id: row.texture_id, motion: row.motion_json ? JSON.parse(row.motion_json) : null,
+      display_state: await displayForReader(env, accountId, row.publisher_account_id, row.display_json, row.updated_at, now*1000),
     } : null };
-  });
+  }));
   return json({ entries }, 200);
 }

@@ -4,12 +4,18 @@
 /.env
 /.env.native
 /data/
+/config.json
+/secrets/
 *.db
 *.db-shm
 *.db-wal
 __pycache__/
 cloudflare/node_modules/
+cloudflare/dist/
 cloudflare/.wrangler/
 /.wrangler/
 cloudflare/.dev.vars
 cloudflare/worker-configuration.d.ts
+
+# Administrator JSON deployment credentials and mutable local runtime
+deploy/runtime/

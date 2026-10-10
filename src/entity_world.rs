@@ -52,6 +52,8 @@ mod tests {
             allow_self_registration: false,
             max_asset_bytes: 1024,
             max_message_bytes: 16384,
+            max_entity_query_count: 64,
+            visual: Default::default(),
             trusted_proxy_ips: vec![],
         };
         let store = CloudStore::open(&config).unwrap();
@@ -441,10 +443,11 @@ impl CloudStore {
         ids: &[uuid::Uuid],
     ) -> Result<Vec<Value>, CloudError> {
         let scope = key(epoch)?;
-        if ids.len() > 64 {
-            return Err(CloudError::invalid_metadata(
-                "entity_uuids must contain at most 64 UUIDs",
-            ));
+        if ids.len() > self.max_entity_query_count {
+            return Err(CloudError::invalid_metadata(format!(
+                "entity_uuids must contain at most {} UUIDs",
+                self.max_entity_query_count
+            )));
         }
         let conn = self
             .connection

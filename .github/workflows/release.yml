@@ -1,0 +1,36 @@
+name: Publish GitHub Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Verify release tag matches Cargo version
+        shell: bash
+        run: |
+          expected="v$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+          test "$GITHUB_REF_NAME" = "$expected"
+      - run: cargo fmt --all -- --check
+      - run: cargo check --all-targets --all-features --locked
+      - run: cargo test --all-targets --all-features --locked
+      - run: docker build --tag spm-cloud:release .
+      - name: Verify release image version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: test "$(docker run --rm spm-cloud:release --version)" = "spm-cloud ${RELEASE_TAG#v}"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes

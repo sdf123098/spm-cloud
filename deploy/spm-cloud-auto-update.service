@@ -1,0 +1,9 @@
+[Unit]
+Description=Check for and apply new SPM Cloud GitHub releases
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=SPM_CLOUD_COMPOSE_DIR=/opt/spm-cloud
+ExecStart=/usr/bin/flock -n /run/lock/spm-cloud-auto-update.lock /usr/bin/bash /opt/spm-cloud/deploy/docker-auto-update.sh

@@ -31,6 +31,8 @@ use crate::{
 pub struct CloudStore {
     pub(crate) connection: Arc<Mutex<Connection>>,
     object_dir: Arc<PathBuf>,
+    pub(crate) max_entity_query_count: usize,
+    pub(crate) visual: Arc<crate::visual::VisualSettings>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +83,8 @@ impl CloudStore {
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
             object_dir: Arc::new(config.object_dir.clone()),
+            max_entity_query_count: config.max_entity_query_count,
+            visual: Arc::new(config.visual.clone()),
         };
         store.seed_bootstrap(
             &config.bootstrap_account_id,
@@ -358,6 +362,10 @@ impl CloudStore {
         }
         connection.execute_batch("CREATE TABLE IF NOT EXISTS player_canonical_names(identity_id TEXT PRIMARY KEY, name TEXT NOT NULL); CREATE TABLE IF NOT EXISTS player_appearances(identity_id TEXT PRIMARY KEY, entity_uuid TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, asset_id TEXT, asset_revision INTEGER, raw_sha256 TEXT, texture_id TEXT, updated_at INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS player_appearances_entity ON player_appearances(entity_uuid,updated_at); CREATE TABLE IF NOT EXISTS entity_model_shares(target_id TEXT PRIMARY KEY, shared_by_account_id TEXT NOT NULL, asset_id TEXT NOT NULL, asset_revision INTEGER NOT NULL, raw_sha256 TEXT NOT NULL); CREATE TABLE IF NOT EXISTS player_motion(identity_id TEXT PRIMARY KEY REFERENCES identities(identity_id) ON DELETE CASCADE, motion_json TEXT NOT NULL);")?;
         crate::game_auth::migrate(connection)?;
+        crate::visual::migrate(connection)?;
+        crate::display::migrate(connection)?;
+        crate::vehicle::migrate(connection)?;
+        crate::entity_motion::migrate(connection)?;
         Ok(())
     }
 
@@ -379,7 +387,7 @@ impl CloudStore {
             PasswordHash::new(password_hash).map_err(|_| {
                 CloudError::configuration("invalid bootstrap Argon2id password hash")
             })?;
-            conn.execute("INSERT INTO account_credentials(account_id, password_hash) VALUES (?1, ?2) ON CONFLICT(account_id) DO UPDATE SET password_hash = excluded.password_hash", params![account_id, password_hash])?;
+            conn.execute("INSERT INTO account_credentials(account_id, password_hash) VALUES (?1, ?2) ON CONFLICT(account_id) DO NOTHING", params![account_id, password_hash])?;
         }
         Ok(())
     }
@@ -989,7 +997,7 @@ impl CloudStore {
             "UPDATE claim_codes SET consumed = 1 WHERE code_hash = ?1",
             [&code_hash],
         )?;
-        let summary = tx.query_row("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE binding_id = ?1", [&binding_id], |row| Ok(ScopedIdentityBindingSummary { binding_id: row.get(0)?, account_id: row.get(1)?, identity_id: row.get(2)?, target_id: row.get(3)?, scope_id: row.get(4)?, world_epoch: row.get(5)?, entity_uuid: row.get(6)?, verification_method: row.get(7)?, status: row.get(8)?, approved_by: row.get(9)?, revision: row.get::<_, i64>(10)? as u64 }))?;
+        let summary = tx.query_row("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE binding_id = ?1", [&binding_id], |row| Ok(ScopedIdentityBindingSummary { binding_id: row.get(0)?, account_id: row.get(1)?, identity_id: row.get(2)?, target_id: row.get(3)?, scope_id: row.get(4)?, world_epoch: row.get(5)?, entity_uuid: row.get(6)?, verification_method: row.get(7)?, status: row.get(8)?, approved_by: row.get(9)?, revision: row.get::<_, i64>(10)? as u64, identity_display_name: None, target_display_name: None }))?;
         tx.commit()?;
         write_audit(
             &conn,
@@ -1096,7 +1104,7 @@ impl CloudStore {
             Some(binding_id),
             serde_json::json!({"status": input.status, "expected_revision": input.expected_revision}),
         )?;
-        conn.query_row("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE binding_id = ?1", [binding_id], |row| Ok(ScopedIdentityBindingSummary { binding_id: row.get(0)?, account_id: row.get(1)?, identity_id: row.get(2)?, target_id: row.get(3)?, scope_id: row.get(4)?, world_epoch: row.get(5)?, entity_uuid: row.get(6)?, verification_method: row.get(7)?, status: row.get(8)?, approved_by: row.get(9)?, revision: row.get::<_, i64>(10)? as u64 })).map_err(CloudError::from)
+        conn.query_row("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE binding_id = ?1", [binding_id], |row| Ok(ScopedIdentityBindingSummary { binding_id: row.get(0)?, account_id: row.get(1)?, identity_id: row.get(2)?, target_id: row.get(3)?, scope_id: row.get(4)?, world_epoch: row.get(5)?, entity_uuid: row.get(6)?, verification_method: row.get(7)?, status: row.get(8)?, approved_by: row.get(9)?, revision: row.get::<_, i64>(10)? as u64, identity_display_name: None, target_display_name: None })).map_err(CloudError::from)
     }
 
     pub fn create_scope(
@@ -1165,7 +1173,7 @@ impl CloudStore {
         if scope_role(&conn, scope_id, account_id)?.is_none() {
             return Err(CloudError::AccessDenied);
         }
-        let mut stmt = conn.prepare("SELECT binding_id, account_id, identity_id, target_id, scope_id, world_epoch, entity_uuid, verification_method, status, approved_by, revision FROM scoped_identity_bindings WHERE scope_id = ?1 ORDER BY binding_id")?;
+        let mut stmt = conn.prepare("SELECT b.binding_id, b.account_id, b.identity_id, b.target_id, b.scope_id, b.world_epoch, b.entity_uuid, b.verification_method, b.status, b.approved_by, b.revision, i.display_name, t.display_name FROM scoped_identity_bindings b LEFT JOIN identities i ON i.identity_id=b.identity_id LEFT JOIN targets t ON t.target_id=b.target_id WHERE b.scope_id = ?1 ORDER BY b.binding_id")?;
         let rows = stmt.query_map([scope_id], |row| {
             Ok(ScopedIdentityBindingSummary {
                 binding_id: row.get(0)?,
@@ -1179,6 +1187,8 @@ impl CloudStore {
                 status: row.get(8)?,
                 approved_by: row.get(9)?,
                 revision: row.get::<_, i64>(10)? as u64,
+                identity_display_name: row.get(11)?,
+                target_display_name: row.get(12)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1213,6 +1223,29 @@ impl CloudStore {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Query only the authenticated caller's scope permission, without exposing the ACL.
+    pub fn scope_permissions(
+        &self,
+        account_id: &str,
+        scope_id: &str,
+    ) -> Result<serde_json::Value, CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let role = scope_role(&conn, scope_id, account_id)?.ok_or(CloudError::ScopeAccessDenied)?;
+        let policy: String = conn.query_row(
+            "SELECT offline_policy FROM scopes WHERE scope_id = ?1",
+            [scope_id],
+            |row| row.get(0),
+        )?;
+        let role = match role.as_str() {
+            "edit" => "editor",
+            other => other,
+        };
+        Ok(serde_json::json!({"scope_id": scope_id, "role": role, "offline_policy": policy}))
     }
 
     pub fn list_scope_acl(
@@ -1323,6 +1356,7 @@ impl CloudStore {
                 "DUMMY" => TargetKind::Dummy,
                 "MAID" => TargetKind::Maid,
                 "FAKE_PLAYER" => TargetKind::FakePlayer,
+                "VEHICLE" => TargetKind::Vehicle,
                 _ => return Err(rusqlite::Error::InvalidQuery),
             };
             Ok(TargetSummary {
@@ -1498,6 +1532,7 @@ impl CloudStore {
                 "DUMMY" => TargetKind::Dummy,
                 "MAID" => TargetKind::Maid,
                 "FAKE_PLAYER" => TargetKind::FakePlayer,
+                "VEHICLE" => TargetKind::Vehicle,
                 _ => return Err(rusqlite::Error::InvalidQuery),
             };
             Ok(TargetSummary {
@@ -2716,6 +2751,8 @@ mod tests {
             allow_self_registration: false,
             max_asset_bytes: 128 * 1024 * 1024,
             max_message_bytes: 64 * 1024,
+            max_entity_query_count: 64,
+            visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
         };
         let store = CloudStore::open(&config).unwrap();
@@ -2874,6 +2911,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pending["status"], "PENDING_APPROVAL");
+        let named = store
+            .list_offline_bindings("account_local", "scope")
+            .unwrap();
+        assert_eq!(
+            named[0].identity_display_name.as_deref(),
+            Some("Offline Player")
+        );
+        assert_eq!(named[0].target_display_name.as_deref(), Some("Player"));
         let approved = store
             .approve_offline_binding(
                 "account_local",
@@ -3134,6 +3179,8 @@ mod tests {
             allow_self_registration: false,
             max_asset_bytes: 128 * 1024 * 1024,
             max_message_bytes: 64 * 1024,
+            max_entity_query_count: 64,
+            visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
         };
         let store = CloudStore::open(&config).unwrap();

@@ -116,7 +116,7 @@ pub async fn link_challenge(
 }
 
 fn requester(state: &AppState, headers: &HeaderMap, peer: Option<std::net::IpAddr>) -> String {
-    if peer.is_some_and(|ip| state.config.trusted_proxy_ips.contains(&ip)) {
+    if peer.is_some_and(|ip| state.runtime_config().trusted_proxy_ips.contains(&ip)) {
         if let Some(ip) = headers
             .get("x-spm-client-ip")
             .and_then(|h| h.to_str().ok())
@@ -357,9 +357,13 @@ pub fn providers_from_environment(
         ));
     }
     let providers: Vec<crate::models::IdentityProviderUpdate> = if let Some(json) = json {
-        serde_json::from_str(json).map_err(|_| {
-            CloudError::configuration("SPM_CLOUD_IDENTITY_PROVIDERS must be a provider JSON array")
-        })?
+        serde_json::from_str::<Vec<crate::config_file::Provider>>(json)
+            .map(|p| p.into_iter().map(Into::into).collect())
+            .map_err(|_| {
+                CloudError::configuration(
+                    "SPM_CLOUD_IDENTITY_PROVIDERS must be a provider JSON array",
+                )
+            })?
     } else if let Some(url) = gateway {
         vec![crate::models::IdentityProviderUpdate {
             provider_id: "custom".into(),
@@ -372,8 +376,15 @@ pub fn providers_from_environment(
     } else {
         Vec::new()
     };
+    validate_providers(&providers)?;
+    Ok(providers)
+}
+
+pub fn validate_providers(
+    providers: &[crate::models::IdentityProviderUpdate],
+) -> Result<(), CloudError> {
     let mut ids = std::collections::HashSet::new();
-    for input in &providers {
+    for input in providers {
         crate::config::validate_slug(&input.provider_id, "provider_id")?;
         if input.provider_id == "official" || !ids.insert(&input.provider_id) {
             return Err(CloudError::configuration(
@@ -388,7 +399,7 @@ pub fn providers_from_environment(
         }
         provider_endpoint(input)?;
     }
-    Ok(providers)
+    Ok(())
 }
 pub fn provider_url(base: &str) -> Result<reqwest::Url, CloudError> {
     let url = reqwest::Url::parse(base).map_err(|_| CloudError::IdentityProviderUntrusted)?;
@@ -905,9 +916,10 @@ mod tests {
     }
     #[test]
     fn forwarded_client_ips_are_trusted_only_from_the_configured_proxy() {
-        let (mut state, _dir) = test_state(false);
-        std::sync::Arc::make_mut(&mut state.config).trusted_proxy_ips =
-            vec!["127.0.0.1".parse().unwrap()];
+        let (state, _dir) = test_state(false);
+        let mut runtime_config = state.runtime_config();
+        runtime_config.trusted_proxy_ips = vec!["127.0.0.1".parse().unwrap()];
+        state.update_runtime_config(runtime_config);
         let mut headers = HeaderMap::new();
         headers.insert("x-spm-client-ip", "1.2.3.4".parse().unwrap());
         assert_eq!(

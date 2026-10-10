@@ -1,0 +1,17 @@
+{
+  "scope_id": "test-scope",
+  "world_epoch": "world-reset-3",
+  "dimension_id": "minecraft:overworld",
+  "state": {
+    "experience_level": 42,
+    "health": 18.5,
+    "max_health": 20.0,
+    "food_level": 17,
+    "effect_amplifiers": { "minecraft:speed": 2 },
+    "flying": false,
+    "strafe_input": 0.25,
+    "vertical_input": 0.0,
+    "forward_input": 1.0,
+    "shield_blocking": false
+  }
+}

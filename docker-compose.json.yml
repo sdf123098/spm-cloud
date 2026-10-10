@@ -3,22 +3,14 @@ services:
     image: ${SPM_CLOUD_IMAGE:-spm-cloud:local}
     build: .
     restart: unless-stopped
+    command: ["--config", "/etc/spm-cloud/config.json"]
     environment:
-      SPM_CLOUD_INSTANCE_ID: ${SPM_CLOUD_INSTANCE_ID:-self-hosted}
-      SPM_CLOUD_ORIGIN: ${SPM_CLOUD_ORIGIN:-https://cloud.example.com}
-      SPM_CLOUD_BIND: 0.0.0.0:8787
-      SPM_CLOUD_ACCESS_TOKEN: ${SPM_CLOUD_ACCESS_TOKEN:?set SPM_CLOUD_ACCESS_TOKEN}
-      SPM_CLOUD_BOOTSTRAP_ACCOUNT: ${SPM_CLOUD_BOOTSTRAP_ACCOUNT:-account_local}
-      SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH: ${SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH:-}
-      SPM_CLOUD_ALLOW_SELF_REGISTRATION: ${SPM_CLOUD_ALLOW_SELF_REGISTRATION:-true}
-      SPM_CLOUD_HAS_JOINED_URL: ${SPM_CLOUD_HAS_JOINED_URL:-}
-      SPM_CLOUD_IDENTITY_PROVIDERS: ${SPM_CLOUD_IDENTITY_PROVIDERS:-}
-      SPM_CLOUD_MAX_ASSET_BYTES: ${SPM_CLOUD_MAX_ASSET_BYTES:-134217728}
-      SPM_CLOUD_MAX_MESSAGE_BYTES: ${SPM_CLOUD_MAX_MESSAGE_BYTES:-65536}
       SPM_CLOUD_TRUSTED_PROXY_IPS: ${SPM_CLOUD_PROXY_IP:-172.30.10.3}
     volumes:
       - spm-cloud-data:/var/lib/spm-cloud/data
       - spm-cloud-objects:/var/lib/spm-cloud/objects
+      - ${SPM_CLOUD_CONFIG_DIR:-./deploy/runtime}:/etc/spm-cloud:ro
+      - ${SPM_CLOUD_SECRETS_DIR:-./deploy/runtime/secrets}:/etc/spm-cloud/secrets:ro
     expose:
       - "8787"
 

@@ -1,5 +1,7 @@
 # SPM Cloud
 
+**自建 Rust 后端版本：2.1.0。** JSON 运行时设置会自动热加载，无需重启服务；默认单模型上传上限为 128 MiB。Docker Compose 可启用定时检查 GitHub 新版本，见 [JSON 管理、迁移与回滚](deploy/ADMIN_JSON.md)。
+
 > [English](README.md) | **中文**
 
 SparkleMorpher 的独立 Rust 自建 Cloud 后端，使用与官方 Cloud 相同的客户端协议、登录、注册和游戏身份绑定流程。提供模型上传下载、权限、公开/私密、玩家模型与贴图同步、轮盘动作、停止动作和待机状态同步。支持与官方相同的客户端协议；运行中的 Rust 服务和官方 Worker 分别通过各自部署流程更新。
@@ -9,6 +11,10 @@ SparkleMorpher 的独立 Rust 自建 Cloud 后端，使用与官方 Cloud 相同
 源码仓库：[sdf123098/spm-cloud](https://github.com/sdf123098/spm-cloud)。模组仓库：[sdf123098/Sparkle-Morpher](https://github.com/sdf123098/Sparkle-Morpher)。
 
 ## 配置文件
+
+2.1.0 支持严格管理员 JSON，提供[编辑器 Schema](config.schema.json) 和[示例](config.example.json)。先运行 `spm-cloud --init-config C:/spm-cloud/config.json` 生成配置和持久 bootstrap token，调整对外 HTTPS 域名与存储路径，再运行 `spm-cloud --config C:/spm-cloud/config.json --check-config`。启动使用相同的 `--config` 参数。`--print-effective-config` 输出合并后的字段与来源，凭据脱敏；两个检查命令均在数据库初始化、账户创建和监听前退出。选中的 JSON 文件每 2 秒检查一次；上传上限（默认 128 MiB）、请求大小、自助注册、身份提供方及视觉运行设置会热加载，无需重启 `spm-cloud`。监听地址、实例身份、存储路径和日志设置仍需重启。
+
+文件选择顺序为 `--config` → `SPM_CLOUD_CONFIG` → 工作目录中已存在的 `config.json`；没有选中文件继续使用旧环境变量方式。显式环境变量覆盖 JSON；JSON 相对路径以配置目录为基准，环境变量路径以工作目录为基准。生成的 `secrets/bootstrap-token.txt` 应限服务账号访问。bootstrap 密码只初始化缺失凭据，重启不覆盖既有密码。玩家显示状态、坐骑独立绑定及绑定实体 motion 可显式启用，默认关闭；投射物快照仍不可启用。新客户端已协商查询限制，服务旧客户端时维持 `max_entity_query_count` 默认 64。完整配置和部署说明见 [JSON 管理](deploy/ADMIN_JSON.md)。
 
 | 部署方式 | 配置文件 | 加载方式 |
 |---|---|---|
@@ -98,6 +104,21 @@ curl -fsS https://cloud.example.com/v1/instance
 第一条应返回 JSON，第二条的 `instance_id` 应是自己的 ID，`capabilities` 应包含 `player_motion_v1` 和 `game_identity_auth_v1`。`auth.self_registration` 为 `true` 时允许玩家自行注册。
 
 修改 `.env` 后，用 `sudo docker compose up -d --force-recreate spm-cloud` 让新环境变量生效；只运行 `restart` 不会更新容器的环境变量。Docker 模式下继续使用仓库自带的 `Caddyfile`，其上游是容器服务 `spm-cloud:8787`。
+
+### 启用 GitHub 版本自动更新（可选）
+
+2.1.0 起可让 Docker Compose 部署每 30 分钟检查 GitHub 最新 Release，并仅重建 `spm-cloud` 容器，数据卷和 Caddy 不变。要求项目目录为 `/opt/spm-cloud`，且主机已安装 Docker Compose、`curl`、`jq`、`tar` 和 `flock`：
+
+```bash
+sudo apt install -y curl jq tar util-linux
+sudo cp deploy/spm-cloud-auto-update.service deploy/spm-cloud-auto-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now spm-cloud-auto-update.timer
+sudo systemctl start spm-cloud-auto-update.service
+sudo systemctl list-timers spm-cloud-auto-update.timer
+```
+
+如果项目目录不是 `/opt/spm-cloud`，请先修改 service 文件中的 `SPM_CLOUD_COMPOSE_DIR` 与脚本路径再安装。GitHub 发布新版本后，定时器会下载对应标签源码，在服务器本地构建并切换容器；首次运行也会升级到最新 Release。该自动更新器只用于 Docker Compose，Linux/Windows 原生部署仍需手动升级。
 
 ## 3. 方式二：Linux 原生运行（不使用 Docker）
 

@@ -1,0 +1,15 @@
+{
+  "world_epoch": "world-reset-3",
+  "dimension_id": "minecraft:overworld",
+  "entity_kind": "minecraft:horse",
+  "target_id": "target-horse",
+  "expected_revision": 0,
+  "resource": {
+    "asset_id": "model-arrow",
+    "asset_revision": 1,
+    "raw_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "texture_id": "default",
+    "format": "ysm"
+  },
+  "variables": { "seat_style": 1.0 }
+}

@@ -1,5 +1,7 @@
 # SPM Cloud
 
+**Self-hosted Rust release: 2.1.0.** JSON runtime settings reload automatically without restarting the service; the default per-model upload limit is 128 MiB. Docker Compose installations can enable periodic GitHub release updates; see [JSON deployment, migration and rollback](deploy/ADMIN_JSON.md).
+
 > **English** | [中文](README_zh.md)
 
 A standalone Rust Cloud backend for [Sparkle's Morpher](https://github.com/sdf123098/Sparkle-Morpher). Self-host model uploads, downloads, public/private visibility, verified game identities, player models, textures, model settings, wheel actions, stop events and idle controller states using the same client protocol as the official Cloud.
@@ -9,6 +11,10 @@ The Rust service runs independently of Minecraft. Players with updated SparkleMo
 Source: [sdf123098/spm-cloud](https://github.com/sdf123098/spm-cloud). The official Cloudflare Worker source is in [cloudflare/](cloudflare/README.md). Rust startup variables below configure the self-hosted service; an existing Worker is updated through its own deployment workflow.
 
 ## Configuration files
+
+Version 2.1.0 supports strict administrator JSON with [editor schema](config.schema.json) and [example](config.example.json). Initialize a configuration and persistent bootstrap token with `spm-cloud --init-config /etc/spm-cloud/config.json`, edit the public HTTPS origin and storage paths, then run `spm-cloud --config /etc/spm-cloud/config.json --check-config`. Start with the same `--config` argument. `--print-effective-config` reports merged values and their sources with credentials redacted; both inspection commands exit before database initialization or listening. A selected JSON file is checked every two seconds; runtime settings such as the 128 MiB default upload limit apply without restarting `spm-cloud`. Listener, identity, storage paths and logging changes require a restart.
+
+Selection is `--config` > `SPM_CLOUD_CONFIG` > an existing working-directory `config.json`. Without a selected file, legacy environment startup remains supported. Explicit environment values override JSON; JSON paths are relative to its directory, environment paths to the working directory. Protect the generated `secrets/bootstrap-token.txt` with service-account permissions. Bootstrap password settings initialize missing credentials and do not reset existing passwords on restart. Player display state, explicit vehicle bindings and bound entity motion are opt-in and default off; projectile snapshots remain unavailable. New clients negotiate entity query limits; keep 64 when serving old clients. See [JSON deployment, migration and rollback](deploy/ADMIN_JSON.md).
 
 | Deployment | Configuration | How it is loaded |
 |---|---|---|

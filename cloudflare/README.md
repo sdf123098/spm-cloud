@@ -31,6 +31,14 @@ Production monitoring/alerting, load/cost validation, and recovery drills are
 also release gates. Do not treat this status as a claim of production
 readiness.
 
+## Visual development capabilities
+
+Apply migrations 0010–0014 together with the earlier schema migrations before deploying this development source. No remote migration or deployment is performed by the local tests. `SPM_CLOUD_PLAYER_DISPLAY_STATE=true` and `SPM_CLOUD_VEHICLE_BINDINGS=true` opt in to `player_display_state_v1` and `vehicle_appearance_v1`; both default off. Vehicle editing requires explicit scope and VEHICLE target edit ACL, exact resource permission and CAS. Query acknowledgements expire within 60 seconds and recheck permissions.
+
+`SPM_CLOUD_ENTITY_MOTION=true` opts in to `entity_motion_v1` for explicitly bound MAID/FAKE_PLAYER timelines; it defaults off. Both scope and target edit ACL, exact binding/appearance revisions and resource permissions are required. Publications use CAS and stable event clocks; payloads expire after 60 seconds, and the publisher can explicitly withdraw them. Six-branch client compilation and protocol tests pass; real game acceptance is pending. Projectile routes have shared fixture/CAS/ACL/expiry tests but are not advertised as a supported client capability yet; leave their development flag unset in a release deployment. Tests use isolated Miniflare accounts and never authorize through test headers in the production Worker.
+
+The `scheduled` handler removes expired visual payloads. Configure a Cron Trigger, for example `"triggers":{"crons":["* * * * *"]}`, in the deployment configuration to run it; the production Wrangler file is unchanged. Compact projectile replay identifiers remain until world epoch rotation. Entity motion retains only revision/event identifiers after expiry; old requests cannot revive the cleared event. Neither is a model/appearance history archive. Run `npm run test:projectile-snapshot`, `test:player-display`, `test:vehicle-appearance` and `test:entity-motion` locally before enabling any corresponding feature.
+
 ## External identity providers / 外置认证
 
 Both the Rust backend and this Worker accept a complete `has_joined_url` in the

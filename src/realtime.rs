@@ -37,12 +37,15 @@ async fn upgrade(
     websocket: WebSocketUpgrade,
 ) -> Result<Response, CloudError> {
     let account_id = authenticate(&state, &headers)?;
+    // Runtime configuration is hot-reloadable, so websocket limits use the
+    // configured schema ceiling here and enforce the live limit per message.
+    const MAX_CONFIGURED_MESSAGE_BYTES: usize = 1024 * 1024;
     Ok(websocket
-        .read_buffer_size(state.config.max_message_bytes)
+        .read_buffer_size(MAX_CONFIGURED_MESSAGE_BYTES)
         .write_buffer_size(0)
-        .max_write_buffer_size(state.config.max_message_bytes * 2)
-        .max_message_size(state.config.max_message_bytes)
-        .max_frame_size(state.config.max_message_bytes)
+        .max_write_buffer_size(MAX_CONFIGURED_MESSAGE_BYTES * 2)
+        .max_message_size(MAX_CONFIGURED_MESSAGE_BYTES)
+        .max_frame_size(MAX_CONFIGURED_MESSAGE_BYTES)
         .on_upgrade(move |socket| serve(socket, state, account_id, headers))
         .into_response())
 }
@@ -63,7 +66,7 @@ async fn serve(socket: WebSocket, state: AppState, account_id: String, headers: 
                 let Ok(message) = result else { break; };
                 let Message::Binary(bytes) = message else { continue; };
                 if authenticate(&state,&headers).is_err() { break; }
-                if bytes.len() > state.config.max_message_bytes { let _ = send_error(&mut sender, "", "MESSAGE_TOO_LARGE", false).await; break; }
+                if bytes.len() > state.runtime_config().max_message_bytes { let _ = send_error(&mut sender, "", "MESSAGE_TOO_LARGE", false).await; break; }
                 let envelope = match Envelope::decode(bytes) {
                     Ok(envelope) => envelope,
                     Err(_) => { let _ = send_error(&mut sender, "", "MALFORMED_MESSAGE", false).await; continue; }
@@ -233,7 +236,7 @@ async fn handle_hello(
     let payload = HelloAck {
         instance_id: state.config.instance_id.clone(),
         protocol_version: PROTOCOL_V1.to_owned(),
-        max_message_bytes: state.config.max_message_bytes as u64,
+        max_message_bytes: state.runtime_config().max_message_bytes as u64,
         heartbeat_interval_seconds: HEARTBEAT_INTERVAL_SECONDS,
         heartbeat_ttl_seconds: HEARTBEAT_TTL_SECONDS,
     };

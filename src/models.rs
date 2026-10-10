@@ -22,6 +22,9 @@ pub struct InstanceAuth {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Limits {
+    pub max_entity_query_count: usize,
+    pub max_visual_state_bytes: usize,
+    pub max_visual_variables: usize,
     pub max_message_bytes: usize,
     pub max_snapshot_bytes: usize,
     pub max_snapshot_chunk_bytes: usize,
@@ -201,6 +204,10 @@ pub struct ScopedIdentityBindingSummary {
     pub status: String,
     pub approved_by: Option<String>,
     pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_display_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -357,6 +364,7 @@ pub enum TargetKind {
     Dummy,
     Maid,
     FakePlayer,
+    Vehicle,
 }
 
 impl CreateTarget {
