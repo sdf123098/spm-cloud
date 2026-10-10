@@ -246,9 +246,9 @@ Invoke-WebRequest $url -OutFile $updater
 
 ## 配置与 JSON 热加载
 
-Docker 和简单原生部署可以使用环境变量。Rust 程序本身不会读取 `.env`，必须由 Compose、systemd 或 Windows 启动脚本传入配置。
+**JSON 不是必需的。**上面的 Docker 和原生安装教程使用环境变量，不需要 JSON 文件。Rust 程序本身不会读取 `.env`，必须由 Compose、systemd 或 Windows 启动脚本把环境变量传给程序。
 
-也可以使用严格管理员 JSON：[Schema](config.schema.json)、[示例文件](config.example.json)、[完整部署指南](deploy/ADMIN_JSON.md)。JSON 文件每 2 秒检查一次。上传/请求限制、注册策略、身份提供方和视觉运行设置等运行时字段会热加载；监听地址、实例身份/地址、存储路径和日志设置需要重启。显式环境变量的优先级高于 JSON 中对应字段。
+只有需要集中管理、严格校验并热加载设置时，才选择管理员 JSON。**不需要从空白手写：**运行 `spm-cloud --init-config <路径>` 会生成初始配置和当前实例专属的 bootstrap token；再按需修改 HTTPS 地址、存储路径等实例信息即可。每个实例的密钥和数据路径各不相同，因此不适合发布一份所有人共用的预填配置。可参考 [Schema](config.schema.json)、[示例文件](config.example.json)和[完整部署指南](deploy/ADMIN_JSON.md)。JSON 文件每 2 秒检查一次。上传/请求限制、注册策略、身份提供方和视觉运行设置等运行时字段会热加载；监听地址、实例身份/地址、存储路径和日志设置需要重启。显式环境变量的优先级高于 JSON 中对应字段。
 
 `limits.max_asset_bytes` / `SPM_CLOUD_MAX_ASSET_BYTES` 默认 `134217728` 字节（128 MiB）。上传更大的模型时，还需同步提高反向代理的请求体限制。JSON 中的上传上限修改后热加载；环境变量修改后需要重新创建容器或重启服务。
 

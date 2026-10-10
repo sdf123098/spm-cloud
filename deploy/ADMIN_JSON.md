@@ -2,6 +2,8 @@
 
 GitHub Releases are built by `cargo-dist`: they include checksummed Linux x86_64/ARM64, Windows x64 and macOS binaries plus shell/PowerShell installers. The release pipeline also builds checksummed amd64/arm64 Docker image archives. It runs Rust validation and publishes the Release only after package builds succeed.
 
+Administrator JSON is optional; the Docker and native environment-variable deployment guides do not require it. Use JSON when you want centralized, validated settings and runtime hot reload. `spm-cloud --init-config <path>` creates a starter config and a unique bootstrap token, so operators do not need to author the file from scratch. The generated token, public origin and storage paths are deployment-specific; do not share one initialized config across instances.
+
 When started with a selected JSON file, the binary polls it every two seconds. Valid changes to runtime settings apply in the existing process; invalid edits are logged and the last active settings remain in effect. Runtime settings include upload/message/entity limits, registration policy, bootstrap access token, identity-provider records, trusted proxies, feature switches and visual retention/publication settings. In particular, `limits.max_asset_bytes` defaults to 134217728 bytes (128 MiB) and changes apply without restarting `spm-cloud`. Explicit environment values continue to override JSON. Listener address, instance ID/origin, storage paths, bootstrap account/password initialization and logging settings require a service restart. Use `--check-config` to validate edits; `--print-effective-config` shows merged public settings and provenance without the bootstrap token or password hash.
 
 ## Native systemd

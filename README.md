@@ -246,9 +246,9 @@ Create a daily Task Scheduler job that runs `powershell.exe` with `-NoProfile -E
 
 ## Configuration and JSON hot reload
 
-Environment variables are the simplest option for Docker and small native deployments. The Rust executable does not read `.env` itself; Compose or your service/startup script must pass the variables to it.
+**JSON is optional.** The Docker and native installation tutorials above use environment variables; those deployments do not need a JSON file. The Rust executable does not read `.env` itself, so Compose or your service/startup script must pass environment variables to it.
 
-The alternative is strict administrator JSON, with an [editor schema](config.schema.json), [example](config.example.json) and full [deployment guide](deploy/ADMIN_JSON.md). JSON is checked every two seconds. Runtime settings such as upload/request limits, registration policy, identity providers and visual runtime settings hot-reload without restarting the process. Listener address, instance identity/origin, storage paths and logging settings require a restart. Explicit environment variables override matching JSON values.
+Choose administrator JSON when you want validated, centralized settings and runtime hot reload. You do not need to write it from scratch: `spm-cloud --init-config <path>` creates a starter file and a unique bootstrap token; edit only the instance-specific values such as HTTPS origin and storage paths. The token and paths are unique to each deployment, so a shared, prefilled config would be unsafe and usually point at the wrong data. An [editor schema](config.schema.json), [example](config.example.json) and full [deployment guide](deploy/ADMIN_JSON.md) are available. JSON is checked every two seconds. Runtime settings such as upload/request limits, registration policy, identity providers and visual runtime settings hot-reload without restarting the process. Listener address, instance identity/origin, storage paths and logging settings require a restart. Explicit environment variables override matching JSON values.
 
 The default `limits.max_asset_bytes` / `SPM_CLOUD_MAX_ASSET_BYTES` is `134217728` bytes (128 MiB). To accept larger models, raise the backend limit and the reverse proxy's request-body limit together. A JSON limit change hot-reloads; an environment change requires a container recreation or service restart.
 
