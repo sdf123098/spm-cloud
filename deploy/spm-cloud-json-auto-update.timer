@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll GitHub releases for SPM Cloud JSON Compose updates
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

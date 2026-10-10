@@ -15,7 +15,7 @@ The backend runs independently of Minecraft. You can deploy it beside a Minecraf
 | Native Windows | Windows servers without Docker | Run the latest stable PowerShell installer; prebuilt x64 executable | Optional Task Scheduler job downloads the verified prebuilt package and rolls back if health checks fail |
 | macOS package | Local or manual runs on Intel or Apple Silicon | Download the matching archive from [GitHub Releases](https://github.com/sdf123098/spm-cloud/releases/latest) | Manual replacement; the service updater tutorials below cover Linux and Windows |
 
-All release links below follow GitHub's **latest stable release**; commands do not contain a version number. For a tagged/older release, select a specific version on the [Releases page](https://github.com/sdf123098/spm-cloud/releases). Default model upload size is **128 MiB**. JSON runtime settings can be hot-reloaded; see [JSON configuration and deployment](deploy/ADMIN_JSON.md).
+All release links below follow GitHub's **latest stable release**; commands do not contain a version number. For a tagged/older release, select a specific version on the [Releases page](https://github.com/sdf123098/spm-cloud/releases). Default model upload size is **128 MiB**. New installations use JSON as the required backend configuration; environment-only startup remains available for existing deployments during migration. Prebuilt archives ship `config.example.json` and `config.schema.json`; initialize an instance-specific config and token on the target machine. See [JSON configuration and deployment](deploy/ADMIN_JSON.md).
 
 ## Before you install
 
@@ -35,64 +35,59 @@ The initial Compose deployment builds the container from the checked-out reposit
 
 ### 1. Download and configure
 
-Run on the Docker host:
+Run on the Docker host. The JSON Compose file is the default for new installations; the legacy `docker-compose.yml` remains available for existing ENV deployments.
 
 ```bash
 git clone https://github.com/sdf123098/spm-cloud.git
 cd spm-cloud
-cp .env.example .env
-chmod 600 .env
-openssl rand -hex 32
-nano .env
+mkdir -p deploy/runtime
+docker compose -f docker-compose.json.yml build spm-cloud
+sudo chown 10001:10001 deploy/runtime
+sudo docker run --rm --user 10001:10001 \
+  -v "$PWD/deploy/runtime:/etc/spm-cloud" spm-cloud:local \
+  --init-config /etc/spm-cloud/config.json
+sudo nano deploy/runtime/config.json
 ```
 
-Set your domain and paste the generated random value into `SPM_CLOUD_ACCESS_TOKEN`:
+Edit `instance.instance_id`, `instance.origin`, `instance.bind`, `instance.trusted_proxy_ips`, and `storage` in the generated JSON. For this Compose network, use `0.0.0.0:8787`, the proxy address `172.30.10.3`, and persistent container paths `/var/lib/spm-cloud/data`, `/var/lib/spm-cloud/data/spm-cloud.db`, `/var/lib/spm-cloud/objects`. Set the public origin to your HTTPS domain. Also replace `cloud.example.com` in `Caddyfile.compose` with the same hostname. The generated bootstrap token is in `deploy/runtime/secrets/bootstrap-token.txt`; keep it private.
 
-```dotenv
-SPM_CLOUD_HOST=cloud.example.com
-SPM_CLOUD_ORIGIN=https://cloud.example.com
-SPM_CLOUD_INSTANCE_ID=my-server-cloud
-SPM_CLOUD_ACCESS_TOKEN=replace-with-your-generated-secret
-SPM_CLOUD_BOOTSTRAP_ACCOUNT=account_local
-SPM_CLOUD_ALLOW_SELF_REGISTRATION=true
-SPM_CLOUD_MAX_ASSET_BYTES=134217728
-```
-
-`SPM_CLOUD_HOST` is the hostname without `https://`; `SPM_CLOUD_ORIGIN` is the public HTTPS origin. Keep the operator token private. It is not a player's password. The 128 MiB upload limit is the default, so the final line can be omitted.
+`limits.max_asset_bytes` defaults to 134217728 bytes (128 MiB). The example config and schema are included in the image at `/usr/share/doc/spm-cloud/` and in the native prebuilt archives.
 
 ### 2. Start and verify
 
 ```bash
-sudo docker compose config --quiet
-sudo docker compose up -d --build
+sudo docker compose -f docker-compose.json.yml config --quiet
+sudo docker compose -f docker-compose.json.yml run --rm --no-deps spm-cloud --config /etc/spm-cloud/config.json --check-config
+sudo docker compose -f docker-compose.json.yml up -d
 sudo docker compose ps
 sudo docker compose logs --tail=100 spm-cloud caddy
 curl -fsS https://cloud.example.com/health
 curl -fsS https://cloud.example.com/v1/instance
 ```
 
-Confirm `/v1/instance` returns your instance ID and capabilities. Compose exposes HTTPS through Caddy; it does not publish port 8787. After changing `.env`, recreate the container so it receives the new environment:
+Confirm `/v1/instance` returns your instance ID and capabilities. Compose exposes HTTPS through Caddy; it does not publish port 8787. Runtime JSON settings hot-reload every two seconds; changes to bind address, instance identity, storage, or logging require recreating the backend container.
 
 ```bash
-sudo docker compose up -d --force-recreate spm-cloud
+sudo docker compose -f docker-compose.json.yml up -d --force-recreate spm-cloud
 ```
 
-A plain `docker compose restart` does not update container environment variables.
+If you customize `SPM_CLOUD_PROXY_IP` or `SPM_CLOUD_NETWORK_SUBNET` in Compose's `.env`, also update `instance.trusted_proxy_ips` in the JSON to match the proxy address.
 
 ### 3. Optional automatic updates
 
-The updater checks GitHub Releases every 30 minutes and downloads the matching amd64/arm64 Docker archive. It verifies the SHA-256 checksum, loads the image and updates only the backend service. Data volumes and Caddy remain in place. The supplied systemd units expect the repository at `/opt/spm-cloud`:
+The updater checks GitHub Releases every 30 minutes and downloads the matching amd64/arm64 Docker archive. It verifies the SHA-256 checksum, loads the image and updates only the backend service. Data volumes and Caddy remain in place. For new JSON deployments, use the JSON-specific systemd units:
 
 ```bash
 sudo apt install -y curl jq gzip coreutils util-linux
-sudo cp deploy/spm-cloud-auto-update.service deploy/spm-cloud-auto-update.timer /etc/systemd/system/
+sudo cp deploy/spm-cloud-json-auto-update.service /etc/systemd/system/spm-cloud-auto-update.service
+sudo cp deploy/spm-cloud-json-auto-update.timer /etc/systemd/system/spm-cloud-auto-update.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now spm-cloud-auto-update.timer
 sudo systemctl start spm-cloud-auto-update.service
 sudo systemctl list-timers spm-cloud-auto-update.timer
 ```
 
-If the checkout is elsewhere, change `/opt/spm-cloud` in the service and timer before enabling them. For manual updates, back up first, then run `git pull --ff-only` followed by `sudo SPM_CLOUD_COMPOSE_DIR="$PWD" bash deploy/docker-auto-update.sh` from the repository directory. The updater applies the latest prebuilt image.
+If the checkout is elsewhere, change `/opt/spm-cloud` in the service before enabling the timer. For manual updates, back up first, then run `git pull --ff-only` followed by `sudo SPM_CLOUD_COMPOSE_DIR="$PWD" SPM_CLOUD_COMPOSE_FILE=docker-compose.json.yml bash deploy/docker-auto-update.sh` from the repository directory. The updater applies the latest prebuilt image.
 
 ## Native Linux
 
@@ -112,33 +107,36 @@ spm-cloud --version
 
 The installer selects the matching x86_64 or ARM64 package. It does not create a user or configure HTTPS.
 
-### 2. Create the service account and environment file
+### 2. Create the service account and JSON configuration
 
 Run user creation only on a first install. Keep the data and object directories persistent across upgrades:
 
 ```bash
 sudo useradd --system --user-group --home-dir /var/lib/spm-cloud --shell /usr/sbin/nologin spm-cloud
-sudo install -d -o spm-cloud -g spm-cloud -m 750 /var/lib/spm-cloud/data /var/lib/spm-cloud/objects
-sudo install -m 600 /dev/null /etc/spm-cloud.env
-openssl rand -hex 32
-sudo nano /etc/spm-cloud.env
+sudo install -d -o spm-cloud -g spm-cloud -m 750 /var/lib/spm-cloud/data /var/lib/spm-cloud/objects /etc/spm-cloud
+sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.json
+sudo -u spm-cloud nano /etc/spm-cloud/config.json
 ```
 
-Enter the settings below, replacing the hostname, instance ID and secret:
+Set the public HTTPS origin and a stable instance ID. Use these storage paths so mutable data stays under `/var/lib`:
 
-```dotenv
-SPM_CLOUD_ORIGIN=https://cloud.example.com
-SPM_CLOUD_INSTANCE_ID=my-server-cloud
-SPM_CLOUD_BIND=127.0.0.1:8787
-SPM_CLOUD_ACCESS_TOKEN=replace-with-your-generated-secret
-SPM_CLOUD_DATA_DIR=/var/lib/spm-cloud/data
-SPM_CLOUD_DATABASE=/var/lib/spm-cloud/data/spm-cloud.db
-SPM_CLOUD_OBJECT_DIR=/var/lib/spm-cloud/objects
-SPM_CLOUD_TRUSTED_PROXY_IPS=127.0.0.1
-SPM_CLOUD_MAX_ASSET_BYTES=134217728
+```json
+{
+"instance": {
+  "instance_id": "my-server-cloud",
+  "origin": "https://cloud.example.com",
+  "bind": "127.0.0.1:8787",
+  "trusted_proxy_ips": ["127.0.0.1"]
+},
+"storage": {
+  "data_dir": "/var/lib/spm-cloud/data",
+  "database_path": "/var/lib/spm-cloud/data/spm-cloud.db",
+  "object_dir": "/var/lib/spm-cloud/objects"
+}
+}
 ```
 
-The 128 MiB limit is the default. Keep `SPM_CLOUD_ACCESS_TOKEN` private and stable. The backend does not load `.env` on its own; the systemd unit below reads `/etc/spm-cloud.env`.
+The initialized bootstrap token is in `/etc/spm-cloud/secrets/bootstrap-token.txt`. Keep it private and preserve it across upgrades. The default upload limit is 128 MiB.
 
 ### 3. Install and start the systemd service
 
@@ -147,15 +145,15 @@ Fetch the service unit that matches the current stable release, then enable it:
 ```bash
 release_tag="$(curl --fail --silent --show-error https://api.github.com/repos/sdf123098/spm-cloud/releases/latest | jq -er '.tag_name')"
 deploy_url="https://raw.githubusercontent.com/sdf123098/spm-cloud/${release_tag}/deploy"
-curl --fail --location "$deploy_url/spm-cloud.service" --output /tmp/spm-cloud.service
-sudo install -m 644 /tmp/spm-cloud.service /etc/systemd/system/spm-cloud.service
+curl --fail --location "$deploy_url/spm-cloud-json.service" --output /tmp/spm-cloud-json.service
+sudo install -m 644 /tmp/spm-cloud-json.service /etc/systemd/system/spm-cloud.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now spm-cloud
 sudo systemctl status spm-cloud --no-pager
 curl -fsS http://127.0.0.1:8787/health
 ```
 
-Check logs with `sudo journalctl -u spm-cloud -n 100 --no-pager`. After editing `/etc/spm-cloud.env`, restart with `sudo systemctl restart spm-cloud`.
+Check the file before enabling the service with `sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --check-config`. Check logs with `sudo journalctl -u spm-cloud -n 100 --no-pager`. JSON runtime settings hot-reload; listener, storage and logging changes require `sudo systemctl restart spm-cloud`.
 
 ### 4. Configure HTTPS
 
@@ -178,7 +176,7 @@ sudo systemctl reload caddy
 curl -fsS https://cloud.example.com/v1/instance
 ```
 
-DNS must point to the server and ports 80/443 must be reachable for certificate issuance. Caddy handles HTTPS and WebSockets. The proxy header works with `SPM_CLOUD_TRUSTED_PROXY_IPS=127.0.0.1` above.
+DNS must point to the server and ports 80/443 must be reachable for certificate issuance. Caddy handles HTTPS and WebSockets. The proxy header works with `instance.trusted_proxy_ips` set to `127.0.0.1` above.
 
 ### 5. Optional automatic updates
 
@@ -210,23 +208,25 @@ $env:SPM_CLOUD_INSTALL_DIR = "$env:USERPROFILE\.cargo"
 irm https://github.com/sdf123098/spm-cloud/releases/latest/download/spm-cloud-installer.ps1 | iex
 ```
 
-Keep the executable under `$env:USERPROFILE\.cargo\bin` and mutable data in a separate directory, for example `C:\SPMCloud`. Save a private startup script as `C:\SPMCloud\start-cloud.ps1`:
+Keep the executable under `$env:USERPROFILE\.cargo\bin` and mutable data in a separate directory, for example `C:\SPMCloud`. Initialize JSON and edit the HTTPS origin and instance ID:
 
 ```powershell
 Set-Location C:\SPMCloud
-$env:SPM_CLOUD_INSTANCE_ID = 'my-server-cloud'
-$env:SPM_CLOUD_ORIGIN = 'https://cloud.example.com'
-$env:SPM_CLOUD_BIND = '127.0.0.1:8787'
-$env:SPM_CLOUD_DATA_DIR = 'C:\SPMCloud\data'
-$env:SPM_CLOUD_OBJECT_DIR = 'C:\SPMCloud\objects'
-$env:SPM_CLOUD_ACCESS_TOKEN = 'replace-with-your-saved-random-secret'
-$env:SPM_CLOUD_BOOTSTRAP_ACCOUNT = 'account_local'
-$env:SPM_CLOUD_ALLOW_SELF_REGISTRATION = 'true'
-$env:SPM_CLOUD_TRUSTED_PROXY_IPS = '127.0.0.1'
-& "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
+$exe = "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
+$config = '.\config.json'
+& $exe --init-config $config
+# Edit config.json: set instance.origin, instance.instance_id and storage paths
+& $exe --config $config --check-config
 ```
 
-Generate a secret once with `-join (1..4 | ForEach-Object { [Guid]::NewGuid().ToString('N') })`, save it in the script, and keep that file private. A `.env` file alone does not configure a native Windows process.
+Save the first three commands as a one-time setup, then create `C:\SPMCloud\start-cloud.ps1` with these persistent startup commands:
+
+```powershell
+Set-Location C:\SPMCloud
+& "$env:USERPROFILE\.cargo\bin\spm-cloud.exe" --config .\config.json
+```
+
+The bootstrap token is written to `C:\SPMCloud\secrets\bootstrap-token.txt`. Keep it private and preserve it across upgrades. Relative config and storage paths are resolved from the JSON file location. A `.env` file alone does not configure a native Windows process.
 
 For HTTPS, download Caddy from [caddyserver.com](https://caddyserver.com/download). Put `caddy.exe` in `C:\SPMCloud`, create a `Caddyfile` with the same site block as the Linux section, then run the backend script and Caddy in separate terminals. Confirm `http://127.0.0.1:8787/health` locally and `https://cloud.example.com/v1/instance` through the proxy. Configure Task Scheduler to start both at boot for unattended operation.
 
@@ -246,11 +246,11 @@ Create a daily Task Scheduler job that runs `powershell.exe` with `-NoProfile -E
 
 ## Configuration and JSON hot reload
 
-**JSON is optional.** The Docker and native installation tutorials above use environment variables; those deployments do not need a JSON file. The Rust executable does not read `.env` itself, so Compose or your service/startup script must pass environment variables to it.
+**New installations use JSON as the required backend configuration.** The Rust executable does not read `.env` itself. Existing installations that started with environment variables can keep using that legacy mode during migration; once a JSON file is selected, its values are authoritative and environment variables do not override them.
 
-Choose administrator JSON when you want validated, centralized settings and runtime hot reload. You do not need to write it from scratch: `spm-cloud --init-config <path>` creates a starter file and a unique bootstrap token; edit only the instance-specific values such as HTTPS origin and storage paths. The token and paths are unique to each deployment, so a shared, prefilled config would be unsafe and usually point at the wrong data. An [editor schema](config.schema.json), [example](config.example.json) and full [deployment guide](deploy/ADMIN_JSON.md) are available. JSON is checked every two seconds. Runtime settings such as upload/request limits, registration policy, identity providers and visual runtime settings hot-reload without restarting the process. Listener address, instance identity/origin, storage paths and logging settings require a restart. Explicit environment variables override matching JSON values.
+`spm-cloud --init-config <path>` creates a starter file and a unique bootstrap token; edit instance-specific values such as HTTPS origin and storage paths. Prebuilt archives include `config.example.json` and `config.schema.json`; the Docker image also contains both under `/usr/share/doc/spm-cloud/`. The token and paths are unique to each deployment, so initialize them on the target machine instead of sharing a generated file. JSON is checked every two seconds. Runtime settings such as upload/request limits, registration policy, identity providers and visual runtime settings hot-reload without restarting the process. Listener address, instance identity/origin, storage paths and logging settings require a restart. The default `limits.max_asset_bytes` is 128 MiB.
 
-The default `limits.max_asset_bytes` / `SPM_CLOUD_MAX_ASSET_BYTES` is `134217728` bytes (128 MiB). To accept larger models, raise the backend limit and the reverse proxy's request-body limit together. A JSON limit change hot-reloads; an environment change requires a container recreation or service restart.
+To accept larger models, raise the JSON upload limit and the reverse proxy's request-body limit together.
 
 For a Linux JSON service, the native path is `/etc/spm-cloud/config.json`. Create the directory for the service account, then initialize, edit and validate with the installed binary:
 
@@ -288,13 +288,20 @@ Self-registration is enabled by default. If disabled, the operator must create p
 
 ## Optional external Yggdrasil login
 
-For one external authentication endpoint, add this environment variable to `.env`, `/etc/spm-cloud.env` or the Windows startup script:
+For a new JSON installation, add the provider under `auth.identity_providers` in `config.json`. For example, a single HTTPS `hasJoined` endpoint can be represented as:
 
-```dotenv
-SPM_CLOUD_HAS_JOINED_URL=https://auth.example.com/all-in-one/hasJoined
+```json
+"identity_providers": [
+  {
+    "provider_id": "my-yggdrasil",
+    "display_name": "My Yggdrasil",
+    "has_joined_url": "https://auth.example.com/all-in-one/hasJoined",
+    "enabled": true
+  }
+]
 ```
 
-Use the complete HTTPS `hasJoined` URL. The backend appends `username` and `serverId`; the service must return the verified Yggdrasil player ID and name. For multiple providers or stable provider IDs, configure `SPM_CLOUD_IDENTITY_PROVIDERS` or use JSON. Keep provider IDs when changing the service: they identify existing account bindings. Full details are in the [JSON deployment guide](deploy/ADMIN_JSON.md).
+Place this array inside the existing `auth` object. The backend appends `username` and `serverId`; the service must return the verified Yggdrasil player ID and name. Alternatively, use `base_url` with `session_path` (default `/sessionserver/session/minecraft/hasJoined`). Keep `provider_id` stable when changing the service because it identifies existing account bindings. Legacy ENV deployments can continue using `SPM_CLOUD_HAS_JOINED_URL` or `SPM_CLOUD_IDENTITY_PROVIDERS` until migrated. See the [JSON deployment guide](deploy/ADMIN_JSON.md).
 
 ## Backup and upgrade
 
@@ -314,13 +321,13 @@ Never run `docker compose down -v` when you intend to keep volumes. Normal upgra
 |---|---|
 | HTTPS or certificate failure | DNS points to this server; ports 80/443 are open; Caddy logs and configuration |
 | Caddy returns 502 | Backend health; native upstream is `127.0.0.1:8787`, Docker upstream is `spm-cloud:8787` |
-| Native Linux service exits | `sudo journalctl -u spm-cloud -n 100`; origin syntax, environment file, file ownership and storage permissions |
+| Native Linux service exits | `sudo journalctl -u spm-cloud -n 100`; origin syntax, JSON validation, file ownership and storage permissions |
 | Port already in use | Identify what uses 8787/80/443 before changing the listener or proxy |
 | Player cannot log in or bind | Same Cloud selected; account session works; game identity binding completed; external provider matches the launcher |
 | Other players cannot see a model/action | Both players use the same instance; identity is verified; model is public; client and backend are current |
-| Upload rejected | Backend default is 128 MiB; check `limits.max_asset_bytes` or `SPM_CLOUD_MAX_ASSET_BYTES` and the proxy body-size cap |
-| JSON edit has no effect | Process started with the intended `--config`; effective environment variables may override JSON; restart-only fields need a restart |
-| `.env` edit has no effect | Docker: recreate the container. Native: ensure the service/startup script loads the file, then restart the process |
+| Upload rejected | Backend default is 128 MiB; check `limits.max_asset_bytes` and the proxy body-size cap |
+| JSON edit has no effect | Process started with the intended `--config`; listener, identity, storage and logging fields need a restart |
+| Legacy `.env` edit has no effect | Docker: recreate the container. Native: ensure the service/startup script loads the file, then restart the process |
 
 One instance uses SQLite and a local object directory. Do not point multiple backend processes at the same SQLite file. Validate the deployment with two real players; `/health` only confirms reachability.
 
@@ -338,11 +345,12 @@ The Rust backend uses Axum, SQLite WAL and local object storage. The official ad
 | Model catalog and upload | `GET/POST /v1/assets` |
 | Player appearance/actions | `PUT /v1/players/me/appearance`, `POST /v1/players/appearances/query` |
 
-When self-registration is disabled, an operator can create an account using the bearer token:
+When self-registration is disabled, an operator can create an account using the bootstrap token. The example reads the Linux native token path; for Docker, use `deploy/runtime/secrets/bootstrap-token.txt` instead.
 
 ```bash
+bootstrap_token="$(sudo cat /etc/spm-cloud/secrets/bootstrap-token.txt)"
 curl -fsS https://cloud.example.com/v1/accounts \
-  -H "Authorization: Bearer $SPM_CLOUD_ACCESS_TOKEN" \
+  -H "Authorization: Bearer $bootstrap_token" \
   -H 'Content-Type: application/json' \
   --data '{"account_id":"alice","password":"replace-with-initial-password"}'
 ```

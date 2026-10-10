@@ -50,7 +50,7 @@
           ],
           "default": null,
           "minLength": 1,
-          "description": "Relative to the config directory. When omitted/null, derived from data_dir. Environment overrides use process working directory."
+          "description": "Relative to the JSON configuration file's directory. When omitted/null, derived from data_dir."
         },
         "object_dir": {
           "type": [
@@ -59,7 +59,7 @@
           ],
           "default": null,
           "minLength": 1,
-          "description": "Relative to the config directory. When omitted/null, derived from data_dir. Environment overrides use process working directory."
+          "description": "Relative to the JSON configuration file's directory. When omitted/null, derived from data_dir."
         }
       }
     },
@@ -81,7 +81,7 @@
           "type": "string",
           "default": null,
           "minLength": 1,
-          "description": "Relative credential file reference; secret never appears in effective output. Explicit environment secret overrides skip reading this file."
+          "description": "Credential file path, resolved relative to the selected JSON configuration file. The secret never appears in effective output."
         },
         "bootstrap_password_hash_file": {
           "type": [
@@ -90,10 +90,11 @@
           ],
           "default": null,
           "minLength": 1,
-          "description": "Relative credential file reference; secret never appears in effective output. Explicit environment secret overrides skip reading this file."
+          "description": "Credential file path, resolved relative to the selected JSON configuration file. The secret never appears in effective output."
         },
         "identity_providers": {
           "type": "array",
+          "description": "Optional external Yggdrasil providers. New installs configure providers here; see the deployment guide for an example.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -258,13 +259,7 @@
         "level": {
           "type": "string",
           "default": "info",
-          "enum": [
-            "trace",
-            "debug",
-            "info",
-            "warn",
-            "error"
-          ]
+          "description": "Tracing EnvFilter directive syntax, including module-level filters (for example: spm_cloud=debug,tower_http=info)."
         },
         "format": {
           "type": "string",

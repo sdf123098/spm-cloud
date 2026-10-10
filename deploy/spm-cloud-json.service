@@ -8,7 +8,6 @@ Type=simple
 User=spm-cloud
 Group=spm-cloud
 WorkingDirectory=/var/lib/spm-cloud
-EnvironmentFile=-/etc/spm-cloud/overrides.env
 ExecStart=/usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json
 Restart=on-failure
 RestartSec=5

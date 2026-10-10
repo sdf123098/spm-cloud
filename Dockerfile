@@ -17,6 +17,7 @@ RUN apt-get update \
     && useradd --system --uid 10001 --create-home --home-dir /var/lib/spm-cloud spm-cloud
 WORKDIR /var/lib/spm-cloud
 COPY --from=builder /src/target/release/spm-cloud /usr/local/bin/spm-cloud
+COPY config.example.json config.schema.json /usr/share/doc/spm-cloud/
 RUN mkdir -p /var/lib/spm-cloud/data /var/lib/spm-cloud/objects \
     && chown -R spm-cloud:spm-cloud /var/lib/spm-cloud
 USER spm-cloud

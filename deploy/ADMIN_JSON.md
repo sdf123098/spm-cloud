@@ -1,10 +1,60 @@
 # Administrator JSON deployment
 
-GitHub Releases are built by `cargo-dist`: they include checksummed Linux x86_64/ARM64, Windows x64 and macOS binaries plus shell/PowerShell installers. The release pipeline also builds checksummed amd64/arm64 Docker image archives. It runs Rust validation and publishes the Release only after package builds succeed.
+GitHub Releases are built by `cargo-dist`: platform archives include checksummed Linux x86_64/ARM64, Windows x64 and macOS binaries, shell/PowerShell installers, `config.example.json`, `config.schema.json`, and the bilingual README files. The Docker image also ships the JSON example and schema under `/usr/share/doc/spm-cloud/`. The release pipeline builds checksummed amd64/arm64 Docker image archives and publishes only after platform packages pass CI.
 
-Administrator JSON is optional; the Docker and native environment-variable deployment guides do not require it. Use JSON when you want centralized, validated settings and runtime hot reload. `spm-cloud --init-config <path>` creates a starter config and a unique bootstrap token, so operators do not need to author the file from scratch. The generated token, public origin and storage paths are deployment-specific; do not share one initialized config across instances.
+**New installations must use JSON.** Environment-only startup remains temporarily supported for existing deployments. If a JSON file is selected, it is authoritative and environment variables cannot silently override its values. `spm-cloud --init-config <path>` creates a starter config and unique bootstrap token, so operators do not need to author the file from scratch. Tokens, public origins and storage paths are deployment-specific; initialize each instance separately.
 
-When started with a selected JSON file, the binary polls it every two seconds. Valid changes to runtime settings apply in the existing process; invalid edits are logged and the last active settings remain in effect. Runtime settings include upload/message/entity limits, registration policy, bootstrap access token, identity-provider records, trusted proxies, feature switches and visual retention/publication settings. In particular, `limits.max_asset_bytes` defaults to 134217728 bytes (128 MiB) and changes apply without restarting `spm-cloud`. Explicit environment values continue to override JSON. Listener address, instance ID/origin, storage paths, bootstrap account/password initialization and logging settings require a service restart. Use `--check-config` to validate edits; `--print-effective-config` shows merged public settings and provenance without the bootstrap token or password hash.
+When started with a selected JSON file, the binary polls it every two seconds. Valid changes to runtime settings apply in the existing process; invalid edits are logged and the last active settings remain in effect. Runtime settings include upload/message/entity limits, registration policy, bootstrap access token, identity-provider records, trusted proxies, feature switches and visual retention/publication settings. In particular, `limits.max_asset_bytes` defaults to 134217728 bytes (128 MiB) and changes apply without restarting `spm-cloud`. Listener address, instance ID/origin, storage paths, bootstrap account/password initialization and logging settings require a service restart. Use `--check-config` to validate edits; `--print-effective-config` shows effective settings and their sources without exposing credential contents.
+
+## Paths and portability
+
+The binary does not hard-code an installation directory. A relative `--config` argument (or `SPM_CLOUD_CONFIG` in legacy mode) is resolved from the process working directory. Within JSON, relative database, object and credential paths are resolved from the selected JSON file's parent directory. Absolute paths are also accepted when a deployment intentionally uses standard OS locations such as `/var/lib` or `C:\SPMCloud`. The JSON example uses relative paths and can be moved with its data directory. Docker/systemd examples select explicit mounted/system paths in their service definitions; adjust those paths when installing elsewhere.
+
+## Legacy ENV migration map
+
+All backend settings in the existing `.env.example` and `.env.native.example` have JSON equivalents. Credential values move to protected files referenced by JSON rather than being embedded as plain text in a dotenv file.
+
+| Legacy setting | JSON field |
+|---|---|
+| `SPM_CLOUD_INSTANCE_ID` | `instance.instance_id` |
+| `SPM_CLOUD_ORIGIN` | `instance.origin` |
+| `SPM_CLOUD_BIND` | `instance.bind` |
+| `SPM_CLOUD_TRUSTED_PROXY_IPS` | `instance.trusted_proxy_ips` |
+| `SPM_CLOUD_DATA_DIR` | `storage.data_dir` |
+| `SPM_CLOUD_DATABASE` | `storage.database_path` |
+| `SPM_CLOUD_OBJECT_DIR` | `storage.object_dir` |
+| `SPM_CLOUD_ACCESS_TOKEN` | `auth.bootstrap_access_token_file` (store the same token in the referenced file) |
+| `SPM_CLOUD_BOOTSTRAP_PASSWORD_HASH` | `auth.bootstrap_password_hash_file` |
+| `SPM_CLOUD_BOOTSTRAP_ACCOUNT` | `auth.bootstrap_account_id` |
+| `SPM_CLOUD_ALLOW_SELF_REGISTRATION` | `auth.allow_self_registration` |
+| `SPM_CLOUD_HAS_JOINED_URL` | One entry in `auth.identity_providers` using `has_joined_url` |
+| `SPM_CLOUD_IDENTITY_PROVIDERS` | `auth.identity_providers` |
+| `SPM_CLOUD_MAX_ASSET_BYTES` | `limits.max_asset_bytes` |
+| `SPM_CLOUD_MAX_MESSAGE_BYTES` | `limits.max_message_bytes` |
+| `RUST_LOG` | `logging.level` |
+
+`logging.level` accepts the same tracing `EnvFilter` syntax as `RUST_LOG`, including module-level directives such as `spm_cloud=debug,tower_http=info`.
+
+`SPM_CLOUD_CONFIG` only selects a JSON file; it is not an application setting. `SPM_CLOUD_HOST`, Compose volume/network/image variables and updater variables configure Caddy, Docker or the updater process, so they remain deployment orchestration options rather than backend JSON fields.
+
+For example, replace the empty `auth.identity_providers` array with a custom Yggdrasil endpoint like this (keep the endpoint's real HTTPS hostname and the provider ID stable):
+
+```json
+"identity_providers": [
+  {
+    "provider_id": "my-yggdrasil",
+    "display_name": "My Yggdrasil",
+    "has_joined_url": "https://auth.example.com/all-in-one/hasJoined",
+    "enabled": true
+  }
+]
+```
+
+Put the array inside the `auth` object in `config.json`. `has_joined_url` is the complete HTTPS endpoint; the backend appends `username` and `serverId`. The alternative is `base_url` plus `session_path`.
+
+### Migrating an existing ENV deployment
+
+Stop the old process before switching configuration. Initialize a JSON file, preserve the existing database and object paths as absolute paths or equivalent paths relative to the JSON file, and put the existing bootstrap token in a protected token file referenced by `auth.bootstrap_access_token_file`. Map the current instance ID, origin, listener, registration choice, proxy list, limits, account ID, provider IDs, logging filter and password hash into their JSON fields. Run `--check-config`, then install the JSON systemd unit or start with `--config PATH`. Do not run `--init-config` over an existing config/token; it intentionally refuses to overwrite either file. Keep the old ENV service unit available until the JSON instance starts against the same data.
 
 ## Native systemd
 
@@ -16,14 +66,16 @@ sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.j
 ```
 
 ```json
+{
 "storage": {
   "data_dir": "/var/lib/spm-cloud/data",
   "database_path": "/var/lib/spm-cloud/data/spm-cloud.db",
   "object_dir": "/var/lib/spm-cloud/objects"
 }
+}
 ```
 
-Preserve the paths of an existing database and object directory instead of creating a new empty instance. `deploy/spm-cloud-json.service` uses the explicit JSON path and optional `/etc/spm-cloud/overrides.env`. The existing `spm-cloud.service` keeps environment-only compatibility. Check file ownership under the service account before installing either unit.
+Preserve the paths of an existing database and object directory instead of creating a new empty instance. `deploy/spm-cloud-json.service` selects `/etc/spm-cloud/config.json`; this is an example systemd path, not a binary restriction. The existing `spm-cloud.service` keeps environment-only compatibility. Check file ownership under the service account before installing either unit.
 
 After editing the JSON, validate it and inspect the merged, redacted settings before enabling the service:
 
@@ -34,15 +86,22 @@ sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json -
 
 ## Docker Compose
 
-Initialize `deploy/runtime/config.json` and its `secrets` directory with the native binary. Edit origin, instance ID, storage paths above and proxy settings. The container runs as UID 10001; both configuration and secret file must be readable by that UID. Mount them read-only. The runtime directory is ignored by Git.
+Build the image once, then use its binary to initialize `deploy/runtime/config.json` and the token file. Edit the origin, instance ID, storage paths and proxy address. The container runs as UID 10001; the config and token must be readable by that UID. Mount the runtime directory read-only. The runtime directory is ignored by Git.
 
-```text
+```bash
+mkdir -p deploy/runtime
+docker compose -f docker-compose.json.yml build spm-cloud
+sudo chown 10001:10001 deploy/runtime
+sudo docker run --rm --user 10001:10001 \
+  -v "$PWD/deploy/runtime:/etc/spm-cloud" spm-cloud:local \
+  --init-config /etc/spm-cloud/config.json
+# Edit deploy/runtime/config.json, then validate and start:
 docker compose -f docker-compose.json.yml config
 docker compose -f docker-compose.json.yml run --rm spm-cloud --config /etc/spm-cloud/config.json --check-config
-docker compose -f docker-compose.json.yml up -d --build
+docker compose -f docker-compose.json.yml up -d
 ```
 
-The Compose template preserves the existing data/object named volumes and Caddy setup. It bind-mounts the whole runtime directory, so replacing `config.json` atomically from an editor remains visible to the running container. Container bind/data/object environment values intentionally override JSON for these mounts; the effective report records those overrides. Set `SPM_CLOUD_CONFIG_DIR` and `SPM_CLOUD_SECRETS_DIR` to other host paths when needed. The original `docker-compose.yml` retains its environment deployment.
+The Compose template preserves the named data/object volumes and Caddy setup. It bind-mounts the whole runtime directory, so replacing `config.json` atomically remains visible. Set `SPM_CLOUD_CONFIG_DIR` to use a different host directory. The original `docker-compose.yml` retains environment-only compatibility.
 
 ### Automatic GitHub release updates (Docker Compose)
 
@@ -50,7 +109,8 @@ The optional updater checks the latest public GitHub Release every 30 minutes, d
 
 ```bash
 sudo apt install -y curl jq gzip coreutils util-linux
-sudo cp deploy/spm-cloud-auto-update.service deploy/spm-cloud-auto-update.timer /etc/systemd/system/
+sudo cp deploy/spm-cloud-json-auto-update.service /etc/systemd/system/spm-cloud-auto-update.service
+sudo cp deploy/spm-cloud-json-auto-update.timer /etc/systemd/system/spm-cloud-auto-update.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now spm-cloud-auto-update.timer
 sudo systemctl start spm-cloud-auto-update.service

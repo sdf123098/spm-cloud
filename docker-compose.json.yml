@@ -4,21 +4,16 @@ services:
     build: .
     restart: unless-stopped
     command: ["--config", "/etc/spm-cloud/config.json"]
-    environment:
-      SPM_CLOUD_TRUSTED_PROXY_IPS: ${SPM_CLOUD_PROXY_IP:-172.30.10.3}
     volumes:
       - spm-cloud-data:/var/lib/spm-cloud/data
       - spm-cloud-objects:/var/lib/spm-cloud/objects
       - ${SPM_CLOUD_CONFIG_DIR:-./deploy/runtime}:/etc/spm-cloud:ro
-      - ${SPM_CLOUD_SECRETS_DIR:-./deploy/runtime/secrets}:/etc/spm-cloud/secrets:ro
     expose:
       - "8787"
 
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    environment:
-      SPM_CLOUD_HOST: ${SPM_CLOUD_HOST:-cloud.example.com}
     networks:
       default:
         ipv4_address: ${SPM_CLOUD_PROXY_IP:-172.30.10.3}
@@ -28,7 +23,7 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./Caddyfile.compose:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
 

@@ -7,8 +7,8 @@ use std::{
 };
 
 fn load(
-    value: Value,
-    env: Environment,
+    mut value: Value,
+    mut env: Environment,
 ) -> (
     tempfile::TempDir,
     Result<LoadedConfig, spm_cloud::error::CloudError>,
@@ -16,6 +16,10 @@ fn load(
     let dir = tempfile::tempdir().unwrap();
     let config_dir = dir.path().join("config");
     fs::create_dir(&config_dir).unwrap();
+    if let Some(token) = env.remove("SPM_CLOUD_ACCESS_TOKEN") {
+        fs::write(config_dir.join("test-token.txt"), token).unwrap();
+        value["auth"]["bootstrap_access_token_file"] = json!("test-token.txt");
+    }
     let file = config_dir.join("config.json");
     fs::write(&file, value.to_string()).unwrap();
     let result = LoadedConfig::load_with(Some(&file), dir.path(), &env);
@@ -36,7 +40,7 @@ fn cli(args: &[&std::ffi::OsStr], cwd: &Path) -> Output {
 }
 
 #[test]
-fn file_paths_and_env_paths_use_distinct_roots_and_report_sources() {
+fn json_is_authoritative_and_json_paths_resolve_from_the_config_file() {
     let (dir, loaded) = load(
         json!({"storage":{"database_path":"db.sqlite","object_dir":"objects"}}),
         Environment::new(),
@@ -57,14 +61,14 @@ fn file_paths_and_env_paths_use_distinct_roots_and_report_sources() {
     let loaded = loaded.unwrap();
     assert_eq!(
         loaded.cloud.database_path,
-        dir.path().join("env-data/spm-cloud.db")
+        dir.path().join("config/data/spm-cloud.db")
     );
-    assert_eq!(loaded.cloud.object_dir, dir.path().join("env-objects"));
-    assert_eq!(loaded.cloud.max_asset_bytes, 321);
-    assert!(!loaded.cloud.allow_self_registration);
+    assert_eq!(loaded.cloud.object_dir, dir.path().join("config/data/objects"));
+    assert_eq!(loaded.cloud.max_asset_bytes, 128 * 1024 * 1024);
+    assert!(loaded.cloud.allow_self_registration);
     assert_eq!(
         loaded.effective_report()["sources"]["limits.max_asset_bytes"],
-        "SPM_CLOUD_MAX_ASSET_BYTES"
+        "default"
     );
 }
 
@@ -145,14 +149,15 @@ fn semantic_limits_and_unimplemented_capabilities_are_rejected() {
         json!({"retention":{"cleanup_interval_seconds":601}}),
         json!({"features":{"projectile_snapshots":true}}),
         json!({"logging":{"format":"xml"}}),
-        json!({"logging":{"level":"verbose"}}),
+        json!({"logging":{"level":"spm_cloud=verbose"}}),
     ] {
         assert!(load(value, Environment::new()).1.is_err());
     }
     let mut env = Environment::new();
     env.insert("SPM_CLOUD_MAX_ASSET_BYTES".into(), "invalid".into());
-    assert!(load(json!({}), env).1.is_err());
+    assert!(load(json!({}), env.clone()).1.is_ok());
     let dir = tempfile::tempdir().unwrap();
+    assert!(LoadedConfig::load_with(None, dir.path(), &env).is_err());
     let env = Environment::from([("SPM_CLOUD_MAX_MESSAGE_BYTES".into(), "1024".into())]);
     // Existing environment-only 1KiB deployments remain valid with visual features off.
     assert_eq!(
@@ -165,7 +170,7 @@ fn semantic_limits_and_unimplemented_capabilities_are_rejected() {
 }
 
 #[test]
-fn credential_files_strip_one_newline_and_overrides_do_not_read_missing_files() {
+fn credential_files_strip_one_newline_and_json_does_not_read_environment_overrides() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("config.json");
     let token = dir.path().join("token.txt");
@@ -191,12 +196,12 @@ fn credential_files_strip_one_newline_and_overrides_do_not_read_missing_files() 
         fs::write(&token, token_value).unwrap();
         assert!(LoadedConfig::load_with(Some(&file), dir.path(), &Environment::new()).is_err());
     }
-    fs::remove_file(&token).unwrap();
+    fs::write(&token, "private token with spaces\n").unwrap();
     let env = Environment::from([("SPM_CLOUD_ACCESS_TOKEN".into(), "environment-secret".into())]);
     let loaded = LoadedConfig::load_with(Some(&file), dir.path(), &env).unwrap();
     assert_eq!(
         loaded.cloud.access_token.as_deref(),
-        Some("environment-secret")
+        Some("private token with spaces")
     );
     assert!(
         !loaded
@@ -205,24 +210,19 @@ fn credential_files_strip_one_newline_and_overrides_do_not_read_missing_files() 
             .contains("environment-secret")
     );
     let env = Environment::from([("SPM_CLOUD_ACCESS_TOKEN".into(), "".into())]);
-    assert!(
-        LoadedConfig::load_with(Some(&file), dir.path(), &env)
-            .unwrap()
-            .cloud
-            .access_token
-            .is_none()
-    );
+    fs::remove_file(&token).unwrap();
+    assert!(LoadedConfig::load_with(Some(&file), dir.path(), &env).is_err());
 }
 
 #[test]
-fn provider_validation_is_shared_and_environment_replaces_whole_array() {
+fn provider_validation_is_shared_and_json_provider_array_is_authoritative() {
     let provider = json!({"provider_id":"custom","display_name":"Auth","has_joined_url":"https://auth.example.com/hasJoined","enabled":false});
     let config = json!({"auth":{"identity_providers":[provider.clone()]}});
     let loaded = load(config.clone(), Environment::new()).1.unwrap();
     assert!(!loaded.providers[0].enabled);
     assert_eq!(loaded.providers[0].provider_id, "custom");
     let env = Environment::from([("SPM_CLOUD_IDENTITY_PROVIDERS".into(), "[]".into())]);
-    assert!(load(config, env).1.unwrap().providers.is_empty());
+    assert_eq!(load(config, env).1.unwrap().providers.len(), 1);
     for providers in [
         json!([provider.clone(), provider.clone()]),
         json!([{"provider_id":"official","display_name":"Override","has_joined_url":"https://auth.example.com/hasJoined"}]),
@@ -247,7 +247,19 @@ fn provider_validation_is_shared_and_environment_replaces_whole_array() {
             "https://auth.example.com/hasJoined".into(),
         ),
     ]);
-    assert!(load(json!({}), env).1.is_err());
+    assert!(load(json!({}), env).1.unwrap().providers.is_empty());
+    let dir = tempfile::tempdir().unwrap();
+    let legacy_env = Environment::from([
+        (
+            "SPM_CLOUD_IDENTITY_PROVIDERS".into(),
+            r#"[{"provider_id":"custom","display_name":"Auth","has_joined_url":"https://auth.example.com/hasJoined"}]"#.into(),
+        ),
+        (
+            "SPM_CLOUD_HAS_JOINED_URL".into(),
+            "https://auth.example.com/hasJoined".into(),
+        ),
+    ]);
+    assert!(LoadedConfig::load_with(None, dir.path(), &legacy_env).is_err());
 }
 
 #[test]

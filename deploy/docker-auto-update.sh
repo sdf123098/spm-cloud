@@ -4,6 +4,7 @@ set -Eeuo pipefail
 COMPOSE_DIR="${SPM_CLOUD_COMPOSE_DIR:-/opt/spm-cloud}"
 STATE_FILE="${SPM_CLOUD_UPDATE_STATE:-/var/lib/spm-cloud/last-docker-release-tag}"
 REPOSITORY="sdf123098/spm-cloud"
+COMPOSE_FILE="${SPM_CLOUD_COMPOSE_FILE:-docker-compose.yml}"
 
 case "$(uname -m)" in
   x86_64|amd64) platform="amd64" ;;
@@ -39,28 +40,29 @@ actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
 docker load --input "$tmp/$asset"
 docker image inspect "$image" >/dev/null
 
-container_id="$(docker compose ps -q spm-cloud | head -n 1)"
+compose=(docker compose -f "$COMPOSE_FILE")
+container_id="$("${compose[@]}" ps -q spm-cloud | head -n 1)"
 previous_image=""
 if [[ -n "$container_id" ]]; then
   previous_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
 fi
 rollback() {
   if [[ -n "$previous_image" ]]; then
-    SPM_CLOUD_IMAGE="$previous_image" docker compose up -d --no-deps spm-cloud || true
+    SPM_CLOUD_IMAGE="$previous_image" "${compose[@]}" up -d --no-deps spm-cloud || true
   fi
 }
 
-if ! SPM_CLOUD_IMAGE="$image" docker compose up -d --no-deps spm-cloud; then
+if ! SPM_CLOUD_IMAGE="$image" "${compose[@]}" up -d --no-deps spm-cloud; then
   rollback
   exit 1
 fi
 sleep 8
-if ! docker compose ps --status running --services | grep -Fxq spm-cloud; then
+if ! "${compose[@]}" ps --status running --services | grep -Fxq spm-cloud; then
   rollback
   echo "Updated spm-cloud container did not remain running" >&2
   exit 1
 fi
-if ! actual_version="$(docker compose exec -T spm-cloud spm-cloud --version)"; then
+if ! actual_version="$("${compose[@]}" exec -T spm-cloud spm-cloud --version)"; then
   rollback
   echo "Unable to read the updated container version" >&2
   exit 1

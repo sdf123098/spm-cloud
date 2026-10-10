@@ -214,6 +214,15 @@ impl LoadedConfig {
         environment: &Environment,
     ) -> Result<Self, CloudError> {
         let file = file.map(|p| absolute(cwd, p));
+        // A selected JSON file is the complete configuration for new deployments.
+        // Environment variables remain supported only when no file is selected,
+        // preserving the legacy ENV-only startup mode.
+        let empty_environment = Environment::new();
+        let environment = if file.is_some() {
+            &empty_environment
+        } else {
+            environment
+        };
         let (mut input, raw) = if let Some(path) = &file {
             let text = fs::read_to_string(path)
                 .map_err(|_| invalid("config", "cannot read selected file"))?;
@@ -811,9 +820,6 @@ fn validate(input: &FileConfig, file_mode: bool) -> Result<(), CloudError> {
                 "capability is not implemented in this build; set false",
             ));
         }
-    }
-    if !["trace", "debug", "info", "warn", "error"].contains(&input.logging.level.as_str()) {
-        return Err(invalid("logging.level", "use trace/debug/info/warn/error"));
     }
     if !["text", "json"].contains(&input.logging.format.as_str()) {
         return Err(invalid("logging.format", "use text/json"));

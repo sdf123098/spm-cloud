@@ -15,7 +15,7 @@
 | Windows 原生 | 不使用 Docker 的 Windows 服务器 | 运行 GitHub 最新稳定版 PowerShell 安装器，提供 x64 预构建程序 | 可选任务计划程序下载并校验预构建包，健康检查失败时恢复旧程序 |
 | macOS 程序包 | Intel 或 Apple Silicon 上本地/手动运行 | 从 [GitHub Releases](https://github.com/sdf123098/spm-cloud/releases/latest) 下载对应架构压缩包 | 手动替换程序；下文自动更新教程覆盖 Linux 和 Windows |
 
-下文发布下载链接均指向 GitHub **最新稳定版**，安装命令不需要修改版本号。需要旧版时，请从 [Releases 页面](https://github.com/sdf123098/spm-cloud/releases)选择指定版本。默认单模型上传上限为 **128 MiB**。JSON 运行时设置支持热加载，详见[JSON 配置和部署指南](deploy/ADMIN_JSON.md)。
+下文发布下载链接均指向 GitHub **最新稳定版**，安装命令不需要修改版本号。需要旧版时，请从 [Releases 页面](https://github.com/sdf123098/spm-cloud/releases)选择指定版本。默认单模型上传上限为 **128 MiB**。新安装必须使用 JSON 作为后端配置；已有部署可在迁移期间继续使用旧 ENV 模式。预构建压缩包包含 `config.example.json` 和 `config.schema.json`；每台机器都应自行初始化实例配置和 token。详见[JSON 配置和部署指南](deploy/ADMIN_JSON.md)。
 
 ## 部署前准备
 
@@ -35,49 +35,43 @@
 
 ### 1. 下载仓库并填写配置
 
-在 Docker 主机的终端执行：
+在 Docker 主机的终端执行。新安装使用 JSON Compose 文件；旧的 `docker-compose.yml` 仅供现有 ENV 部署继续使用。
 
 ```bash
 git clone https://github.com/sdf123098/spm-cloud.git
 cd spm-cloud
-cp .env.example .env
-chmod 600 .env
-openssl rand -hex 32
-nano .env
+mkdir -p deploy/runtime
+docker compose -f docker-compose.json.yml build spm-cloud
+sudo chown 10001:10001 deploy/runtime
+sudo docker run --rm --user 10001:10001 \
+  -v "$PWD/deploy/runtime:/etc/spm-cloud" spm-cloud:local \
+  --init-config /etc/spm-cloud/config.json
+sudo nano deploy/runtime/config.json
 ```
 
-将域名和刚生成的随机字符串填入配置：
+编辑生成的 JSON：设置 `instance.instance_id`、`instance.origin`、`instance.bind`、`instance.trusted_proxy_ips` 和 `storage`。Compose 网络下，监听地址使用 `0.0.0.0:8787`，代理地址使用 `172.30.10.3`，持久化容器路径使用 `/var/lib/spm-cloud/data`、`/var/lib/spm-cloud/data/spm-cloud.db` 和 `/var/lib/spm-cloud/objects`。`instance.origin` 填公网 HTTPS 域名；同时把 `Caddyfile.compose` 中的 `cloud.example.com` 替换为同一域名。bootstrap token 位于 `deploy/runtime/secrets/bootstrap-token.txt`，应妥善保管。
 
-```dotenv
-SPM_CLOUD_HOST=cloud.example.com
-SPM_CLOUD_ORIGIN=https://cloud.example.com
-SPM_CLOUD_INSTANCE_ID=my-server-cloud
-SPM_CLOUD_ACCESS_TOKEN=替换为刚生成的随机密钥
-SPM_CLOUD_BOOTSTRAP_ACCOUNT=account_local
-SPM_CLOUD_ALLOW_SELF_REGISTRATION=true
-SPM_CLOUD_MAX_ASSET_BYTES=134217728
-```
-
-`SPM_CLOUD_HOST` 只填域名，不带 `https://`；`SPM_CLOUD_ORIGIN` 填玩家访问的 HTTPS 根地址。管理密钥由服主保管，不是玩家密码。默认上传上限已经是 128 MiB，最后一行可以省略。
+上传上限默认是 134217728 字节（128 MiB）。示例 JSON 和 schema 也在 Docker 镜像的 `/usr/share/doc/spm-cloud/` 中。
 
 ### 2. 启动并检查
 
 ```bash
-sudo docker compose config --quiet
-sudo docker compose up -d --build
+sudo docker compose -f docker-compose.json.yml config --quiet
+sudo docker compose -f docker-compose.json.yml run --rm --no-deps spm-cloud --config /etc/spm-cloud/config.json --check-config
+sudo docker compose -f docker-compose.json.yml up -d
 sudo docker compose ps
 sudo docker compose logs --tail=100 spm-cloud caddy
 curl -fsS https://cloud.example.com/health
 curl -fsS https://cloud.example.com/v1/instance
 ```
 
-检查 `/v1/instance` 返回的实例 ID 和能力。Compose 通过 Caddy 对外提供 HTTPS，不会公开映射 8787 端口。修改 `.env` 后重建后端容器，让新环境变量生效：
+检查 `/v1/instance` 返回的实例 ID 和能力。Compose 通过 Caddy 对外提供 HTTPS，不会公开映射 8787 端口。JSON 运行时设置每两秒热加载；监听地址、实例身份、存储或日志设置变更后需重建后端容器：
 
 ```bash
-sudo docker compose up -d --force-recreate spm-cloud
+sudo docker compose -f docker-compose.json.yml up -d --force-recreate spm-cloud
 ```
 
-单纯执行 `docker compose restart` 不会把新环境变量传给容器。
+如果通过 Compose 的 `.env` 修改了 `SPM_CLOUD_PROXY_IP` 或 `SPM_CLOUD_NETWORK_SUBNET`，还需同步修改 JSON 中的 `instance.trusted_proxy_ips`。
 
 ### 3. 可选：启用自动更新
 
@@ -85,14 +79,15 @@ sudo docker compose up -d --force-recreate spm-cloud
 
 ```bash
 sudo apt install -y curl jq gzip coreutils util-linux
-sudo cp deploy/spm-cloud-auto-update.service deploy/spm-cloud-auto-update.timer /etc/systemd/system/
+sudo cp deploy/spm-cloud-json-auto-update.service /etc/systemd/system/spm-cloud-auto-update.service
+sudo cp deploy/spm-cloud-json-auto-update.timer /etc/systemd/system/spm-cloud-auto-update.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now spm-cloud-auto-update.timer
 sudo systemctl start spm-cloud-auto-update.service
 sudo systemctl list-timers spm-cloud-auto-update.timer
 ```
 
-仓库不在 `/opt/spm-cloud` 时，启用前修改 service 和 timer 中的路径。手动更新前先备份，在仓库目录执行 `git pull --ff-only`，再执行 `sudo SPM_CLOUD_COMPOSE_DIR="$PWD" bash deploy/docker-auto-update.sh`；该脚本应用最新预构建镜像。
+仓库不在 `/opt/spm-cloud` 时，启用 timer 前修改 service 中的路径。手动更新前先备份，在仓库目录执行 `git pull --ff-only`，再执行 `sudo SPM_CLOUD_COMPOSE_DIR="$PWD" SPM_CLOUD_COMPOSE_FILE=docker-compose.json.yml bash deploy/docker-auto-update.sh`；该脚本应用最新预构建镜像。
 
 ## Linux 原生
 
@@ -112,33 +107,36 @@ spm-cloud --version
 
 安装器会按服务器架构选择 x86_64 或 ARM64 程序。它不会创建服务用户，也不会配置 HTTPS。
 
-### 2. 创建服务账号和环境配置
+### 2. 创建服务账号和 JSON 配置
 
 首次部署时创建账号；已有账号请跳过 `useradd`。升级时继续使用原来的数据和对象目录：
 
 ```bash
 sudo useradd --system --user-group --home-dir /var/lib/spm-cloud --shell /usr/sbin/nologin spm-cloud
-sudo install -d -o spm-cloud -g spm-cloud -m 750 /var/lib/spm-cloud/data /var/lib/spm-cloud/objects
-sudo install -m 600 /dev/null /etc/spm-cloud.env
-openssl rand -hex 32
-sudo nano /etc/spm-cloud.env
+sudo install -d -o spm-cloud -g spm-cloud -m 750 /var/lib/spm-cloud/data /var/lib/spm-cloud/objects /etc/spm-cloud
+sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.json
+sudo -u spm-cloud nano /etc/spm-cloud/config.json
 ```
 
-将配置填写如下，并替换域名、实例 ID 和密钥：
+设置公网 HTTPS origin 和固定实例 ID。为保证数据保存在 `/var/lib`，将以下字段填入生成的 JSON：
 
-```dotenv
-SPM_CLOUD_ORIGIN=https://cloud.example.com
-SPM_CLOUD_INSTANCE_ID=my-server-cloud
-SPM_CLOUD_BIND=127.0.0.1:8787
-SPM_CLOUD_ACCESS_TOKEN=替换为生成并保存的随机管理密钥
-SPM_CLOUD_DATA_DIR=/var/lib/spm-cloud/data
-SPM_CLOUD_DATABASE=/var/lib/spm-cloud/data/spm-cloud.db
-SPM_CLOUD_OBJECT_DIR=/var/lib/spm-cloud/objects
-SPM_CLOUD_TRUSTED_PROXY_IPS=127.0.0.1
-SPM_CLOUD_MAX_ASSET_BYTES=134217728
+```json
+{
+"instance": {
+  "instance_id": "my-server-cloud",
+  "origin": "https://cloud.example.com",
+  "bind": "127.0.0.1:8787",
+  "trusted_proxy_ips": ["127.0.0.1"]
+},
+"storage": {
+  "data_dir": "/var/lib/spm-cloud/data",
+  "database_path": "/var/lib/spm-cloud/data/spm-cloud.db",
+  "object_dir": "/var/lib/spm-cloud/objects"
+}
+}
 ```
 
-默认上传上限为 128 MiB，`SPM_CLOUD_MAX_ASSET_BYTES` 可以省略。管理密钥应保密，后续升级保持同一个值。Rust 程序不会自动读取 `.env`；下一步的 systemd 服务会读取 `/etc/spm-cloud.env`。
+bootstrap token 初始化在 `/etc/spm-cloud/secrets/bootstrap-token.txt`。应保密并在升级时保留。默认上传上限为 128 MiB。
 
 ### 3. 安装并启动 systemd 服务
 
@@ -147,15 +145,15 @@ SPM_CLOUD_MAX_ASSET_BYTES=134217728
 ```bash
 release_tag="$(curl --fail --silent --show-error https://api.github.com/repos/sdf123098/spm-cloud/releases/latest | jq -er '.tag_name')"
 deploy_url="https://raw.githubusercontent.com/sdf123098/spm-cloud/${release_tag}/deploy"
-curl --fail --location "$deploy_url/spm-cloud.service" --output /tmp/spm-cloud.service
-sudo install -m 644 /tmp/spm-cloud.service /etc/systemd/system/spm-cloud.service
+curl --fail --location "$deploy_url/spm-cloud-json.service" --output /tmp/spm-cloud-json.service
+sudo install -m 644 /tmp/spm-cloud-json.service /etc/systemd/system/spm-cloud.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now spm-cloud
 sudo systemctl status spm-cloud --no-pager
 curl -fsS http://127.0.0.1:8787/health
 ```
 
-用 `sudo journalctl -u spm-cloud -n 100 --no-pager` 查看日志。修改 `/etc/spm-cloud.env` 后运行 `sudo systemctl restart spm-cloud`。
+启用前运行 `sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --check-config` 校验配置。用 `sudo journalctl -u spm-cloud -n 100 --no-pager` 查看日志。JSON 运行时设置支持热加载；监听、存储和日志设置修改后运行 `sudo systemctl restart spm-cloud`。
 
 ### 4. 配置 HTTPS
 
@@ -178,7 +176,7 @@ sudo systemctl reload caddy
 curl -fsS https://cloud.example.com/v1/instance
 ```
 
-申请 HTTPS 证书前，DNS 必须指向服务器，80/443 端口必须可以从公网访问。Caddy 会代理 HTTPS 和 WebSocket；上面的代理头配合 `SPM_CLOUD_TRUSTED_PROXY_IPS=127.0.0.1` 传递玩家 IP。
+申请 HTTPS 证书前，DNS 必须指向服务器，80/443 端口必须可以从公网访问。Caddy 会代理 HTTPS 和 WebSocket；上面的代理头配合 `instance.trusted_proxy_ips` 中的 `127.0.0.1` 传递玩家 IP。
 
 ### 5. 可选：启用 Linux 自动更新
 
@@ -210,23 +208,25 @@ $env:SPM_CLOUD_INSTALL_DIR = "$env:USERPROFILE\.cargo"
 irm https://github.com/sdf123098/spm-cloud/releases/latest/download/spm-cloud-installer.ps1 | iex
 ```
 
-程序位于 `$env:USERPROFILE\.cargo\bin\spm-cloud.exe`。数据单独放在例如 `C:\SPMCloud` 的目录。创建并保存私有启动脚本 `C:\SPMCloud\start-cloud.ps1`：
+程序位于 `$env:USERPROFILE\.cargo\bin\spm-cloud.exe`。配置和数据单独放在例如 `C:\SPMCloud` 的目录。首次安装时初始化 JSON，并修改 HTTPS origin 和实例 ID：
 
 ```powershell
 Set-Location C:\SPMCloud
-$env:SPM_CLOUD_INSTANCE_ID = 'my-server-cloud'
-$env:SPM_CLOUD_ORIGIN = 'https://cloud.example.com'
-$env:SPM_CLOUD_BIND = '127.0.0.1:8787'
-$env:SPM_CLOUD_DATA_DIR = 'C:\SPMCloud\data'
-$env:SPM_CLOUD_OBJECT_DIR = 'C:\SPMCloud\objects'
-$env:SPM_CLOUD_ACCESS_TOKEN = '替换为保存好的随机管理密钥'
-$env:SPM_CLOUD_BOOTSTRAP_ACCOUNT = 'account_local'
-$env:SPM_CLOUD_ALLOW_SELF_REGISTRATION = 'true'
-$env:SPM_CLOUD_TRUSTED_PROXY_IPS = '127.0.0.1'
-& "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
+$exe = "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
+$config = '.\config.json'
+& $exe --init-config $config
+# 编辑 config.json：设置 instance.origin、instance.instance_id 和 storage 路径
+& $exe --config $config --check-config
 ```
 
-用 `-join (1..4 | ForEach-Object { [Guid]::NewGuid().ToString('N') })` 生成一次密钥，保存到启动脚本后妥善保管。原生 Windows 程序不会读取 `.env` 文件。
+首次初始化会在 `C:\SPMCloud\secrets\bootstrap-token.txt` 生成管理 token。请妥善保管并在升级时保留。接着创建 `C:\SPMCloud\start-cloud.ps1`：
+
+```powershell
+Set-Location C:\SPMCloud
+& "$env:USERPROFILE\.cargo\bin\spm-cloud.exe" --config .\config.json
+```
+
+相对配置和存储路径按 JSON 文件所在目录解析。原生 Windows 程序不会读取 `.env` 文件。
 
 从 [caddyserver.com](https://caddyserver.com/download)下载 Caddy，将 `caddy.exe` 放进 `C:\SPMCloud`。新建 `Caddyfile`，内容与 Linux 一节的站点块相同，然后在两个终端分别运行后端脚本和 Caddy。先检查 `http://127.0.0.1:8787/health`，再检查 `https://cloud.example.com/v1/instance`。无人值守运行可在任务计划程序中设置两个程序开机启动。
 
@@ -246,18 +246,18 @@ Invoke-WebRequest $url -OutFile $updater
 
 ## 配置与 JSON 热加载
 
-**JSON 不是必需的。**上面的 Docker 和原生安装教程使用环境变量，不需要 JSON 文件。Rust 程序本身不会读取 `.env`，必须由 Compose、systemd 或 Windows 启动脚本把环境变量传给程序。
+**新安装必须使用 JSON 作为后端配置。**Rust 程序本身不会读取 `.env`。已有环境变量部署可以在迁移期间继续使用旧模式；选中 JSON 后，JSON 中的值为准，环境变量不会覆盖它。
 
-只有需要集中管理、严格校验并热加载设置时，才选择管理员 JSON。**不需要从空白手写：**运行 `spm-cloud --init-config <路径>` 会生成初始配置和当前实例专属的 bootstrap token；再按需修改 HTTPS 地址、存储路径等实例信息即可。每个实例的密钥和数据路径各不相同，因此不适合发布一份所有人共用的预填配置。可参考 [Schema](config.schema.json)、[示例文件](config.example.json)和[完整部署指南](deploy/ADMIN_JSON.md)。JSON 文件每 2 秒检查一次。上传/请求限制、注册策略、身份提供方和视觉运行设置等运行时字段会热加载；监听地址、实例身份/地址、存储路径和日志设置需要重启。显式环境变量的优先级高于 JSON 中对应字段。
+运行 `spm-cloud --init-config <路径>` 生成初始配置和本机专属的 bootstrap token，再修改 HTTPS 地址、存储路径等实例信息。预构建压缩包包含 `config.example.json` 和 `config.schema.json`；Docker 镜像在 `/usr/share/doc/spm-cloud/` 下也提供两者。每台服务器都应独立生成 token 和路径，不要共用已初始化的配置。JSON 文件每 2 秒检查一次。上传/请求限制、注册策略、身份提供方和视觉运行设置等运行时字段会热加载；监听地址、实例身份/地址、存储路径和日志设置需要重启。默认上传上限为 128 MiB。
 
-`limits.max_asset_bytes` / `SPM_CLOUD_MAX_ASSET_BYTES` 默认 `134217728` 字节（128 MiB）。上传更大的模型时，还需同步提高反向代理的请求体限制。JSON 中的上传上限修改后热加载；环境变量修改后需要重新创建容器或重启服务。
+上传更大的模型时，还需同步提高反向代理的请求体限制。
 
 Linux 使用 JSON 配置时，路径为 `/etc/spm-cloud/config.json`。创建服务账号可访问的目录，再用已安装的程序初始化、编辑和检查：
 
 ```bash
 sudo install -d -o spm-cloud -g spm-cloud -m 750 /etc/spm-cloud
 sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.json
-# 编辑 JSON：设置 HTTPS origin 和绝对存储路径
+# 编辑 JSON：设置 HTTPS origin 和持久存储路径
 sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --check-config
 sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json --print-effective-config
 ```
@@ -288,13 +288,20 @@ New-Item -ItemType Directory -Force (Split-Path $config) | Out-Null
 
 ## 可选：外置 Yggdrasil 登录
 
-单一外置认证服务可以在 `.env`、`/etc/spm-cloud.env` 或 Windows 启动脚本中配置：
+新安装在 `config.json` 的 `auth.identity_providers` 中配置外置认证服务，例如：
 
-```dotenv
-SPM_CLOUD_HAS_JOINED_URL=https://auth.example.com/all-in-one/hasJoined
+```json
+"identity_providers": [
+  {
+    "provider_id": "my-yggdrasil",
+    "display_name": "我的 Yggdrasil",
+    "has_joined_url": "https://auth.example.com/all-in-one/hasJoined",
+    "enabled": true
+  }
+]
 ```
 
-填写完整 HTTPS `hasJoined` 地址。后端会追加 `username` 和 `serverId`，认证服务应返回经过验证的 Yggdrasil 玩家 ID 与名称。需要多个认证提供方或稳定的提供方 ID 时，配置 `SPM_CLOUD_IDENTITY_PROVIDERS` 或使用 JSON。更新外置认证服务时保留原提供方 ID，因为它关联已有账号身份。详见[JSON 部署指南](deploy/ADMIN_JSON.md)。
+把这个数组填入现有 JSON 的 `auth` 对象。后端会追加 `username` 和 `serverId`，认证服务应返回经过验证的 Yggdrasil 玩家 ID 与名称。也可以配置 `base_url` 和 `session_path`（默认 `/sessionserver/session/minecraft/hasJoined`）。更换认证服务时保留原 `provider_id`，因为它关联已有账号身份。旧 ENV 部署迁移前仍可使用 `SPM_CLOUD_HAS_JOINED_URL` 或 `SPM_CLOUD_IDENTITY_PROVIDERS`。详见[JSON 部署指南](deploy/ADMIN_JSON.md)。
 
 ## 备份和升级
 
@@ -314,13 +321,13 @@ SPM_CLOUD_HAS_JOINED_URL=https://auth.example.com/all-in-one/hasJoined
 |---|---|
 | HTTPS 无法访问或证书申请失败 | DNS 是否指向服务器，80/443 是否放行，Caddy 配置和日志 |
 | Caddy 返回 502 | 后端健康状态；原生上游是 `127.0.0.1:8787`，Docker 上游是 `spm-cloud:8787` |
-| Linux 原生服务退出 | `sudo journalctl -u spm-cloud -n 100`；origin 格式、环境文件、文件归属和存储目录权限 |
+| Linux 原生服务退出 | `sudo journalctl -u spm-cloud -n 100`；origin 格式、JSON 校验、文件归属和存储目录权限 |
 | 端口已被占用 | 确认哪个进程占用了 8787/80/443，再调整后端监听地址或代理配置 |
 | 玩家不能登录或绑定 | 是否选择同一 Cloud；账号会话是否有效；是否完成游戏身份绑定；外置提供方是否匹配启动器 |
 | 其他玩家看不到模型/动作 | 双方是否选择同一实例；身份是否验证；模型是否公开；客户端和后端是否为兼容版本 |
-| 模型上传被拒 | 默认 128 MiB；检查 `limits.max_asset_bytes` 或 `SPM_CLOUD_MAX_ASSET_BYTES`，以及代理请求体限制 |
-| JSON 修改没有生效 | 进程是否使用目标 `--config`；环境变量可能覆盖 JSON；需要重启的字段是否已重启 |
-| `.env` 修改没变化 | Docker 需要重建容器；原生部署确认服务/启动脚本读取了文件并重启程序 |
+| 模型上传被拒 | 默认 128 MiB；检查 `limits.max_asset_bytes` 和代理请求体限制 |
+| JSON 修改没有生效 | 进程是否使用目标 `--config`；监听、身份、存储和日志字段需要重启 |
+| 旧 `.env` 修改没变化 | Docker 需要重建容器；原生部署确认服务/启动脚本读取了文件并重启程序 |
 
 一个实例使用 SQLite 和本地对象目录，不要让多个后端进程共用一个 SQLite 文件。用两名真实玩家完成验收；`/health` 只能证明服务可达。
 
@@ -338,11 +345,12 @@ Rust 后端使用 Axum、SQLite WAL 和本地对象存储；官方适配器使�
 | 模型目录和上传 | `GET/POST /v1/assets` |
 | 玩家外观和动作 | `PUT /v1/players/me/appearance`、`POST /v1/players/appearances/query` |
 
-关闭自行注册后，服主可使用管理员 Bearer 创建玩家账号：
+关闭自行注册后，服主可使用 bootstrap token 创建玩家账号。下面示例读取 Linux 原生部署路径；Docker 部署请改为 `deploy/runtime/secrets/bootstrap-token.txt`：
 
 ```bash
+bootstrap_token="$(sudo cat /etc/spm-cloud/secrets/bootstrap-token.txt)"
 curl -fsS https://cloud.example.com/v1/accounts \
-  -H "Authorization: Bearer $SPM_CLOUD_ACCESS_TOKEN" \
+  -H "Authorization: Bearer $bootstrap_token" \
   -H 'Content-Type: application/json' \
   --data '{"account_id":"alice","password":"替换为玩家初始密码"}'
 ```
