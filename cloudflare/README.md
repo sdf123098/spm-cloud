@@ -2,7 +2,7 @@
 
 The canonical official service is now `https://micaftic.top`, using the same Rust backend as self-hosted instances. `micafic.xyz` points to that server through Cloudflare Full (strict). The old `spm-cloud-official.robinson171.workers.dev` address forwards API and WebSocket traffic through `src/compat-proxy.js`; browser account/admin pages redirect to the canonical site. The compatibility Worker has no D1 or R2 bindings and does not run the former business backend.
 
-`npm run deploy` and `npm run deploy:dry-run` explicitly use `wrangler.compat.jsonc`. Use `npm run test:compat-proxy` to check forwarding and maintenance behavior. The retained `wrangler.jsonc`, `src/index.ts`, migrations and adapter tests below describe the retired backend; do not deploy that configuration over the compatibility proxy. Keep D1/R2 data as rollback archives after exporting with `tools/migrate_cloudflare.py` in the repository root.
+`npm run deploy` and `npm run deploy:dry-run` explicitly use `wrangler.compat.jsonc`. Use `npm run test:compat-proxy` to check forwarding and maintenance behavior. The retained `wrangler.jsonc`, `src/index.ts`, migrations and adapter tests below describe the retired backend; do not deploy that configuration over the compatibility proxy. Export D1 with Wrangler and use `tools/migrate_cloudflare.py` in the repository root to import the snapshot into Rust; keep D1/R2 data as rollback archives after migration.
 
 ## Historical adapter documentation
 
