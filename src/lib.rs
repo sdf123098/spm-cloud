@@ -2,6 +2,7 @@ pub mod account_links;
 pub mod admin;
 pub mod api;
 pub mod browser_auth;
+pub mod compat;
 pub mod config;
 pub mod config_file;
 pub mod error;

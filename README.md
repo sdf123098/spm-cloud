@@ -351,7 +351,11 @@ One instance uses SQLite and a local object directory. Do not point multiple bac
 
 ## API and development
 
-The Rust backend uses Axum, SQLite WAL and local object storage. The official adapter uses Cloudflare Worker, D1, R2 and Durable Objects. The clients share a protocol; deployment and storage are separate.
+The official service at `https://micaftic.top` and self-hosted instances use the same Rust backend with Axum, SQLite WAL and local object storage. Cloudflare proxies HTTPS to the official origin using Full (strict). The previous `micafic.xyz` domain reaches the same origin; the original `workers.dev` address uses a compatibility forwarding Worker. The previous D1/R2 implementation remains in `cloudflare/` for historical reference and migration tools.
+
+Set `SPM_CLOUD_COMPAT_ORIGINS` to a comma-separated allowlist of HTTPS origins when maintaining old client endpoints. Direct requests match the Host header; forwarded requests may select an alias only through `X-SPM-Compat-Origin` from a configured trusted proxy IP. All origins share one database, object directory and realtime state. Alias discovery and game challenges retain the corresponding origin expected by old clients; browser account/admin pages should redirect to the canonical origin.
+
+For an offline D1 migration, use `tools/migrate_cloudflare.py --help`. Stop writes and export a final SQL snapshot, verify the SHA-256 object files, build a separate output database from a stopped Rust database snapshot, then back up and promote the database and objects before reopening traffic. The importer preserves identifiers, sessions and ACLs and converts Worker PBKDF2 credentials to an explicit legacy format. A successful password login upgrades that credential to Argon2 in the same transaction as session creation. Keep the source export and storage as rollback backups until migration acceptance.
 
 | Feature | Endpoint |
 |---|---|

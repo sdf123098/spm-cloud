@@ -1,7 +1,6 @@
 use spm_cloud::{
     api,
     config_file::{LoadedConfig, Logging, current_environment, init_config, select_file},
-    realtime,
     store::CloudStore,
 };
 use std::path::Path;
@@ -126,9 +125,13 @@ async fn main() -> anyhow::Result<()> {
             sleep(Duration::from_secs(1)).await;
         }
     });
-    let app = api::router(state.clone())
-        .merge(realtime::router(state))
-        .layer(TraceLayer::new_for_http());
+    let compat_origins = std::env::var("SPM_CLOUD_COMPAT_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|origin| !origin.trim().is_empty())
+        .map(|origin| origin.trim().to_owned())
+        .collect::<Vec<_>>();
+    let app = spm_cloud::compat::router(state, &compat_origins)?.layer(TraceLayer::new_for_http());
     let listener = TcpListener::bind(config.bind_addr).await?;
     tracing::info!(address = %config.bind_addr, instance = %config.instance_id, "SPM Cloud listening");
     axum::serve(

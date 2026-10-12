@@ -377,7 +377,11 @@ New-Item -ItemType Directory -Force (Split-Path $config) | Out-Null
 
 ## 接口与开发
 
-Rust 后端使用 Axum、SQLite WAL 和本地对象存储；官方适配器使用 Cloudflare Worker、D1、R2 和 Durable Objects。客户端协议一致，但部署和存储方式不同。
+官方服务 `https://micaftic.top` 与自建实例使用同一个 Rust 后端，采用 Axum、SQLite WAL 和本地对象存储。Cloudflare 以橙云和 Full（严格）连接源站。旧域名 `micafic.xyz` 接入同一源站，原 `workers.dev` 地址通过兼容 Worker 转发。`cloudflare/` 中保留旧 D1/R2 实现作为历史参考。
+
+兼容旧客户端时，将允许的 HTTPS 地址以逗号分隔写入环境变量 `SPM_CLOUD_COMPAT_ORIGINS`。直连请求按 Host 选择入口；`X-SPM-Compat-Origin` 仅在请求来自已配置的可信代理 IP 时生效。各入口共用数据库、模型文件和实时状态，实例发现与游戏挑战保留旧客户端期待的入口地址；浏览器账号页和管理页应跳转到主域名。
+
+D1 离线迁移工具见 `tools/migrate_cloudflare.py --help`：停止旧端写入后导出最终 SQL，核对对象文件 SHA-256，从已停止的 Rust 数据库快照生成独立输出，再备份并替换数据库和对象目录，最后恢复流量。工具保留账号、会话、模型版本与权限，并标记旧 Worker 的 PBKDF2 密码格式；首次正确密码登录会与会话创建一起原子升级为 Argon2。验收前保留源数据作为回滚备份。
 
 | 功能 | 接口 |
 |---|---|

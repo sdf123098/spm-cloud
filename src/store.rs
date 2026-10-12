@@ -466,13 +466,17 @@ impl CloudStore {
         let Some(password_hash) = password_hash else {
             return Err(CloudError::Unauthenticated);
         };
-        let parsed = PasswordHash::new(&password_hash).map_err(|_| {
-            CloudError::Internal(anyhow::anyhow!("stored password hash is invalid"))
-        })?;
-        Argon2::default()
-            .verify_password(login.password.as_bytes(), &parsed)
-            .map_err(|_| CloudError::Unauthenticated)?;
-        issue_session_in_transaction(&mut conn, &login.account_id)
+        let upgraded = verify_migrated_password(&login.password, &password_hash)?;
+        let tx = conn.transaction()?;
+        if let Some(upgraded) = upgraded {
+            tx.execute(
+                "UPDATE account_credentials SET password_hash=?1 WHERE account_id=?2 AND password_hash=?3",
+                params![upgraded, login.account_id, password_hash],
+            )?;
+        }
+        let session = issue_session_on_connection(&tx, &login.account_id)?;
+        tx.commit()?;
+        Ok(session)
     }
 
     pub fn refresh_session(&self, refresh_token: &str) -> Result<SessionResponse, CloudError> {
@@ -2533,6 +2537,38 @@ fn hash_token(token: &str) -> String {
     hex::encode(sha2::Sha256::digest(token.as_bytes()))
 }
 
+// Only explicitly marked credentials imported from the official Worker use its
+// fixed PBKDF2 parameters. Successful login upgrades them in the session transaction.
+fn verify_migrated_password(password: &str, stored: &str) -> Result<Option<String>, CloudError> {
+    const LEGACY_PREFIX: &str = "spm-worker-pbkdf2-sha256-100000$";
+    if let Some(legacy) = stored.strip_prefix(LEGACY_PREFIX) {
+        use subtle::ConstantTimeEq;
+        let (salt, expected) = legacy.split_once(':').ok_or(CloudError::Unauthenticated)?;
+        if salt.len() != 32 || expected.len() != 64 {
+            return Err(CloudError::Unauthenticated);
+        }
+        let salt = hex::decode(salt).map_err(|_| CloudError::Unauthenticated)?;
+        let expected = hex::decode(expected).map_err(|_| CloudError::Unauthenticated)?;
+        let mut actual = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), &salt, 100_000, &mut actual);
+        if !bool::from(actual.as_slice().ct_eq(expected.as_slice())) {
+            return Err(CloudError::Unauthenticated);
+        }
+        let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+        let upgraded = Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|_| CloudError::Internal(anyhow::anyhow!("password hash upgrade failed")))?
+            .to_string();
+        return Ok(Some(upgraded));
+    }
+    let parsed = PasswordHash::new(stored)
+        .map_err(|_| CloudError::Internal(anyhow::anyhow!("stored password hash is invalid")))?;
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .map_err(|_| CloudError::Unauthenticated)?;
+    Ok(None)
+}
+
 pub(crate) fn issue_session_in_transaction(
     conn: &mut Connection,
     account_id: &str,
@@ -2619,6 +2655,84 @@ mod tests {
                 has_joined_url: None,
             })
             .unwrap();
+    }
+    #[test]
+    fn migrated_worker_password_rehashes_only_after_success_and_keeps_sessions_atomic() {
+        let (state, _dir) = crate::api::tests::test_state(true);
+        let account = "migrated-worker";
+        let legacy = "spm-worker-pbkdf2-sha256-100000$000102030405060708090a0b0c0d0e0f:c13f663724a66cf252c8fce6686305e295ba95de92b61b9255db37c4ec33dd6f";
+        state.store.connection.lock().unwrap().execute_batch(
+            "INSERT INTO accounts(account_id,created_at) VALUES('migrated-worker',datetime('now'));"
+        ).unwrap();
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO account_credentials(account_id,password_hash) VALUES(?1,?2)",
+                params![account, legacy],
+            )
+            .unwrap();
+        let login = |password: &str| {
+            state.store.issue_session(&LoginRequest {
+                account_id: account.into(),
+                password: password.into(),
+            })
+        };
+        let stored = || {
+            state
+                .store
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT password_hash FROM account_credentials WHERE account_id=?1",
+                    [account],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+        assert!(matches!(
+            login("wrong-password"),
+            Err(CloudError::Unauthenticated)
+        ));
+        assert_eq!(stored(), legacy);
+        state.store.connection.lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_migration_session BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT,'test'); END;"
+        ).unwrap();
+        assert!(login("migration-test-密码").is_err());
+        assert_eq!(stored(), legacy);
+        state
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_migration_session;")
+            .unwrap();
+        let session = login("migration-test-密码").unwrap();
+        assert!(stored().starts_with("$argon2id$"));
+        assert_eq!(
+            state
+                .store
+                .authenticate_access_token(&session.access_token)
+                .unwrap(),
+            account
+        );
+        assert!(login("migration-test-密码").is_ok());
+        assert!(matches!(
+            login("wrong-password"),
+            Err(CloudError::Unauthenticated)
+        ));
+        for malformed in [
+            "spm-worker-pbkdf2-sha256-100000$bad",
+            "spm-worker-pbkdf2-sha256-100000$000102030405060708090a0b0c0d0e0f:zz",
+        ] {
+            assert!(matches!(
+                verify_migrated_password("migration-test-密码", malformed),
+                Err(CloudError::Unauthenticated)
+            ));
+        }
     }
     #[test]
     fn registration_cannot_claim_an_existing_passwordless_account() {

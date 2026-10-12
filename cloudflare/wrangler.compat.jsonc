@@ -1,0 +1,17 @@
+{
+  "$schema": "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
+  "name": "spm-cloud-official",
+  "main": "src/compat-proxy.js",
+  "compatibility_date": "2026-09-22",
+  "workers_dev": true,
+  "routes": [],
+  "vars": {
+    "SPM_CLOUD_ORIGIN": "https://micaftic.top",
+    "SPM_CLOUD_PROXY_MAINTENANCE": "false"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "SCOPE_ROOMS", "class_name": "ScopeRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ScopeRoom"] }],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}
