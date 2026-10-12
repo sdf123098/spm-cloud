@@ -3,6 +3,7 @@ use axum::{
     extract::{Multipart, State},
     routing::post,
 };
+use mysql::prelude::Queryable;
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use spm_cloud::{
@@ -17,21 +18,60 @@ struct Server {
     state: AppState,
     task: tokio::task::JoinHandle<()>,
     _dir: tempfile::TempDir,
+    mysql_cleanup: Option<(String, String)>,
 }
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some((url, database)) = &self.mysql_cleanup {
+            if let Ok(options) = mysql::Opts::from_url(url) {
+                let mut connection = mysql::Conn::new(
+                    mysql::OptsBuilder::from_opts(options).db_name(None::<String>),
+                )
+                .ok();
+                if let Some(connection) = connection.as_mut() {
+                    let _ = connection.query_drop(format!("DROP DATABASE `{database}`"));
+                }
+            }
+        }
     }
 }
 async fn server() -> Server {
+    server_with_sqlite_source(None).await
+}
+async fn server_with_sqlite_source(sqlite_source: Option<&std::path::Path>) -> Server {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("token.txt"), OWNER_TOKEN).unwrap();
     let config = dir.path().join("config.json");
-    std::fs::write(
-        &config,
-        json!({"auth":{"bootstrap_access_token_file":"token.txt"}}).to_string(),
-    )
-    .unwrap();
+    let mut config_json = json!({"auth":{"bootstrap_access_token_file":"token.txt"}});
+    if let Some(source) = sqlite_source {
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::copy(source, dir.path().join("data/spm-cloud.db")).unwrap();
+    }
+    let mut mysql_cleanup = None;
+    if let Ok(mysql_url) = std::env::var("SPM_TEST_MYSQL_URL") {
+        let database = format!("spm_test_{}", uuid::Uuid::new_v4().simple());
+        let options = mysql::Opts::from_url(&mysql_url).unwrap();
+        let mut connection =
+            mysql::Conn::new(mysql::OptsBuilder::from_opts(options).db_name(None::<String>))
+                .unwrap();
+        connection
+            .query_drop(format!(
+                "CREATE DATABASE `{database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+            ))
+            .unwrap();
+        drop(connection);
+        let mut database_url = reqwest::Url::parse(&mysql_url).unwrap();
+        database_url.set_path(&format!("/{database}"));
+        std::fs::write(dir.path().join("mysql-url.txt"), database_url.as_str()).unwrap();
+        config_json["storage"] = json!({"backend":"mysql","mysql_url_file":"mysql-url.txt"});
+        mysql_cleanup = Some((mysql_url, database));
+    }
+    if let Ok(redis_url) = std::env::var("SPM_TEST_REDIS_URL") {
+        std::fs::write(dir.path().join("redis-url.txt"), redis_url).unwrap();
+        config_json["cache"] = json!({"backend":"redis","redis_url_file":"redis-url.txt","ttl_seconds":20,"max_pages":16,"timeout_ms":100});
+    }
+    std::fs::write(&config, config_json.to_string()).unwrap();
     let loaded = LoadedConfig::load_with(Some(&config), dir.path(), &Environment::new()).unwrap();
     let store = spm_cloud::CloudStore::open(&loaded.cloud).unwrap();
     let state = AppState::new(loaded.cloud, store);
@@ -46,6 +86,7 @@ async fn server() -> Server {
         state,
         task,
         _dir: dir,
+        mysql_cleanup,
     }
 }
 async fn login(client: &Client, server: &Server, account: &str, password: &str) -> Value {
@@ -71,6 +112,388 @@ async fn upload(client: &Client, server: &Server, id: &str, body: &str) -> reqwe
         .send()
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn catalog_returns_page_scoped_ownership_without_prefetching() {
+    let s = server().await;
+    let client = Client::new();
+    for id in ["page-a", "page-b", "page-c"] {
+        assert!(
+            upload(&client, &s, id, r#"{"elements":[]}"#)
+                .await
+                .status()
+                .is_success()
+        );
+    }
+    let page: Value = client
+        .get(format!("{}/v1/assets?scope=accessible&limit=2", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(page["has_more"], true);
+    assert_eq!(page["entries"][0]["owned"], true);
+    assert_eq!(
+        page["entries"][0]["owner_account_id"],
+        s.state.config.bootstrap_account_id
+    );
+    let after = page["next_cursor"].as_str().unwrap();
+    let next: Value = client
+        .get(format!(
+            "{}/v1/assets?scope=accessible&limit=2&after={after}",
+            s.url
+        ))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(next["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(next["has_more"], false);
+}
+
+#[tokio::test]
+async fn mysql_backend_serves_accounts_catalog_and_sqlite_restore_compatible_backups() {
+    if std::env::var("SPM_TEST_MYSQL_URL").is_err() {
+        return;
+    }
+    let old_store = tempfile::tempdir().unwrap();
+    let old_db = old_store.path().join("spm-cloud.db");
+    {
+        let legacy = rusqlite::Connection::open(&old_db).unwrap();
+        legacy.execute_batch("CREATE TABLE accounts(account_id TEXT PRIMARY KEY,created_at TEXT NOT NULL); INSERT INTO accounts VALUES('account_local','2024-01-01 00:00:00'),('legacy-account','2024-01-02 00:00:00');").unwrap();
+    }
+    let s = server_with_sqlite_source(Some(&old_db)).await;
+    let client = Client::new();
+    let imported: Value = client
+        .get(format!("{}/admin/api/accounts?limit=100", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        imported.to_string().contains("legacy-account"),
+        "existing SQLite accounts should be imported on first MySQL startup"
+    );
+    let uploaded = upload(&client, &s, "mysql-backend-model", r#"{"elements":[]}"#).await;
+    assert!(
+        uploaded.status().is_success(),
+        "{}",
+        uploaded.text().await.unwrap()
+    );
+    let page: Value = client
+        .get(format!("{}/v1/assets?scope=mine&limit=1", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["entries"][0]["asset_id"], "mysql-backend-model");
+    let response = client
+        .get(format!("{}/admin/api/exports/backup", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(response.bytes().await.unwrap())).unwrap();
+    let database_name = archive
+        .file_names()
+        .find(|name| name.ends_with("spm-cloud.db"))
+        .unwrap()
+        .to_owned();
+    let mut exported = archive.by_name(&database_name).unwrap();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut exported, &mut bytes).unwrap();
+    let export_path = s._dir.path().join("restored.db");
+    std::fs::write(&export_path, bytes).unwrap();
+    let restored = rusqlite::Connection::open(export_path).unwrap();
+    let model_count: i64 = restored
+        .query_row(
+            "SELECT COUNT(*) FROM assets WHERE asset_id='mysql-backend-model'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        model_count, 1,
+        "MySQL backup export must produce a populated, SQLite-restorable database"
+    );
+}
+
+#[test]
+fn optional_cache_configuration_accepts_memory_redis_and_disables_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.json");
+    for backend in ["memory", "redis", "none"] {
+        std::fs::write(dir.path().join("redis-url.txt"), "redis://127.0.0.1:6379/0").unwrap();
+        std::fs::write(&config, json!({"cache":{"backend":backend,"redis_url_file":"redis-url.txt","ttl_seconds":20,"max_pages":8}}).to_string()).unwrap();
+        let loaded = LoadedConfig::load_with(Some(&config), dir.path(), &Environment::new());
+        assert!(loaded.is_ok(), "{backend} must be supported");
+    }
+}
+
+#[test]
+fn mysql_configuration_is_optional_and_redacts_connection_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.json");
+    std::fs::write(
+        dir.path().join("mysql-url.txt"),
+        "mysql://tester:secret-password@localhost:3306/spm_test",
+    )
+    .unwrap();
+    std::fs::write(
+        &config,
+        json!({"storage":{"backend":"mysql","mysql_url_file":"mysql-url.txt"}}).to_string(),
+    )
+    .unwrap();
+    let loaded = LoadedConfig::load_with(Some(&config), dir.path(), &Environment::new())
+        .expect("MySQL config should validate without connecting");
+    assert!(
+        !loaded
+            .effective_report()
+            .to_string()
+            .contains("secret-password")
+    );
+    assert!(!format!("{:?}", loaded.cloud).contains("secret-password"));
+}
+
+#[tokio::test]
+async fn paged_owner_first_preview_exports_and_search_are_authorized_and_complete() {
+    use std::io::Read;
+    let s = server().await;
+    let client = Client::new();
+    s.state
+        .store
+        .create_account("aaa-first", "fixture-password")
+        .unwrap();
+    s.state
+        .store
+        .create_account("zzz-last", "fixture-password")
+        .unwrap();
+    let accounts: Value = client
+        .get(format!("{}/admin/api/accounts?page=1&page_size=1", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(accounts["entries"][0]["role"], "owner");
+    assert_eq!(accounts["total"], 3);
+    let page: Value = client
+        .get(format!("{}/admin/api/accounts?page=2&page_size=1", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["entries"][0]["account_id"], "aaa-first");
+    let body = r#"{"elements":[{"uuid":"cube","from":[0,0,0],"to":[8,16,8]}]}"#;
+    assert!(
+        upload(&client, &s, "asset-one", body)
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        upload(&client, &s, "asset-two", body)
+            .await
+            .status()
+            .is_success()
+    );
+    let list: Value = client
+        .get(format!(
+            "{}/admin/api/assets?page=2&page_size=1&q=bbmodel",
+            s.url
+        ))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["total"], 2);
+    assert_eq!(list["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(list["entries"][0]["byte_length"], body.len());
+    let preview: Value = client
+        .get(format!("{}/admin/api/assets/asset-one/preview", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preview["documents"][0]["value"]["elements"][0]["to"][1], 16);
+    let exported = client
+        .get(format!("{}/admin/api/assets/asset-one/export", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        exported.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .ends_with(".bbmodel\"")
+    );
+    assert_eq!(exported.text().await.unwrap(), body);
+    let backup = client
+        .get(format!("{}/admin/api/exports/backup", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(backup.status(), StatusCode::OK);
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(backup.bytes().await.unwrap())).unwrap();
+    let manifest: Value =
+        serde_json::from_reader(archive.by_name("manifest.json").unwrap()).unwrap();
+    assert_eq!(manifest["schema"], "spm.cloud.backup.v1");
+    assert_eq!(manifest["objects"]["file_count"], 1);
+    let mut bytes = Vec::new();
+    archive
+        .by_name("spm-cloud.db")
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    let snapshot = s._dir.path().join("snapshot.db");
+    std::fs::write(&snapshot, bytes).unwrap();
+    let db = rusqlite::Connection::open(snapshot).unwrap();
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM assets", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+    let logs = client
+        .get(format!("{}/admin/api/exports/logs", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logs.status(), StatusCode::OK);
+    let audit: Value = client
+        .get(format!(
+            "{}/admin/api/audit?q=MODEL_EXPORTED&page=1&page_size=1",
+            s.url
+        ))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(audit["total"], 1);
+    let exported: Value = client
+        .get(format!(
+            "{}/admin/api/exports/audit?q=MODEL_EXPORTED",
+            s.url
+        ))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(exported["entries"].as_array().unwrap().len(), 1);
+    for path in [
+        "/admin/api/exports/backup",
+        "/admin/api/exports/models",
+        "/admin/api/exports/logs",
+        "/admin/api/assets/asset-one/preview",
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{}{path}", s.url))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    s.state
+        .store
+        .set_admin_account(
+            "account_local",
+            "aaa-first",
+            "account_local",
+            "admin",
+            false,
+            None,
+        )
+        .unwrap();
+    let admin = login(&client, &s, "aaa-first", "fixture-password").await;
+    assert_eq!(
+        client
+            .get(format!("{}/admin/api/exports/backup", s.url))
+            .bearer_auth(admin["access_token"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn saved_custom_zero_concurrency_reaches_live_admission_and_config_revision() {
+    let s = server().await;
+    let client = Client::new();
+    let config: Value = client
+        .get(format!("{}/admin/api/config", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut value = config["config"].clone();
+    value["performance"] =
+        json!({"preset":"custom","upload_concurrency":0,"model_processing_concurrency":0});
+    let response = client
+        .put(format!("{}/admin/api/config", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .json(&json!({"config":value,"revision":config["revision"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let info: Value = client
+        .get(format!("{}/admin/api/maintenance", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["upload_concurrency"], 0);
+    assert_eq!(info["model_processing_concurrency"], 0);
+    assert_eq!(
+        s.state.runtime_config().performance.resolved().unwrap(),
+        (0, 0)
+    );
 }
 
 #[tokio::test]

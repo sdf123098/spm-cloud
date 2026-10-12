@@ -11,7 +11,9 @@
   "storage": {
     "data_dir": "data",
     "database_path": "data/spm-cloud.db",
-    "object_dir": "data/objects"
+    "object_dir": "data/objects",
+    "backend": "sqlite",
+    "mysql_url_file": null
   },
   "auth": {
     "allow_self_registration": true,
@@ -63,5 +65,21 @@
     "max_textures": 64,
     "max_texture_bytes": 8388608,
     "ysm_parser_path": null
+  },
+  "performance": {
+    "preset": "medium",
+    "upload_concurrency": 4,
+    "model_processing_concurrency": 2
+  },
+  "updates": {
+    "auto_update": false,
+    "check_interval_hours": 24
+  },
+  "cache": {
+    "backend": "memory",
+    "redis_url_file": null,
+    "ttl_seconds": 30,
+    "max_pages": 256,
+    "timeout_ms": 300
   }
 }

@@ -18,6 +18,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
+// Keep streaming upload work bounded on small community hosts. The permit is
+// acquired before reading the request body so concurrent callers cannot pile
+// up upload buffers, temporary files, and moderation jobs without a limit.
+
 use crate::{
     config::CloudConfig,
     error::CloudError,
@@ -37,6 +41,10 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) upload_slots: Arc<crate::performance::Limiter>,
+    pub(crate) processing_slots: Arc<crate::performance::Limiter>,
+    pub(crate) maintenance_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) catalog_cache: Arc<std::sync::RwLock<Arc<crate::catalog_cache::CatalogCache>>>,
     pub config: Arc<CloudConfig>,
     runtime_config: Arc<std::sync::RwLock<CloudConfig>>,
     pub store: CloudStore,
@@ -70,7 +78,17 @@ impl CloudEvent {
 impl AppState {
     pub fn new(config: CloudConfig, store: CloudStore) -> Self {
         let (events, _) = broadcast::channel(512);
+        let (uploads, processing) = config
+            .performance
+            .resolved()
+            .expect("validated performance");
         Self {
+            upload_slots: crate::performance::Limiter::new(uploads),
+            processing_slots: crate::performance::Limiter::new(processing),
+            maintenance_lock: Default::default(),
+            catalog_cache: Arc::new(std::sync::RwLock::new(Arc::new(
+                crate::catalog_cache::CatalogCache::new(config.cache.clone(), &config.instance_id),
+            ))),
             config: Arc::new(config.clone()),
             runtime_config: Arc::new(std::sync::RwLock::new(config)),
             store,
@@ -88,7 +106,17 @@ impl AppState {
     }
 
     pub fn update_runtime_config(&self, config: CloudConfig) -> Result<(), CloudError> {
+        let (uploads, processing) = config.performance.resolved()?;
+        config.updates.validate()?;
+        config.cache.validate()?;
+        if config.cache != self.runtime_config().cache {
+            *self.catalog_cache.write().unwrap() = Arc::new(
+                crate::catalog_cache::CatalogCache::new(config.cache.clone(), &config.instance_id),
+            );
+        }
         self.store.set_moderation_policy(&config.moderation)?;
+        self.upload_slots.set_limit(uploads);
+        self.processing_slots.set_limit(processing);
         self.store.update_runtime_settings(&config);
         *self
             .runtime_config
@@ -848,6 +876,7 @@ pub(crate) async fn upload_asset_as(
     owner: Option<String>,
 ) -> Result<Response, CloudError> {
     let actor = authenticate(&state, &headers)?;
+    let _upload_permit = state.upload_slots.acquire().await;
     let account = owner.unwrap_or_else(|| actor.clone());
     let request_id = header_string(&headers, "idempotency-key")?
         .ok_or_else(|| CloudError::invalid_metadata("Idempotency-Key is required"))?;
@@ -934,7 +963,13 @@ pub(crate) async fn upload_asset_as(
     }
     let object_path = state.store.object_path_for_sha(&sha256);
     let moderation = state.runtime_config().moderation;
-    let scan = crate::moderation::scan(&temp_path, &name, &moderation).await;
+    let scan = crate::moderation::scan_limited(
+        &temp_path,
+        &name,
+        &moderation,
+        state.processing_slots.clone(),
+    )
+    .await;
     state.store.save_scan(&sha256, &scan)?;
     if let Err(error) = state.store.enforce_content_policy(&sha256) {
         let _ = fs::remove_file(&temp_path).await;
@@ -1315,6 +1350,11 @@ pub(crate) mod tests {
             max_asset_bytes: 128 * 1024 * 1024,
             max_message_bytes: 64 * 1024,
             max_entity_query_count: 64,
+            performance: Default::default(),
+            updates: Default::default(),
+            cache: Default::default(),
+            database_backend: "sqlite".into(),
+            mysql_url: None,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
             config_path: None,
@@ -1325,6 +1365,15 @@ pub(crate) mod tests {
         let (events, _) = broadcast::channel(8);
         (
             AppState {
+                upload_slots: crate::performance::Limiter::new(4),
+                processing_slots: crate::performance::Limiter::new(2),
+                maintenance_lock: Default::default(),
+                catalog_cache: Arc::new(std::sync::RwLock::new(Arc::new(
+                    crate::catalog_cache::CatalogCache::new(
+                        config.cache.clone(),
+                        &config.instance_id,
+                    ),
+                ))),
                 runtime_config: Arc::new(std::sync::RwLock::new(config.as_ref().clone())),
                 config,
                 store,

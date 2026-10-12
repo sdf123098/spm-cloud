@@ -1,6 +1,6 @@
 [package]
 name = "spm-cloud"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2024"
 rust-version = "1.87"
 description = "Standalone SPM Cloud service for SparkleMorpher clients"
@@ -24,6 +24,9 @@ pbkdf2 = "0.12.2"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+redis = { version = "0.32.7", default-features = false, features = ["tokio-rustls-comp", "script"] }
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"

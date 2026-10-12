@@ -50,11 +50,17 @@ async fn main() -> anyhow::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_new(&loaded.log_filter)?;
     if loaded.logging.format == "json" {
         tracing_subscriber::fmt()
+            .with_writer(spm_cloud::maintenance::LogWriter)
+            .with_ansi(false)
             .with_env_filter(filter)
             .json()
             .init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+        tracing_subscriber::fmt()
+            .with_writer(spm_cloud::maintenance::LogWriter)
+            .with_ansi(false)
+            .with_env_filter(filter)
+            .init();
     }
     let config = loaded.cloud;
     let providers = loaded.providers;
@@ -65,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         store.configure_provider(&provider)?;
     }
     let state = api::AppState::new(config.clone(), store.clone());
+    spm_cloud::maintenance::start_update_loop(state.clone());
     if let Some(path) = config_path {
         tokio::spawn(reload_config(
             path,
@@ -180,6 +187,11 @@ async fn reload_config(
             ("instance.origin", current.origin != candidate.origin),
             ("instance.bind", current.bind_addr != candidate.bind_addr),
             (
+                "storage.backend / storage.mysql_url_file",
+                current.database_backend != candidate.database_backend
+                    || current.mysql_url != candidate.mysql_url,
+            ),
+            (
                 "storage.database_path",
                 current.database_path != candidate.database_path,
             ),
@@ -227,6 +239,9 @@ async fn reload_config(
         next.max_asset_bytes = candidate.max_asset_bytes;
         next.max_message_bytes = candidate.max_message_bytes;
         next.max_entity_query_count = candidate.max_entity_query_count;
+        next.performance = candidate.performance;
+        next.updates = candidate.updates;
+        next.cache = candidate.cache;
         next.visual = candidate.visual;
         next.trusted_proxy_ips = candidate.trusted_proxy_ips;
         next.web_ui = candidate.web_ui;

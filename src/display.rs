@@ -1,6 +1,7 @@
 //! Player-owned, transport-independent display inputs. None is an unknown value.
+use crate::database::Connection;
 use crate::{error::CloudError, visual::VisualSettings};
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

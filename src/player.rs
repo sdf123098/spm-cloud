@@ -112,7 +112,7 @@ pub async fn query(
 }
 
 fn identity(
-    conn: &rusqlite::Connection,
+    conn: &crate::database::Connection,
     account: &str,
     id: &str,
 ) -> Result<(String, Option<String>, String), CloudError> {
@@ -780,6 +780,11 @@ mod tests {
             max_asset_bytes: 128 * 1024 * 1024,
             max_message_bytes: 64 * 1024,
             max_entity_query_count: 64,
+            performance: Default::default(),
+            updates: Default::default(),
+            cache: Default::default(),
+            database_backend: "sqlite".into(),
+            mysql_url: None,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
             config_path: None,

@@ -7,7 +7,7 @@ let uploadQueue = [], uploadRunning = false;
 try { if (localStorage.getItem('spm-cloud-model-view') === 'cards') modelView = 'cards'; } catch {}
 const roleNames = { owner: '服主', admin: '管理员', member: '普通账号' };
 const statusNames = { R18: 'R18', CLEAN: '未检出', UNKNOWN: '未识别', DISABLED: '识别关闭' };
-const tabs = { overview: '概览', models: '模型库', settings: '服务器配置', accounts: '账号与权限', profile:'我的账号与绑定', audit: '操作记录' };
+const tabs = { overview: '概览', models: '模型库', settings: '服务器配置', accounts: '账号与权限', profile:'我的账号与绑定', maintenance:'更新与导出', audit: '操作记录' };
 const groups = { instance: '实例与网络', storage: '存储路径', auth: '账号与身份验证', limits: '资源与请求限制', features: '功能开关', retention: '保留与清理', logging: '日志', web_ui: '管理控制台', moderation: 'R18 内容策略' };
 const labels = { detection_enabled:'R18 识别',block_r18:'阻止 R18 模型',texture_detection_enabled:'贴图内容识别',scanner_url:'NudeNet 服务地址',ysm_parser_path:'YSMParser 程序路径',score_threshold:'识别置信度阈值',timeout_seconds:'识别超时（秒）',max_textures:'单模型贴图上限',max_texture_bytes:'单贴图字节上限',block_unclassified:'阻止未识别模型',enabled:'启用 WebUI',allow_self_registration:'允许普通账号自行注册',bootstrap_account_id:'服主账号 ID',bootstrap_access_token_file:'服主初始令牌文件',bootstrap_password_hash_file:'服主密码哈希文件',identity_providers:'外部身份提供方',instance_id:'实例 ID',origin:'公开 HTTPS 地址',bind:'监听地址',trusted_proxy_ips:'可信代理 IP',data_dir:'数据目录',database_path:'数据库路径',object_dir:'模型文件目录',max_asset_bytes:'模型大小上限（字节）',max_message_bytes:'请求消息上限（字节）',max_entity_query_count:'实体查询数量上限',entity_motion:'实体动作',player_display_state:'玩家显示状态',vehicle_bindings:'载具绑定',projectile_snapshots:'弹射物快照（暂不可用）',level:'日志级别',format:'日志格式' };
 const hints = { detection_enabled:'关闭后停止新识别；已有识别与人工标记保留。',block_r18:'拒绝 R18 上传、目录展示、下载和使用。可独立于识别开启。',texture_detection_enabled:'将内嵌贴图发送到你配置的 NudeNet 服务。',scanner_url:'例如 http://127.0.0.1:8080/infer。仅访问服主配置的服务。',block_unclassified:'拒绝识别关闭、加密、无贴图、超限或检测失败的模型。',score_threshold:'0 到 1；初始值 0.7。未检出不代表内容一定安全。',enabled:'关闭后控制台和管理 API 停止访问；需修改服务器 JSON 文件重新开启。' };
@@ -48,14 +48,14 @@ document.querySelectorAll('[data-icon]').forEach(el=>el.append(icon(el.dataset.i
 function action(text,fn,iconName){const b=node('button');b.type='button';if(iconName)b.append(icon(iconName));b.append(document.createTextNode(text));b.addEventListener('click',()=>busy(b,fn));return b;}
 function cell(row,text){const el=node('td',text);row.append(el);return el;}
 function options(select,entries,current){for(const [value,label] of entries){const o=node('option',label);o.value=value;select.append(o);}select.value=current;}
-function bytes(n){return `${(n/1024/1024).toFixed(2)} MB`;}
-async function show(tab){if(tab==='accounts'&&session?.role!=='owner')return;
+function bytes(n){if(!Number.isFinite(Number(n)))return '未知';n=Number(n);if(n<1024)return `${n} B`;const i=Math.min(3,Math.floor(Math.log(n)/Math.log(1024)));return `${(n/1024**i).toFixed(2)} ${['B','KiB','MiB','GiB'][i]}`;}
+async function show(tab){if(['accounts','maintenance'].includes(tab)&&session?.role!=='owner')return;
   if(accountPortal&&tab!=='profile')return;
   for(const name of Object.keys(tabs))$(`tab-${name}`).hidden=name!==tab;
   for(const button of document.querySelectorAll('[data-tab]'))button.classList.toggle('active',button.dataset.tab===tab);
   $('breadcrumb').textContent=tabs[tab];
   document.querySelector('.content').scrollTop=0;
-  try{if(tab==='overview')await loadOverview();if(tab==='models'){await loadModels();await loadOwners();}if(tab==='settings')await loadSettings();if(tab==='accounts')await loadAccounts();if(tab==='audit')await loadAudit();if(tab==='profile')await loadProfile();}catch(e){notice(e.message,true);}
+  try{if(tab==='overview')await loadOverview();if(tab==='models'){await loadModels();await loadOwners();}if(tab==='settings')await loadSettings();if(tab==='accounts')await loadAccounts();if(tab==='audit')await loadAudit();if(tab==='profile')await loadProfile();if(tab==='maintenance')await loadMaintenance();}catch(e){notice(e.message,true);}
 }
 async function loadOverview(){const result=await request('/admin/api/config');const effective=result.effective?.effective||result.effective;const moderation=effective.moderation||{};for(const [id,key]of [['detection','detection_enabled'],['block','block_r18'],['texture','texture_detection_enabled']])$(`overview-${id}`).textContent=moderation[key]===true?'已开启':moderation[key]===false?'已关闭':'未配置';$('overview-instance').textContent=effective.instance?.instance_id||'—';$('overview-origin').textContent=effective.instance?.origin||location.origin;$('overview-role').textContent=roleNames[session.role];}
 async function enter(result){session=result;const me=await request('/account/api/profile');session={...session,...me};
@@ -66,7 +66,7 @@ async function enter(result){session=result;const me=await request('/account/api
   await show(accountPortal?'profile':'overview');
 }
 for(const id of ['login-form','token-form'])$(id).addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,async()=>{const data=Object.fromEntries(new FormData(e.target));const result=await request(accountPortal&&id==='login-form'?'/account/api/login':'/admin/api/login',{method:'POST',json:data});e.target.reset();await enter(result);});});
-$('logout').addEventListener('click',()=>busy($('logout'),async()=>{if(session?.refresh_token)try{await request('/v1/sessions/current',{method:'DELETE'});}catch{}session=null;configResponse=null;formConfig=null;models=[];selectedModels.clear();uploadQueue=[];$('upload-form').reset();renderUploads();$('upload-status').textContent='';$('model-cards').replaceChildren();syncSelection();$('model-detail').close();$('raw-config').value='';$('config-fields').replaceChildren();$('console').hidden=true;$('login').hidden=false;}));
+$('logout').addEventListener('click',()=>busy($('logout'),async()=>{if(session?.refresh_token)try{await request('/v1/sessions/current',{method:'DELETE'});}catch{}session=null;configResponse=null;formConfig=null;models=[];SPMPreview.clear();selectedModels.clear();uploadQueue=[];$('upload-form').reset();renderUploads();$('upload-status').textContent='';$('model-cards').replaceChildren();syncSelection();$('model-detail').close();$('raw-config').value='';$('config-fields').replaceChildren();$('console').hidden=true;$('login').hidden=false;}));
 document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.tab)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.go)));
 $('show-upload').addEventListener('click',()=>{$('upload-form').hidden=false;});
@@ -111,13 +111,14 @@ $('upload-form').addEventListener('submit',async e=>{
     if(session&&succeeded)try{await loadModels();}catch(error){notice(`上传结果已保留，模型列表刷新失败：${error.message}`,true);}
   }finally{uploadRunning=false;$('logout').disabled=bulkRunning;for(const control of form.querySelectorAll('input,select,button'))control.disabled=false;renderUploads();}
 });
-$('search-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,()=>loadModels());});$('include-deleted').addEventListener('change',()=>loadModels().catch(e=>notice(e.message,true)));$('refresh-models').addEventListener('click',()=>busy($('refresh-models'),()=>loadModels()));$('next-models').addEventListener('click',()=>busy($('next-models'),()=>loadModels(true)));
+$('search-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,()=>loadModels());});$('include-deleted').addEventListener('change',()=>loadModels().catch(e=>notice(e.message,true)));$('refresh-models').addEventListener('click',()=>busy($('refresh-models'),()=>loadModels()));
 function setModelView(view){
   modelView=view==='cards'?'cards':'grid';
   $('model-cards').dataset.view=modelView;
   document.querySelectorAll('button[data-view]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.view===modelView)));
   $('model-cards').querySelectorAll('.model-card').forEach(card=>card.style.removeProperty('transform'));
   try{localStorage.setItem('spm-cloud-model-view',modelView);}catch{}
+  if(models.length)renderModels();
 }
 document.querySelectorAll('button[data-view]').forEach(button=>button.addEventListener('click',()=>setModelView(button.dataset.view)));
 setModelView(modelView);
@@ -131,17 +132,31 @@ $('model-cards').addEventListener('pointermove',event=>{
 $('model-cards').addEventListener('pointerout',event=>{const slot=event.target.closest('.model-slot');if(slot&&!slot.contains(event.relatedTarget))slot.firstElementChild.style.removeProperty('transform');});
 reducedMotion.addEventListener('change',()=>setModelView(modelView));
 
-async function loadModels(append=false){
-  const params=new URLSearchParams({q:new FormData($('search-form')).get('q'),deleted:$('include-deleted').checked});
-  if(append&&nextCursor)params.set('after',nextCursor);
-  const result=await request(`/admin/api/assets?${params}`);
-  if(!append)models=[];
-  const seen=new Set(models.map(model=>model.asset_id));
-  for(const model of result.entries)if(!seen.has(model.asset_id)){models.push(model);seen.add(model.asset_id);}
-  nextCursor=result.next_cursor;
-  renderModels();
-  $('next-models').hidden=!result.has_more;
-  $('model-count').textContent=`已加载 ${models.length} 个模型${result.has_more?' · 还有更多':''}`;
+let modelPage=1,accountPage=1,auditPage=1;
+const paging={models:{page:1,size:24,total:0},accounts:{page:1,size:24,total:0},audit:{page:1,size:25,total:0}};
+const loadSerial={models:0,accounts:0,audit:0};
+function renderPagination(kind,result){
+  const state=paging[kind];state.page=result.page;state.size=result.page_size;state.total=result.total;
+  const pages=Math.max(1,Math.ceil(state.total/state.size));
+  for(const root of document.querySelectorAll(`[data-pagination="${kind}"]`)){
+    root.className='pagination';root.replaceChildren();
+    const go=page=>{const fn={models:loadModels,accounts:loadAccounts,audit:loadAudit}[kind];return fn(page);};
+    const previous=action('上一页',()=>go(state.page-1));previous.disabled=state.page<=1;
+    const next=action('下一页',()=>go(state.page+1));next.disabled=state.page>=pages;
+    const label=node('span',`第 ${state.page} / ${pages} 页 · 共 ${state.total} 项`,'page-summary');
+    const size=node('select');size.setAttribute('aria-label','每页显示数量');options(size,[...[24,48,80].map(n=>[String(n),`${n} 项 / 页`]),...(kind==='audit'?[['25','25 项 / 页']]:[])],String(state.size));
+    size.addEventListener('change',()=>{state.size=Number(size.value);busy(size,()=>go(1));});
+    const jump=node('form',undefined,'page-jump'),input=node('input');input.type='number';input.min=1;input.max=pages;input.value=state.page;input.setAttribute('aria-label','跳转页码');const submit=node('button','跳转');submit.type='submit';jump.append(input,submit);jump.addEventListener('submit',e=>{e.preventDefault();if(input.checkValidity())busy(submit,()=>go(Number(input.value)));});
+    root.append(previous,label,next,size,jump);
+  }
+}
+async function loadModels(page=1){
+  const serial=++loadSerial.models;
+  const params=new URLSearchParams({q:new FormData($('search-form')).get('q'),deleted:$('include-deleted').checked,page,page_size:paging.models.size});
+  const result=await request(`/admin/api/assets?${params}`);if(serial!==loadSerial.models)return;
+  if(page>1&&!result.entries.length&&result.total)return loadModels(Math.max(1,Math.ceil(result.total/result.page_size)));
+  models=result.entries;modelPage=result.page;nextCursor=result.next_cursor;renderModels();renderPagination('models',result);
+  $('model-count').textContent=`本页 ${models.length} 个 · 共 ${result.total} 个模型`;
 }
 
 function syncSelection(){
@@ -168,15 +183,15 @@ function renderModels(){
   for(const model of models){
     const slot=node('div',undefined,'model-slot'), card=node('article',undefined,`model-card${model.deleted?' deleted':''}`);card.dataset.asset=model.asset_id;card.setAttribute('aria-label',model.name);
     const visual=node('div',undefined,'model-visual'), pick=node('input');pick.type='checkbox';pick.setAttribute('aria-label',`选择 ${model.name}`);pick.className='model-pick';pick.addEventListener('change',()=>{if(pick.checked)selectedModels.add(model.asset_id);else selectedModels.delete(model.asset_id);syncSelection();});
-    visual.append(pick,icon('box'),node('span',(model.format||'MODEL').toUpperCase(),'format-tag'));
+    visual.append(pick,...(modelView==='cards'?[]:[icon('box')]),node('span',(model.format||'MODEL').toUpperCase(),'format-tag'));
     const body=node('div',undefined,'model-body'), title=action(model.name,()=>showModelDetail(model));title.className='model-name';title.title=`查看 ${model.name} 的详情`;body.append(title);
     const status=node('div',undefined,'model-status'), known=Object.hasOwn(statusNames,model.moderation)?model.moderation:'UNKNOWN';
     status.append(node('span',statusNames[known],`badge status-${known}`));if(model.deleted)status.append(node('span','已删除','badge deleted-label'));
     else{const visibility=node('span',undefined,'visibility');visibility.append(icon(model.visibility==='PUBLIC'?'globe':'lock-keyhole'));visibility.title=model.visibility==='PUBLIC'?'公开':'私有';visibility.setAttribute('aria-label',visibility.title);status.append(visibility);}
-    const meta=node('div',undefined,'model-meta'), owner=node('span',model.owner_account_id,'model-owner');owner.title=`所有者：${model.owner_account_id}`;meta.append(owner,node('span',bytes(model.byte_length)));body.append(status,meta);
+    const meta=node('div',undefined,'model-meta'), owner=node('span',model.owner_account_id,'model-owner');owner.title=`所有者：${model.owner_account_id}`;const size=node('span',bytes(model.byte_length));size.title=`${model.byte_length} 字节（原始文件）`;meta.append(owner,size);body.append(status,meta);
     card.append(visual,body);slot.append(card);root.append(slot);
   }
-  $('model-empty').hidden=models.length>0;syncSelection();
+  $('model-empty').hidden=models.length>0;syncSelection();if(modelView==='cards')SPMPreview.mount(models.map((model,i)=>({model,visual:root.children[i].querySelector('.model-visual')})),request);else SPMPreview.clear();
 }
 
 function showModelDetail(model){
@@ -184,7 +199,8 @@ function showModelDetail(model){
   const metadata=node('dl');for(const [label,value]of [['模型 ID',model.asset_id],['所有者',model.owner_account_id],['格式',(model.format||'').toUpperCase()],['大小',bytes(model.byte_length)],['版本',`v${model.revision}`],['可见性',model.visibility==='PUBLIC'?'公开':'私有'],['内容识别',statusNames[model.moderation]||model.moderation],['人工标记',model.manual_status?(statusNames[model.manual_status]||model.manual_status):'无'],['状态',model.deleted?'已删除':'正常']]){const row=node('div');row.append(node('dt',label),node('dd',value));metadata.append(row);}root.append(metadata,node('p',model.reason||'尚无识别结果','detail-reason'));
   if(model.scan?.textures_scanned)root.append(node('p',`已检测 ${model.scan.textures_scanned} 张贴图`,'small muted'));
   const actions=node('div',undefined,'model-actions'), path=`/admin/api/assets/${encodeURIComponent(model.asset_id)}`;
-  const update=async(action)=>{await action();$('model-detail').close();await loadModels();};
+  actions.append(action('导出原始模型',()=>download(`${path}/export`),'file-box'));
+  const update=async(action)=>{await action();$('model-detail').close();await loadModels(modelPage);};
   if(model.deleted)actions.append(action('恢复模型',()=>update(()=>request(`${path}/restore`,{method:'POST'})),'rotate-ccw'));
   else{
     actions.append(action(model.visibility==='PUBLIC'?'设为私有':'设为公开',()=>update(()=>request(`${path}/visibility`,{method:'PUT',json:{visibility:model.visibility==='PUBLIC'?'PRIVATE':'PUBLIC'}})),model.visibility==='PUBLIC'?'lock-keyhole':'globe'));
@@ -269,12 +285,12 @@ function renderConfig(){
     root.append(section);
   }
   const advanced=node('details',undefined,'panel advanced-settings');advanced.id='advanced-settings';advanced.append(node('summary','高级设置 · 识别服务连接、客户端功能、存储与网络'),node('p','首次接入贴图识别时，请配置 NudeNet 服务地址与 YSMParser 路径。其他参数通常保留默认值。','setting-description'));
-  for(const group of ['moderation','features','instance','storage','auth','limits','retention','logging','web_ui']){
+  for(const group of ['moderation','features','instance','storage','auth','limits','retention','logging','web_ui','performance','updates']){
     const fields=Object.keys(configResponse.schema.properties[group].properties).filter(key=>!used.has(`${group}.${key}`));if(!fields.length)continue;
     const section=node('section',undefined,'advanced-group');section.append(node('h3',group==='moderation'?'贴图识别服务（NudeNet）':groups[group]));const grid=node('div',undefined,'config-grid');
     for(const key of fields){const [scale,unit]=settingUnits[key]||[1,''];grid.append(configField(group,key,null,null,scale,unit));}section.append(grid);advanced.append(section);
   }
-  root.append(advanced);$('raw-config').value=JSON.stringify(formConfig,null,2);
+  root.append(advanced);wirePerformance();filterSettings();$('raw-config').value=JSON.stringify(formConfig,null,2);
 }
 function readConfig(){
   const copy=structuredClone(formConfig);
@@ -302,11 +318,28 @@ function readConfig(){
 $('reload-settings').addEventListener('click',()=>busy($('reload-settings'),()=>loadSettings()));$('apply-raw').addEventListener('click',()=>{try{const parsed=JSON.parse($('raw-config').value);if(!parsed||Array.isArray(parsed)||typeof parsed!=='object')throw new Error('完整配置必须是 JSON 对象');formConfig=merge(defaults(configResponse.schema),parsed);renderConfig();notice('JSON 已应用到表单，点击保存后生效。');}catch(e){notice(e.message,true);}});
 $('settings-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,async()=>{const config=readConfig();if(!config.web_ui.enabled&&!confirm('关闭 WebUI 后需在服务器上修改 JSON 才能重新开启。继续保存？'))return;await request('/admin/api/config',{method:'PUT',json:{config,revision:configResponse.revision}});notice('配置已保存。运行时设置已生效；监听地址、存储、凭据和日志更改需重启。');if(!config.web_ui.enabled){session=null;$('console').hidden=true;$('login').hidden=false;return;}await loadSettings();});});
 $('account-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,async()=>{await request('/admin/api/accounts',{method:'POST',json:Object.fromEntries(new FormData(e.target))});e.target.reset();notice('账号已创建，请自行分发账号和初始密码。');await loadAccounts();});});
-async function loadAccounts(append=false){const params=new URLSearchParams({q:new FormData($('account-search-form')).get('q')});if(append&&nextAccountCursor)params.set('after',nextAccountCursor);const result=await request(`/admin/api/accounts?${params}`);if(!append)$('account-rows').replaceChildren();for(const account of result.entries){const row=node('tr');cell(row,account.account_id);cell(row,roleNames[account.role]);cell(row,account.disabled?'已停用':'正常');cell(row,account.created_at);const actions=cell(row);if(account.role!=='owner'){const path=`/admin/api/accounts/${encodeURIComponent(account.account_id)}`;const change=async(body)=>{await request(path,{method:'PUT',json:{role:account.role,disabled:account.disabled,...body}});await loadAccounts();};actions.append(action(account.disabled?'启用':'停用',()=>change({disabled:!account.disabled})),action(account.role==='admin'?'撤销管理权':'授权管理员',()=>change({role:account.role==='admin'?'member':'admin'})),action('重置密码',async()=>{const password=prompt('输入新密码（至少 8 个字符）。已有会话将失效。');if(password!==null)await change({password});}));}else{actions.append(action('设置服主密码',async()=>{const password=prompt('为服主设置登录密码（至少 8 个字符）。已有密码会话将失效，初始令牌仍可使用。');if(password===null)return;await request(`/admin/api/accounts/${encodeURIComponent(account.account_id)}`,{method:'PUT',json:{role:'owner',disabled:false,password}});notice('服主密码已设置，可使用账号和密码登录。');}));}$('account-rows').append(row);}nextAccountCursor=result.next_cursor;$('next-accounts').hidden=!result.has_more;}
-async function loadAudit(){const result=await request('/admin/api/audit');$('audit-rows').replaceChildren();for(const event of result.entries){const row=node('tr');cell(row,event.created_at);cell(row,event.actor);cell(row,event.action);const subject=cell(row,event.subject||'—');subject.title=JSON.stringify(event.details);$('audit-rows').append(row);}}
-$('refresh-audit').addEventListener('click',()=>busy($('refresh-audit'),()=>loadAudit()));
-
-$('account-search-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,()=>loadAccounts());});$('refresh-accounts').addEventListener('click',()=>busy($('refresh-accounts'),()=>loadAccounts()));$('next-accounts').addEventListener('click',()=>busy($('next-accounts'),()=>loadAccounts(true)));
+async function loadAccounts(page=1){
+  const serial=++loadSerial.accounts;const params=new URLSearchParams({q:new FormData($('account-search-form')).get('q'),page,page_size:paging.accounts.size});
+  const result=await request(`/admin/api/accounts?${params}`);if(serial!==loadSerial.accounts)return;
+  if(page>1&&!result.entries.length&&result.total)return loadAccounts(Math.max(1,Math.ceil(result.total/result.page_size)));
+  accountPage=result.page;const root=$('account-rows');root.replaceChildren();
+  for(const account of result.entries){const card=node('article',undefined,`account-card${account.role==='owner'?' owner-card':''}`);const title=node('h2',account.account_id);card.append(title,node('span',roleNames[account.role],'badge'),node('p',account.disabled?'已停用':'正常','small muted'),node('p',`创建于 ${account.created_at}`,'small muted'));const actions=node('div',undefined,'account-actions');
+    const path=`/admin/api/accounts/${encodeURIComponent(account.account_id)}`;const change=async(body)=>{await request(path,{method:'PUT',json:{role:account.role,disabled:account.disabled,...body}});await loadAccounts(accountPage);};
+    if(account.role!=='owner')actions.append(action(account.disabled?'启用':'停用',()=>change({disabled:!account.disabled})),action(account.role==='admin'?'撤销管理权':'授权管理员',()=>change({role:account.role==='admin'?'member':'admin'})),action('重置密码',async()=>{const password=prompt('输入新密码（至少 8 个字符）。已有会话将失效。');if(password!==null)await change({password});}));
+    else actions.append(action('设置服主密码',async()=>{const password=prompt('为服主设置登录密码（至少 8 个字符）。已有密码会话将失效，初始令牌仍可使用。');if(password!==null){await change({role:'owner',disabled:false,password});notice('服主密码已设置，可使用账号和密码登录。');}}));
+    card.append(actions);root.append(card);
+  }
+  $('account-empty').hidden=result.entries.length>0;renderPagination('accounts',result);
+}
+async function loadAudit(page=1){
+  const serial=++loadSerial.audit;const params=new URLSearchParams({q:new FormData($('audit-search-form')).get('q'),page,page_size:paging.audit.size});const result=await request(`/admin/api/audit?${params}`);if(serial!==loadSerial.audit)return;auditPage=result.page;
+  $('audit-rows').replaceChildren();for(const event of result.entries){const row=node('tr');cell(row,event.created_at);cell(row,event.actor);cell(row,event.action);const subject=cell(row,event.subject||'—');subject.title=JSON.stringify(event.details);$('audit-rows').append(row);}
+  $('audit-empty').hidden=result.entries.length>0;renderPagination('audit',result);
+}
+$('refresh-audit').addEventListener('click',()=>busy($('refresh-audit'),()=>loadAudit(auditPage)));
+$('audit-search-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,()=>loadAudit());});
+$('export-audit').addEventListener('click',()=>busy($('export-audit'),()=>download('/admin/api/exports/audit?'+new URLSearchParams({q:new FormData($('audit-search-form')).get('q')}))));
+$('account-search-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,()=>loadAccounts());});$('refresh-accounts').addEventListener('click',()=>busy($('refresh-accounts'),()=>loadAccounts(accountPage)));
 
 Object.assign(labels,{microsoft_client_id:'微软登录应用 Client ID',microsoft_client_secret_file:'微软应用密钥文件路径',microsoft_redirect_uri:'微软登录回调地址'});
 Object.assign(hints,{microsoft_client_id:'在 Microsoft Entra 注册支持个人 Microsoft 账号的 Web 应用后，填写应用程序（客户端）ID。',microsoft_client_secret_file:'服务器上保存客户端密码“值”的文本文件路径，密钥不会发送到浏览器。相对路径以 Cloud 配置文件目录为准。',microsoft_redirect_uri:'与微软应用登记的 Web 回调地址完全一致，以 /admin/oauth/microsoft/callback 结尾；本机可使用 http://localhost:18822/admin/oauth/microsoft/callback。'});
@@ -325,7 +358,7 @@ async function loadProfile(){
   const verified=entries.filter(identity=>identity.verification_status==='VERIFIED');
   if(!verified.length)root.append(node('p','尚未绑定已验证的游戏身份。','small muted'));
   for(const identity of verified){const row=node('div',undefined,'bound-identity');row.append(icon('shield-check'),node('strong',identity.display_name),node('span',identity.identity,'small muted'));root.append(row);}
-  await loadAuthProviders();
+  filterIdentities();await loadAuthProviders();
 }
 $('refresh-profile').addEventListener('click',()=>busy($('refresh-profile'),()=>loadProfile()));
 $('self-cloud-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,async()=>{await request('/account/api/link-cloud',{method:'POST',json:Object.fromEntries(new FormData(e.target))});e.target.reset();await loadProfile();notice('已验证并关联你自己的 Cloud 账号，管理权限保持原样。');});});
@@ -358,4 +391,27 @@ async function finishOAuth(){
   if(params.has('oauth_error')){notice(params.get('oauth_message')||('微软登录未完成：'+params.get('oauth_error')+'。请检查应用配置或重新授权。'),true);return;}
   if(params.has('oauth')){const result=await request('/admin/oauth/microsoft/redeem',{method:'POST',json:{ticket:params.get('oauth')}});await enter(result);if(result.linked_identity){await show('profile');notice('微软正版身份已验证并绑定。');}}
 }
+
+Object.assign(groups,{performance:'性能与并发',updates:'服务更新'});
+Object.assign(labels,{preset:'性能预设',upload_concurrency:'上传并发',model_processing_concurrency:'扫描与解码并发',auto_update:'自动更新',check_interval_hours:'更新检查间隔（小时）'});
+Object.assign(hints,{preset:'低配 2 / 1；中配 4 / 2（默认）；高配 8 / 4；自定义可分别设置。',upload_concurrency:'同时上传的文件数量；0 表示不限制。',model_processing_concurrency:'模型扫描、解码及预览共同使用此限制；0 表示不限制。',auto_update:'开启后定期检查正式版本。原生部署先校验下载包并备份，再自动安装和重启；容器请由部署平台更新。',check_interval_hours:'自动更新启用后，每隔指定小时检查正式版本。'});
+settingSections.splice(1,0,{title:'性能与并发',description:'选择服务器性能档位，或自定义并发。0 表示该项不限制；0 / 0 表示两项均不限制。',fields:[['performance','preset'],['performance','upload_concurrency'],['performance','model_processing_concurrency']]});
+settingSections.push({title:'服务更新',description:'默认关闭自动更新。开启后原生部署会在备份和校验成功后自动安装并重启。',fields:[['updates','auto_update'],['updates','check_interval_hours']]});
+function wirePerformance(){const preset=document.querySelector('[data-group="performance"][data-key="preset"]');if(!preset)return;const uploads=document.querySelector('[data-key="upload_concurrency"]'),processing=document.querySelector('[data-key="model_processing_concurrency"]');for(const option of preset.options)option.textContent={low:'低配 · 2 / 1',medium:'中配 · 4 / 2（默认）',high:'高配 · 8 / 4',custom:'自定义'}[option.value];const apply=()=>{const values={low:[2,1],medium:[4,2],high:[8,4]}[preset.value];if(values){uploads.value=values[0];processing.value=values[1];}uploads.readOnly=processing.readOnly=!!values;};preset.addEventListener('change',apply);apply();}
+function filterSettings(){const q=$('settings-search').value.trim().toLowerCase();for(const section of document.querySelectorAll('#config-fields section')){let count=0;for(const label of section.querySelectorAll('.config-grid>label')){const input=label.querySelector('[data-key]');const match=(label.textContent+' '+input?.dataset.key).toLowerCase().includes(q);label.hidden=!match;if(match)count++;}section.hidden=count===0;}const advanced=$('advanced-settings');if(advanced){advanced.hidden=![...advanced.querySelectorAll('section')].some(s=>!s.hidden);if(q&&!advanced.hidden)advanced.open=true;}}
+$('settings-search').addEventListener('input',filterSettings);
+function filterIdentities(){const q=$('identity-search').value.trim().toLowerCase();for(const row of $('bound-game-identities').querySelectorAll('.bound-identity'))row.hidden=!row.textContent.toLowerCase().includes(q);}
+$('identity-search').addEventListener('input',filterIdentities);
+async function download(path,retry=true){
+  const response=await fetch(path,{headers:{Authorization:`Bearer ${session.access_token}`}});
+  if(response.status===401&&retry&&session.refresh_token){await request('/account/api/profile');return download(path,false);}
+  if(!response.ok){let detail;try{detail=await response.json();}catch{}throw new Error(detail?.message||`导出失败：HTTP ${response.status}`);}
+  const blob=await response.blob(),url=URL.createObjectURL(blob),link=node('a');link.href=url;link.download=response.headers.get('content-disposition')?.match(/filename="([^"]+)"/)?.[1]||'spm-cloud-export';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);notice('导出已完成，文件已下载。');
+}
+let latestRelease=null;
+async function loadMaintenance(){const result=await request('/admin/api/maintenance');$('update-status').textContent=`当前版本 ${result.version}`;$('update-mode').textContent=`自动更新：${result.updates.auto_update?'已开启':'已关闭'} · 检查间隔 ${result.updates.check_interval_hours} 小时。${result.native_update_supported?'原生部署支持自动安装，更新前生成数据库与模型备份。':'当前为容器部署，请通过部署平台更新镜像。'}`;latestRelease=null;$('install-update').disabled=true;$('release-link').hidden=true;}
+$('check-update').addEventListener('click',()=>busy($('check-update'),async()=>{latestRelease=await request('/admin/api/updates/check',{method:'POST'});$('update-status').textContent=latestRelease.update_available?`当前 ${latestRelease.current_version} · 发现新版本 ${latestRelease.latest_version}`:`当前 ${latestRelease.current_version} · 已是最新正式版本`;$('install-update').disabled=!latestRelease.update_available||!latestRelease.native_update_supported;const link=$('release-link');if(typeof latestRelease.release_url==='string'&&latestRelease.release_url.startsWith('https://github.com/sdf123098/spm-cloud/releases/')){link.href=latestRelease.release_url;link.hidden=false;}}));
+$('install-update').addEventListener('click',()=>busy($('install-update'),async()=>{if(!confirm(`安装 ${latestRelease?.latest_version} 并重启 Cloud？更新前将自动备份数据。`))return;const result=await request('/admin/api/updates/install',{method:'POST'});notice(result.message);$('update-status').textContent=result.message;}));
+document.querySelectorAll('[data-export]').forEach(button=>button.addEventListener('click',()=>busy(button,()=>download(`/admin/api/exports/${button.dataset.export}`))));
+
 loadAuthProviders().then(()=>finishOAuth()).catch(e=>notice(e.message,true));

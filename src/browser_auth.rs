@@ -1,4 +1,5 @@
 //! Browser game authentication. Provider tokens/passwords never reach persistent sessions.
+use crate::database::Connection;
 use crate::{CloudStore, account_links::profile_account, api::AppState, error::CloudError};
 use axum::{
     Json,
@@ -7,7 +8,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

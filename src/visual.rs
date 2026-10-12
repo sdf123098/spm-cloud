@@ -1,4 +1,5 @@
 //! Explicit-scope display metadata. This module never writes Minecraft game state.
+use crate::database::Connection;
 use crate::{
     CloudStore,
     api::{AppState, authenticate},
@@ -10,7 +11,7 @@ use axum::{
     extract::{Path, State},
     http::HeaderMap,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;

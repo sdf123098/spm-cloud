@@ -4,10 +4,15 @@ use crate::error::CloudError;
 
 #[derive(Clone)]
 pub struct CloudConfig {
+    pub performance: crate::performance::Performance,
+    pub updates: crate::maintenance::UpdateSettings,
+    pub cache: crate::catalog_cache::CacheSettings,
     pub instance_id: String,
     pub origin: String,
     pub bind_addr: SocketAddr,
     pub database_path: PathBuf,
+    pub database_backend: String,
+    pub mysql_url: Option<String>,
     pub object_dir: PathBuf,
     pub access_token: Option<String>,
     pub bootstrap_account_id: String,
@@ -70,6 +75,8 @@ impl std::fmt::Debug for CloudConfig {
             .field("origin", &self.origin)
             .field("bind_addr", &self.bind_addr)
             .field("database_path", &self.database_path)
+            .field("database_backend", &self.database_backend)
+            .field("mysql_url", &self.mysql_url.as_ref().map(|_| "[REDACTED]"))
             .field("object_dir", &self.object_dir)
             .field(
                 "access_token",

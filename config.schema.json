@@ -60,6 +60,23 @@
           "default": null,
           "minLength": 1,
           "description": "Relative to the JSON configuration file's directory. When omitted/null, derived from data_dir."
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "sqlite",
+            "mysql"
+          ],
+          "default": "sqlite",
+          "description": "持久化数据库；更改需要重启服务，切换前先备份并迁移数据"
+        },
+        "mysql_url_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "保存 MySQL URL 的服务端文件；数据库需提前创建"
         }
       }
     },
@@ -373,6 +390,95 @@
           ],
           "default": null,
           "description": "Optional YSMParser executable path for encrypted .ysm textures; relative to the JSON config directory. Not bundled."
+        }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preset": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "custom"
+          ],
+          "default": "medium"
+        },
+        "upload_concurrency": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32,
+          "default": 4
+        },
+        "model_processing_concurrency": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16,
+          "default": 2
+        }
+      }
+    },
+    "updates": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auto_update": {
+          "type": "boolean",
+          "default": false
+        },
+        "check_interval_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 168,
+          "default": 24
+        }
+      }
+    },
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "memory",
+            "redis",
+            "none"
+          ],
+          "default": "memory",
+          "description": "目录分页缓存方式"
+        },
+        "redis_url_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "保存 Redis URL 的服务端文件，URL 不写入日志"
+        },
+        "ttl_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 30,
+          "description": "分页缓存有效期（秒）"
+        },
+        "max_pages": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096,
+          "default": 256,
+          "description": "缓存最多保留的页数"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 5000,
+          "default": 300,
+          "description": "Redis 超时（毫秒），失败回退本地缓存"
         }
       }
     }

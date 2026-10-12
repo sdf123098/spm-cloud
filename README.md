@@ -1,128 +1,290 @@
-# SPM Cloud 2.2 Guide
+# SPM Cloud: installation, use, and operations
 
-**SPM Cloud is the self-hosted backend for the SparkleMorpher mod.** The owner runs the service and manages models. Players add the same Cloud address in the mod to share public models, appearances, and actions.
+SPM Cloud is a self-hosted service used by the SparkleMorpher mod. The server owner runs the service and manages content. Players add the same Cloud address in the mod to browse and use models, appearances, and actions they are allowed to access. The service includes HTTPS APIs, a real-time WebSocket, and an embedded administration website; no separate web frontend is required.
 
-> [中文](README_zh.md) | **English**
->
-> If the “Initial access token” box is blank, that is normal. The token is saved on the Cloud server. Copy it from the server file and paste it into the page.
+> [简体中文](README_zh.md) | **English**
 
-## Three credentials
+## 1. Choose a deployment
 
-- **Initial access token:** the owner’s first sign-in credential for the admin page. `spm-cloud --init-config` creates it in a separate text file. It is not a Minecraft token or player password.
-- **Cloud account and password:** used on one Cloud instance to sign in and own private models. Accounts are separate across instances.
-- **Game account credentials:** used to verify a Minecraft or owner-enabled third-party identity. Enter credentials only on the appropriate official or third-party login page.
+### Docker Compose (recommended)
 
-The initial token is not sent to your browser. A remote WebUI cannot read files on the server. Sign in to the server, copy the token from its file, and paste it into the page.
+Use a Linux host with Docker Engine, the Compose plugin, a domain pointing to the host, and inbound TCP ports 80 and 443. The repository includes Caddy HTTPS proxy and persistent data-volume templates:
 
-## 1. Install Cloud
+    git clone https://github.com/sdf123098/spm-cloud.git
+    cd spm-cloud
+    mkdir -p deploy/runtime
+    docker compose -f docker-compose.json.yml build spm-cloud
+    sudo chown 10001:10001 deploy/runtime
+    sudo docker run --rm --user 10001:10001 \
+      -v "$PWD/deploy/runtime:/etc/spm-cloud" spm-cloud:local \
+      --init-config /etc/spm-cloud/config.json
 
-### Recommended: Docker Compose on Linux
+Initialization creates deploy/runtime/config.json and a separate secrets/bootstrap-token.txt. Set the public HTTPS origin and a unique instance ID in the JSON file. Replace the example domain in Caddyfile.compose with the same domain, then start and inspect the services:
 
-You need a Linux server, a domain pointing to it, inbound TCP ports 80/443, Docker Engine, and the Compose plugin:
+    sudo docker compose -f docker-compose.json.yml up -d
+    sudo docker compose -f docker-compose.json.yml ps
+    sudo docker compose -f docker-compose.json.yml logs -f spm-cloud
 
-```bash
-git clone https://github.com/sdf123098/spm-cloud.git
-cd spm-cloud
-mkdir -p deploy/runtime
-docker compose -f docker-compose.json.yml build spm-cloud
-sudo chown 10001:10001 deploy/runtime
-sudo docker run --rm --user 10001:10001 \
-  -v "$PWD/deploy/runtime:/etc/spm-cloud" spm-cloud:local \
-  --init-config /etc/spm-cloud/config.json
-```
+Players use the HTTPS root address, such as https://cloud.example.com. Do not expose backend port 8787 directly to the internet. Do not run docker compose down -v for routine upgrades; it deletes named volumes.
 
-This creates `deploy/runtime/config.json` and `deploy/runtime/secrets/bootstrap-token.txt` in the repository directory. Edit the JSON, replace its example domain with your HTTPS domain, and set a unique instance ID. Replace `cloud.example.com` in `Caddyfile.compose` with the same domain, then start:
+### Native Linux
 
-```bash
-sudo nano deploy/runtime/config.json
-sudo nano Caddyfile.compose
-sudo docker compose -f docker-compose.json.yml up -d
-```
+On a systemd host, download the shell installer from the latest GitHub Release and install to /usr/local:
 
-Check status with `sudo docker compose -f docker-compose.json.yml ps`. Give players the HTTPS root address, such as `https://cloud.example.com`, without a port, `/admin/`, or `/v1`. Do not use `docker compose down -v` for routine upgrades; it deletes volumes.
+    curl --fail --location --proto '=https' --tlsv1.2 \
+      https://github.com/sdf123098/spm-cloud/releases/latest/download/spm-cloud-installer.sh \
+      --output /tmp/spm-cloud-installer.sh
+    sudo env SPM_CLOUD_INSTALL_DIR=/usr/local sh /tmp/spm-cloud-installer.sh
+    sudo useradd --system --home /var/lib/spm-cloud --create-home --shell /usr/sbin/nologin spm-cloud
+    sudo install -d -o spm-cloud -g spm-cloud -m 750 /var/lib/spm-cloud/data /var/lib/spm-cloud/objects
+    sudo install -d -o spm-cloud -g spm-cloud -m 750 /etc/spm-cloud
+    sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.json
 
-### Native Linux or Windows
+Initialization creates configuration and token files under /etc/spm-cloud. Set storage.data_dir, storage.database_path, and storage.object_dir in config.json to persistent paths under /var/lib/spm-cloud. Review deploy/spm-cloud-json.service, then install and start it:
 
-Follow the [deployment guide](deploy/ADMIN_JSON.md) for complete instructions. The Linux default config is `/etc/spm-cloud/config.json`; initialize it as the service account:
+    sudo cp deploy/spm-cloud-json.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now spm-cloud-json.service
+    sudo systemctl status spm-cloud-json.service
+    sudo journalctl -u spm-cloud-json.service -f
 
-```bash
-sudo -u spm-cloud /usr/local/bin/spm-cloud --init-config /etc/spm-cloud/config.json
-```
+The HTTPS reverse proxy should forward to 127.0.0.1:8787.
 
-On Windows, install the prebuilt binary with the PowerShell installer and initialize in PowerShell (example data path `C:\SPMCloud`):
+### Native Windows
 
-```powershell
-$env:SPM_CLOUD_INSTALL_DIR = "$env:USERPROFILE\.cargo"
-irm https://github.com/sdf123098/spm-cloud/releases/latest/download/spm-cloud-installer.ps1 | iex
-$exe = "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
-$config = "C:\SPMCloud\config.json"
-New-Item -ItemType Directory -Force C:\SPMCloud | Out-Null
-Set-Location C:\SPMCloud
-& $exe --init-config $config
-```
+In PowerShell, use the official installer to place the program in the current user's Cargo bin directory. Initialize the service in a separate data directory:
 
-The example token path is `C:\SPMCloud\secrets\bootstrap-token.txt`. Edit the domain, instance ID, and storage paths, then run `& $exe --config C:\SPMCloud\config.json`. For a persistent service, automatic startup, and HTTPS proxy, see the [deployment guide](deploy/ADMIN_JSON.md). Do not expose backend port 8787 to the internet.
+    $env:SPM_CLOUD_INSTALL_DIR = "$env:USERPROFILE\.cargo"
+    irm https://github.com/sdf123098/spm-cloud/releases/latest/download/spm-cloud-installer.ps1 | iex
+    $exe = "$env:USERPROFILE\.cargo\bin\spm-cloud.exe"
+    New-Item -ItemType Directory -Force C:\SPMCloud | Out-Null
+    Set-Location C:\SPMCloud
+    & $exe --init-config C:\SPMCloud\config.json
 
-## 2. Find and use the initial token
+Set the public HTTPS origin, instance ID, database, and object paths, then start:
 
-The token file is plain text with one long line beginning `spm_bootstrap_`.
+    & $exe --config C:\SPMCloud\config.json
 
-| Deployment | Default token file | How to read it |
-|---|---|---|
-| Docker Compose | Repository directory: `deploy/runtime/secrets/bootstrap-token.txt` | From the repository directory, run `sudo cat deploy/runtime/secrets/bootstrap-token.txt` |
-| Native Linux | `/etc/spm-cloud/secrets/bootstrap-token.txt` | Run `sudo cat /etc/spm-cloud/secrets/bootstrap-token.txt` |
-| Windows example | `C:\SPMCloud\secrets\bootstrap-token.txt` | PowerShell: `Get-Content 'C:\SPMCloud\secrets\bootstrap-token.txt'` |
-| Prebuilt package launcher | `secrets/bootstrap-token.txt` under the config directory | Open the text file |
+For production, configure a Windows service or another managed startup method and place an HTTPS reverse proxy in front of Cloud. Restrict access to the token, config, database, and model objects to the service account and owner.
 
-With a custom config path, the default token remains in `secrets/bootstrap-token.txt` beside that config. If `auth.bootstrap_access_token_file` was changed, use that path; relative paths start from the config directory. Inside Docker, `/etc/spm-cloud/secrets/bootstrap-token.txt` maps to `secrets/bootstrap-token.txt` in the host-mounted config directory.
+## 2. Sign in and manage account access
 
-1. Open `https://your-domain/admin/`.
-2. Copy the complete line from the token file into “Initial access token” and sign in.
-3. Open “Accounts & permissions.” On the owner account, choose “Set owner password.”
-4. Later, sign in with the owner account ID and password. The initial token remains valid, so keep protecting it.
+The initial access token is the owner's first and highest-privilege credential for /admin/. It is stored in a file on the server, is not sent to the browser, and is not a Minecraft password. By default, find it at secrets/bootstrap-token.txt beside the config file. If auth.bootstrap_access_token_file is customized, use that path.
 
-The token is stored in a server file; initialization does not print it, and the remote page cannot fill it in. Do not put it in JSON, command-line arguments, chat, screenshots, or public logs. Linux initialization restricts file permissions. On Windows, limit access to the service account and owner. Include config and token in a protected offline backup.
+1. Read the token file on the server and copy its complete single line. Use sudo cat on Linux or Get-Content in PowerShell.
+2. Open https://your-domain/admin/ and paste the token into the sign-in form.
+3. Under “Accounts & permissions,” set a password for the owner account.
+4. Use the owner account ID and password for later sign-ins. Keep the initial token protected for recovery.
+
+Never put the token in source control, screenshots, chat, command-line arguments, or public logs. If it is exposed, rotate it from the admin console. If you cannot sign in, stop the service and restore trusted credential backups.
+
+The owner creates administrator accounts and assigns their access. Admins can manage models and view settings/audit records, but cannot create admins or change server configuration. Player self-registration follows the owner's setting. Disabling an account, changing its role, or resetting credentials invalidates affected sessions.
+
+Players add the Cloud root address in a compatible version of the mod, select the instance, then register or sign in. At /account/, players can manage links for accounts they own; they should not give game passwords to the server owner. Microsoft web sign-in requires the owner's Microsoft application and applicable Minecraft service approval. Until configured, use in-mod account linking or an enabled third-party Yggdrasil provider.
 
 ## 3. Use the WebUI
 
-The WebUI is built into Cloud; no separate website or Node.js install is needed.
+- The “Model library” supports search, server-side pages, grid and 3D cards, multi-select, and bulk actions. “All models” shows the accessible catalog; the owner is pinned first in the account grid.
+- Open a model name for details. Select models to change visibility, rescan, manually label, delete, or restore. Ordinary deletion is reversible; permanent cleanup is not. Back up before permanent cleanup.
+- Model cards show the original file size with B/KiB/MiB units. Minecraft previews face the front and support BBModel, Bedrock ZIP/YSM, and GLTF/GLB files with embedded resources. Encrypted YSM previews require YSMParser. GLTF/GLB previews do not access external network resources.
+- Settings, identity links, and audit records support search. Model search includes name, asset ID, owner, and format. Pages avoid loading the entire catalog at once.
+- “Maintenance & cleanup” checks stable releases and exports a consistent database/model backup, the full model library, the current process's most recent 2 MiB of logs, and all or filtered audit records. Full backups are owner-only. Follow the permission shown for each export.
 
-- `/admin/`: owner and administrators created and distributed by the owner.
-- `/account/`: players manage their own Cloud account and links.
+Uploads are public by default. A private model belongs to one Cloud account and is accessible only to its owner. Choose the correct account during upload. File selection happens on the operator's computer even when Cloud is remote; only selected files are uploaded.
 
-The owner can change settings, manage accounts, and manage models. The owner creates admin accounts and securely gives each person their account and initial password. Admins can manage models and view settings, but cannot change server config or create accounts. Regular players have no admin access. Password resets, account disablement, and role changes invalidate active sessions.
+### Content detection and blocking
 
-The sidebar stays in place while settings and model lists scroll independently with the mouse wheel. The model library supports search, pages, grid or 3D cards, multi-select, and bulk actions. Click a model name for details. Select models to change visibility, rescan, manually label, delete, or restore. Deletion can be reversed while the original file is retained; back up before permanent cleanup.
+Configure “Detection” and “Blocking” independently under “Models & content safety”:
 
-Settings group everyday options into “Models & content safety,” “Accounts & permissions,” “Service access,” and “Maintenance & cleanup.” Server paths, proxy IPs, and protocol details are advanced settings. Saving requires startup with `--config PATH` and write access to the config directory. Some options need a restart.
+- Detection reads supported model metadata and can use NudeNet to inspect readable textures. It labels content R18, clean, or unclassified.
+- Blocking hides detected R18 models from ordinary player listings, downloads, and use.
 
-The JSON editor validates before saving. If a bad config prevents startup, restore a backup and validate with `spm-cloud --config /path/to/config.json --check-config` (in Docker, run it through Compose). Do not run `--init-config` again on an existing instance; it will not overwrite files or reset passwords.
+Both are disabled by default. Detection creates labels but does not block content. Blocking has no detection result to act on unless detection is enabled. Rescan existing models after enabling detection. To start NudeNet with this repository's Docker deployment:
 
-Uploads are **public by default**. A private model belongs to a Cloud account and is available only to its owner; select the owner during upload. The picker supports multiple files. Even with remote Cloud, the picker opens on your computer, and only selected files are uploaded.
+    docker compose -f docker-compose.json.yml \
+      -f docker-compose.moderation.yml up -d
 
-### R18 detection and blocking are separate
+Then set the scanner URL to http://nudenet:8080/infer. Encrypted .ysm files also need YSMParser. Detection can miss or misclassify content; provide a manual review path. Whether to block unclassified files is a separate setting.
 
-Configure these independently under “Models & content safety”:
+## 4. Configuration, paths, and secrets
 
-- **Detection** checks model metadata and can optionally use NudeNet to inspect readable textures. It labels content R18, clean, or unclassified.
-- **Blocking** prevents R18 models from regular player listings, downloads, and use.
+Use JSON for new deployments. Create the starter config and token:
 
-Detection labels content but does not block it. Blocking alone has no detection result to act on. Both are off by default. Rescan existing models after enabling detection. Texture inspection needs a separate [NudeNet](https://github.com/notAI-tech/NudeNet) service. For this repository's Docker deployment, start it with `docker compose -f docker-compose.json.yml -f docker-compose.moderation.yml up -d`, then set the scanner URL to `http://nudenet:8080/infer` in settings. Encrypted `.ysm` files also need [YSMParser](https://github.com/OpenYSM/YSMParser). Detection can miss or misclassify content; manual review is available. You can separately block unclassified content. More settings are in the [admin deployment guide](deploy/ADMIN_JSON.md).
+    spm-cloud --init-config /path/to/config.json
 
-## 4. How players connect
+Validate without starting the service:
 
-Give players the HTTPS root address, for example `https://cloud.example.com`. They need a compatible SparkleMorpher version. In the mod, add the address, select the instance, and register or sign in. Players can link accounts they own at `/account/` without the owner doing it for them. Admin accounts are created and distributed by the owner. Microsoft web login requires the owner’s Microsoft application and Minecraft service approval. Until configured, use in-mod linking or an enabled third-party identity service.
+    spm-cloud --config /path/to/config.json --check-config
 
-## 5. Troubleshooting and recovery
+Print redacted effective settings and their sources:
 
-- **Blank token box or unauthenticated:** it is a sign-in form and does not read the server file. Read the token on the server and paste the full line. Check that you are on the right instance. If missing, check the actual `--config` path and `auth.bootstrap_access_token_file`; do not delete the database or rerun initialization.
-- **Forgot the owner password:** use the initial token to sign in and set a new password. If both are lost, stop the service and locate a secure backup. Do not delete or hand-edit the account database; follow the [deployment guide](deploy/ADMIN_JSON.md).
-- **Cannot save settings:** confirm startup uses `--config` and the service account can write the config directory. Admins cannot change config. Listener, storage, public origin, and logging changes need restart. If WebUI was disabled, re-enable it in server JSON.
-- **Site or certificate unavailable:** check DNS, inbound TCP 80/443, firewall, Caddy, and that the proxy domain matches the public origin. Port 8787 should only be reachable by the local proxy.
-- **502 or upload fails:** check Cloud health and proxy upstream. The default per-model limit is 128 MiB; the proxy must allow at least that much.
-- **Detection fails or models remain downloadable:** check detection and blocking separately, ensure Cloud can reach NudeNet, rescan old models, and verify players use the same instance.
-- **Deleted model or upgrade trouble:** ordinary deletions can be restored; permanent cleanup cannot be undone in the WebUI. Back up config (including token), database, model objects, and Docker volumes before upgrades. Do not use `docker compose down -v` for routine upgrades.
+    spm-cloud --config /path/to/config.json --print-effective-config
 
-## 6. Backups and more information
+When a JSON file is selected, it is authoritative and environment variables do not override its values. SPM_CLOUD_* variables are read only by the legacy environment-only startup mode. Relative paths in JSON resolve from the config file's directory; relative paths in legacy mode resolve from the process working directory. See config.example.json and config.schema.json for the editable template and complete field types.
 
-Before upgrading, back up the config directory, database, and model objects. Keep Docker named volumes. For native installs, stop Cloud before copying SQLite and its WAL files. Restore with a compatible version. The [admin deployment guide](deploy/ADMIN_JSON.md) covers permissions, proxies, scanning, upgrades, and rollback. Developers can see the [source and API](https://github.com/sdf123098/spm-cloud), [Compose config](docker-compose.json.yml), and [releases](https://github.com/sdf123098/spm-cloud/releases). License: MIT.
+| Setting | Purpose and default |
+|---|---|
+| instance.instance_id / origin / bind | Stable instance ID, public HTTPS root, and listen address. Changing the ID, origin, or listener requires a restart. |
+| storage.data_dir / database_path / object_dir | Database and model object locations. SQLite is stored under the data directory by default. Back up the database and objects together. |
+| auth.bootstrap_account_id | Owner account ID. |
+| auth.bootstrap_access_token_file | Server-side initial token file. Do not put the token itself in JSON. |
+| auth.bootstrap_password_hash_file | Optional Argon2id password-hash file; never put a plaintext password here. |
+| auth.allow_self_registration | Allow or refuse player self-registration. |
+| auth.identity_providers | Optional Yggdrasil providers. Use has_joined_url, or base_url plus session_path. Keep provider IDs stable. To disable an existing provider, keep its record and set enabled=false. |
+| limits.max_asset_bytes / max_message_bytes | Per-model and ordinary protocol message limits. Defaults are 128 MiB and 64 KiB. The reverse proxy upload limit must be large enough too. |
+| performance.preset | Low: 2 uploads / 1 model processor; medium: 4 / 2 (default); high: 8 / 4; or custom upload and scan/decode concurrency. Each custom value may be 0 for unlimited; 0 / 0 leaves both unlimited. Lowering a limit does not interrupt existing work. |
+| updates.auto_update / check_interval_hours | Automatic updates are disabled by default; checks default to every 24 hours. Container images are updated by the deployment platform. |
+| cache.backend | memory (default), redis, or none. If Redis is unavailable, the service falls back to bounded local memory. |
+| cache.ttl_seconds / max_pages / timeout_ms | Expiry, maximum cached pages, and Redis response timeout. |
+| moderation.* | Detection, blocking, scanner URL, thresholds, decode budgets, and YSMParser path. |
+| features.* / retention.* | Optional game capability switches and state retention. Enable only capabilities supported by deployed clients. |
+| logging.level / format | Log filter and text/JSON format. A restart is required. |
+| web_ui.enabled | Whether to expose the admin website. If disabled, re-enable it through server config. |
+
+The process checks a selected JSON file every two seconds. Valid runtime options apply in place; invalid edits leave the last valid settings active. Listen address, instance identity, public origin, storage paths, startup credentials, and logging settings require a restart. Saving through WebUI requires startup with --config PATH and write permission to the config directory. Do not reinitialize an existing instance: initialization does not overwrite files or reset passwords.
+
+Legacy ENV files are not loaded automatically by the Rust service. To migrate, stop the service, back up data and credentials, create JSON, map the existing database/object/token paths, then run --check-config. SPM_CLOUD_CONFIG only selects a JSON file. Historical environment names and their JSON equivalents are covered in the configuration reference above and in .env.example.
+
+## 5. Optional MySQL storage and Redis cache
+
+SQLite and in-memory caching remain the defaults; a small single-host deployment needs no external service.
+
+### MySQL
+
+Create a dedicated database and least-privilege service account. Put the connection URL in a file readable only by the service account, then configure:
+
+    {
+      "storage": {
+        "backend": "mysql",
+        "mysql_url_file": "secrets/mysql-url.txt"
+      }
+    }
+
+The URL has the form mysql://user:password@host:3306/database. Keep credentials out of source control and shared logs. Restrict remote database access and enable supported transport encryption.
+
+On first startup, if storage.database_path is a valid SQLite database and the MySQL target has no accounts or models, the service imports the old database tables. Keep object_dir pointed at the existing model files so stored object paths still work. Existing non-empty MySQL data is not merged automatically. Keep a stopped-service backup before migration; afterward, check accounts, permissions, model downloads, and a WebUI backup before archiving the old database. MySQL backups export as SQLite files. tools/backup_restore.py is for stopped-service SQLite file backups.
+
+The current MySQL adapter uses one synchronous connection and serializes SQL calls. Load-test your expected traffic before using it for a high-concurrency deployment. MySQL is an option for external persistence; switching away from SQLite is not required for the default installation.
+
+### Redis
+
+Redis caches short-lived, rebuildable catalog pages. It does not store accounts, permissions, audit history, or model files. Put its credentials in a protected file and configure:
+
+    {
+      "cache": {
+        "backend": "redis",
+        "redis_url_file": "secrets/redis-url.txt",
+        "ttl_seconds": 30,
+        "max_pages": 256,
+        "timeout_ms": 300
+      }
+    }
+
+Legacy ENV-only installations may use SPM_CLOUD_REDIS_URL. The cache bounds page count and TTL. If Redis is unavailable, the service falls back to bounded memory. Cache hits still validate current permissions against the persistent store. Set backend to none to disable caching.
+
+## 6. Back up, restore, and update
+
+### WebUI exports
+
+The owner can download a consistent backup ZIP containing the database and immutable model revisions, a ZIP of the full library in original formats, the current process's most recent 2 MiB of logs, and all or filtered audit records. Single-model export preserves its original bytes. Config, credentials, proxy certificates, and container environment files are not included; protect them separately. Get logs from systemd, Docker, or your deployment platform for periods before the current process started.
+
+Extract a WebUI backup ZIP before restoring it:
+
+    python tools/backup_restore.py restore \
+      --backup /path/to/extracted-backup \
+      --database /path/to/restore/spm-cloud.db \
+      --objects /path/to/restore/objects
+
+Stop the service before creating an offline backup so the database and object directory are from the same point in time:
+
+    python tools/backup_restore.py backup \
+      --database DATA/spm-cloud.db \
+      --objects OBJECTS \
+      --destination NEW_BACKUP
+
+The tool checks SHA-256, object sizes, path overlap, and symbolic links. Restore refuses to overwrite existing destinations unless --force is supplied. Keep the service stopped until both database and object data are restored. Start it, verify login, permissions, and model downloads, and keep the original backup until checks pass.
+
+### Automatic updates and rollback
+
+Back up config, token, database, model objects, and Docker named volumes before an update. The WebUI can check stable releases. Native updaters verify SHA-256 and the binary's reported version, wait for active uploads and model processing to finish, create a local backup, replace the program, and restart. Automatic updates are disabled by default. The install directory must be writable; Unix systems need tar with xz support.
+
+Update Docker images through the deployment platform. The repository includes an optional Linux systemd timer for Docker Compose updates on amd64/arm64. It requires Docker Compose, curl, jq, gzip, sha256sum, and flock. If the checkout is not under /opt/spm-cloud, update the Compose path in the unit. Run the updater service manually once and inspect its logs before enabling the timer. On failure, the script attempts to restore the previous image.
+
+The Compose updater assumes the repository and Compose .env are under /opt/spm-cloud. Install its units there:
+
+    sudo apt install -y curl jq gzip coreutils util-linux
+    sudo cp deploy/spm-cloud-json-auto-update.service /etc/systemd/system/spm-cloud-auto-update.service
+    sudo cp deploy/spm-cloud-json-auto-update.timer /etc/systemd/system/spm-cloud-auto-update.timer
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now spm-cloud-auto-update.timer
+    sudo systemctl start spm-cloud-auto-update.service
+    sudo systemctl status spm-cloud-auto-update.timer
+
+If paths differ, edit SPM_CLOUD_COMPOSE_DIR and the script path in the service. The timer applies the latest release on its first run too; check the service logs and health before leaving it enabled.
+
+The native Linux updater downloads the matching prebuilt release archive and checksum. If the restarted service fails its health check, it restores the previous executable. Before unattended use, confirm the service name, binary path, health URL, and updater logs in journalctl. Restoring an old executable does not reverse database migrations; if the old binary cannot read the new schema, restore the database backup made before upgrading as well.
+
+Example installation for the native updater; the source checkout can be anywhere:
+
+    sudo install -d -m 755 /usr/local/libexec
+    release=$(curl --fail --silent --show-error https://api.github.com/repos/sdf123098/spm-cloud/releases/latest | jq -er '.tag_name')
+    base="https://raw.githubusercontent.com/sdf123098/spm-cloud/${release}/deploy"
+    for file in native-auto-update.sh spm-cloud-native-update.service spm-cloud-native-update.timer; do
+      curl --fail --location "$base/$file" --output "/tmp/$file"
+    done
+    sudo install -m 755 /tmp/native-auto-update.sh /usr/local/libexec/spm-cloud-native-update.sh
+    sudo install -m 644 /tmp/spm-cloud-native-update.service /tmp/spm-cloud-native-update.timer /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now spm-cloud-native-update.timer
+    sudo systemctl start spm-cloud-native-update.service
+    sudo systemctl list-timers spm-cloud-native-update.timer
+
+Defaults are /usr/local/bin/spm-cloud, spm-cloud.service, and http://127.0.0.1:8787/health. Override them in /etc/spm-cloud-auto-update.env with SPM_CLOUD_BINARY, SPM_CLOUD_SYSTEMD_SERVICE, or SPM_CLOUD_AUTO_UPDATE_HEALTH_URL. Review journalctl -u spm-cloud-native-update.service after the first run.
+
+## 7. Troubleshooting
+
+| Symptom | Checks |
+|---|---|
+| Blank token field or unauthenticated | The browser form cannot read a remote file. Read the token on the server and paste the full line. Check the actual config path. |
+| Lost owner password | Sign in with the initial token and reset it. If both credentials are lost, stop the service and restore protected credential backups; do not edit the account database manually. |
+| WebUI cannot save | Confirm startup uses --config PATH, the JSON is valid, and the service account can write to the config directory. Admin accounts cannot write server config. |
+| HTTPS, certificate, or 502 failure | Check DNS, inbound ports 80/443, firewall, proxy upstream, and certificate renewal. Backend port 8787 should only be reachable by the local proxy. |
+| Upload fails | Check service/proxy logs, model size, proxy body limit, and disk space. The default per-model limit is 128 MiB. |
+| Redis is unavailable | Check the URL file permissions, network, and Redis health. The service falls back to local memory; the persistent store remains authoritative. |
+| MySQL will not connect or migrate | Check database name, account permissions, TLS, and URL escaping. First import requires a valid SQLite source and an empty MySQL target. Restore a backup before retrying. |
+| Content detection fails | Check detection and blocking separately, scanner reachability, YSMParser, and model-processing budgets. Rescan existing models. |
+| Data issue after update | Stop the updater and service. Keep logs and old files. Restore the pre-upgrade consistent database/object backup, then start with a compatible program. |
+
+## 8. API, capabilities, and client compatibility
+
+Players and mods connect to the HTTPS root. Instance discovery and the model catalog are under /v1; player self-service is /account/; administration is /admin/; health is /health. The shared contract is Protobuf spm.cloud.v1. The real-time endpoint is /v1/realtime over WebSocket. Ordinary messages default to a 64 KiB limit; model files use HTTP upload/download and never travel over WebSocket. See docs/PROTOCOL_V1.md for the protocol contract.
+
+Model revisions retain original bytes, SHA-256, length, and a controlled object path. Downloads support ETags and one byte range. Appearance writes use expected_revision to detect concurrent changes. Access checks account, scope, target, and model visibility. Private and blocked models are excluded from regular catalogs.
+
+Player display state, vehicle bindings, and entity motion timelines have separate features switches. Enable only capabilities supported by the clients you deploy. Projectile snapshots remain reserved and are not a ready client feature. For capability conditions, permissions, expiry, and wire messages, see PROTOCOL_V1.md and config.schema.json.
+
+## 9. Build, test, and contribute
+
+Build the Rust service with the stable toolchain selected by rust-toolchain.toml. The preview bundle is checked in, so ordinary Cargo builds do not need Node.js. To change web/preview.js, install Node.js 22 and rebuild the bundle:
+
+    cd web
+    npm ci
+    npm run build
+    cd ..
+    cargo build --locked
+
+Run the normal checks:
+
+    cargo fmt --all -- --check
+    cargo check --all-targets --all-features --locked
+    cargo test --all-targets --all-features --locked
+    cargo clippy --all-targets --all-features --locked -- -D warnings
+    node --test web/preview.test.cjs
+
+GitHub Release automation builds cross-platform archives, installers, checksums, and Docker release packages from version tags. To verify the complete HTTP service contract locally, build the release binary and run tools/service_contract.py with a test model file. Do not run destructive tests against a production instance.
+
+Offline authentication fixtures are in fixtures/profile-proofs.json. They contain only synthetic public keys, a certificate, and public signed payloads, with no private keys or game credentials. Tests pass the fixture directory to pure verification functions. The production service always uses the repository's fixed Mojang trust roots and official HTTPS public-key endpoint; no environment variable or request field can replace production trust anchors.
+
+## 10. License and project references
+
+The project is licensed under MIT. Protocol details are in docs/PROTOCOL_V1.md. Editable config and its field constraints are in config.example.json and config.schema.json. Compose and reverse-proxy templates are in the repository root. Source code, issue tracking, and official build downloads are available from the GitHub project and Releases pages.

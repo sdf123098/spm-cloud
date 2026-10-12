@@ -3,11 +3,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::database::Connection;
 use argon2::{
     Argon2, PasswordHash, PasswordVerifier,
     password_hash::{PasswordHasher, SaltString},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -92,11 +93,23 @@ impl CloudStore {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::create_dir_all(&config.object_dir)?;
-        let connection = Connection::open(&config.database_path)?;
+        let connection = if config.database_backend == "mysql" {
+            Connection::mysql(
+                config
+                    .mysql_url
+                    .as_deref()
+                    .ok_or_else(|| CloudError::configuration("missing MySQL URL"))?,
+            )?
+        } else {
+            Connection::open(&config.database_path)?
+        };
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         Self::migrate(&connection)?;
+        if connection.import_sqlite_if_empty(&config.database_path)? {
+            tracing::info!("Imported the existing local SQLite data into the empty MySQL store");
+        }
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
             object_dir: Arc::new(config.object_dir.clone()),
@@ -113,7 +126,7 @@ impl CloudStore {
         Ok(store)
     }
 
-    fn migrate(connection: &Connection) -> Result<(), CloudError> {
+    pub(crate) fn migrate(connection: &Connection) -> Result<(), CloudError> {
         connection.execute_batch(
             "BEGIN;
              CREATE TABLE IF NOT EXISTS accounts (
@@ -2537,8 +2550,8 @@ fn hash_token(token: &str) -> String {
     hex::encode(sha2::Sha256::digest(token.as_bytes()))
 }
 
-// Only explicitly marked credentials imported from the official Worker use its
-// fixed PBKDF2 parameters. Successful login upgrades them in the session transaction.
+// Preserve login compatibility for explicitly marked legacy PBKDF2 credentials.
+// Successful login upgrades them in the session transaction.
 fn verify_migrated_password(password: &str, stored: &str) -> Result<Option<String>, CloudError> {
     const LEGACY_PREFIX: &str = "spm-worker-pbkdf2-sha256-100000$";
     if let Some(legacy) = stored.strip_prefix(LEGACY_PREFIX) {
@@ -2913,6 +2926,11 @@ mod tests {
             max_asset_bytes: 128 * 1024 * 1024,
             max_message_bytes: 64 * 1024,
             max_entity_query_count: 64,
+            performance: Default::default(),
+            updates: Default::default(),
+            cache: Default::default(),
+            database_backend: "sqlite".into(),
+            mysql_url: None,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
             config_path: None,
@@ -3346,6 +3364,11 @@ mod tests {
             max_asset_bytes: 128 * 1024 * 1024,
             max_message_bytes: 64 * 1024,
             max_entity_query_count: 64,
+            performance: Default::default(),
+            updates: Default::default(),
+            cache: Default::default(),
+            database_backend: "sqlite".into(),
+            mysql_url: None,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
             config_path: None,

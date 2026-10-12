@@ -16,3 +16,5 @@ config.json
 playwright-report
 test-results
 *.har
+
+web/node_modules

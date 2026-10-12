@@ -1,4 +1,5 @@
 //! Embedded administration UI. Only the bootstrap owner can distribute administrators.
+use crate::database::Connection;
 use crate::{
     CloudStore,
     api::{AppState, authenticate},
@@ -18,7 +19,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post, put},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -104,6 +105,8 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/api/assets/{asset}/moderation", put(mark))
         .route("/admin/api/assets/{asset}/scan", post(rescan))
         .route("/admin/api/audit", get(audit))
+        .merge(crate::maintenance::routes())
+        .merge(crate::preview::routes())
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, guard))
 }
@@ -145,7 +148,7 @@ async fn guard(
     }
     headers.insert("x-content-type-options", "nosniff".parse().unwrap());
     headers.insert("referrer-policy", "no-referrer".parse().unwrap());
-    headers.insert("content-security-policy","default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'".parse().unwrap());
+    headers.insert("content-security-policy","default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'".parse().unwrap());
     response
 }
 pub(crate) fn authorize(
@@ -356,6 +359,9 @@ async fn save_config(
     next.max_asset_bytes = candidate.cloud.max_asset_bytes;
     next.max_message_bytes = candidate.cloud.max_message_bytes;
     next.max_entity_query_count = candidate.cloud.max_entity_query_count;
+    next.performance = candidate.cloud.performance;
+    next.updates = candidate.cloud.updates;
+    next.cache = candidate.cloud.cache;
     next.visual = candidate.cloud.visual;
     next.trusted_proxy_ips = candidate.cloud.trusted_proxy_ips;
     next.moderation = candidate.cloud.moderation;
@@ -374,6 +380,8 @@ async fn save_config(
 
 #[derive(Deserialize)]
 struct AccountQuery {
+    page: Option<usize>,
+    page_size: Option<usize>,
     after: Option<String>,
     q: Option<String>,
 }
@@ -388,17 +396,37 @@ async fn accounts(
         .connection
         .lock()
         .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-    let mut stmt=conn.prepare("SELECT a.account_id,a.created_at,COALESCE(m.role,'member'),COALESCE(m.disabled,0) FROM accounts a LEFT JOIN admin_accounts m ON m.account_id=a.account_id WHERE a.account_id>?1 AND a.account_id LIKE ?2 ORDER BY a.account_id LIMIT 81")?;
-    let mut entries=stmt.query_map(params![query.after.unwrap_or_default(),format!("%{}%",query.q.unwrap_or_default().chars().take(128).collect::<String>())],|r|{let id:String=r.get(0)?;Ok(json!({"role":if id==state.config.bootstrap_account_id{"owner".into()}else{r.get::<_,String>(2)?},"account_id":id,"created_at":r.get::<_,String>(1)?,"disabled":r.get::<_,bool>(3)?}))})?.collect::<Result<Vec<_>,_>>()?;
-    let more = entries.len() > 80;
-    entries.truncate(80);
+    let search = format!(
+        "%{}%",
+        query
+            .q
+            .unwrap_or_default()
+            .chars()
+            .take(128)
+            .collect::<String>()
+    );
+    let size = query
+        .page_size
+        .unwrap_or(if query.page.is_some() { 24 } else { 80 })
+        .clamp(1, 80);
+    let page = query.page.unwrap_or(1).clamp(1, 1_000_000);
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM accounts WHERE account_id LIKE ?1",
+        [&search],
+        |r| r.get(0),
+    )?;
+    let after = query.after.unwrap_or_default();
+    let mut stmt=conn.prepare("SELECT a.account_id,a.created_at,COALESCE(m.role,'member'),COALESCE(m.disabled,0) FROM accounts a LEFT JOIN admin_accounts m ON m.account_id=a.account_id WHERE a.account_id LIKE ?1 AND (?2='' OR (a.account_id>?2 AND a.account_id<>?3)) ORDER BY a.account_id=?3 DESC,a.account_id LIMIT ?4 OFFSET ?5")?;
+    let mut entries=stmt.query_map(params![search,after,state.config.bootstrap_account_id,(size+1) as i64,((page-1)*size) as i64],|r|{let id:String=r.get(0)?;Ok(json!({"role":if id==state.config.bootstrap_account_id{"owner".into()}else{r.get::<_,String>(2)?},"account_id":id,"created_at":r.get::<_,String>(1)?,"disabled":r.get::<_,bool>(3)?}))})?.collect::<Result<Vec<_>,_>>()?;
+    let more = entries.len() > size;
+    entries.truncate(size);
     let cursor = if more {
         entries.last().map(|e| e["account_id"].clone())
     } else {
         None
     };
     Ok(Json(
-        json!({"entries":entries,"next_cursor":cursor,"has_more":more}),
+        json!({"entries":entries,"next_cursor":cursor,"has_more":more,"total":total,"page":page,"page_size":size}),
     ))
 }
 #[derive(Deserialize)]
@@ -474,6 +502,8 @@ fn validate_role(role: &str) -> Result<(), CloudError> {
 
 #[derive(Deserialize)]
 struct AssetQuery {
+    page: Option<usize>,
+    page_size: Option<usize>,
     after: Option<String>,
     q: Option<String>,
     #[serde(default)]
@@ -490,20 +520,35 @@ async fn assets(
         .connection
         .lock()
         .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+    let search = format!(
+        "%{}%",
+        query
+            .q
+            .unwrap_or_default()
+            .chars()
+            .take(128)
+            .collect::<String>()
+    );
+    let size = query
+        .page_size
+        .unwrap_or(if query.page.is_some() { 24 } else { 80 })
+        .clamp(1, 80);
+    let page = query.page.unwrap_or(1).clamp(1, 1_000_000);
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM assets a JOIN asset_revisions r ON r.asset_id=a.asset_id AND r.revision=a.current_revision LEFT JOIN deleted_assets d ON d.asset_id=a.asset_id WHERE (a.asset_id LIKE ?1 OR r.name LIKE ?1 OR a.owner_account_id LIKE ?1 OR r.format LIKE ?1) AND (?2=1 OR d.asset_id IS NULL)",params![search,query.deleted],|r|r.get(0))?;
     let mut stmt=conn.prepare("SELECT a.asset_id,a.owner_account_id,a.visibility,r.revision,r.name,r.format,r.byte_length,r.raw_sha256,COALESCE(m.manual_status,m.status,'UNKNOWN'),m.reason,m.scan_json,d.asset_id IS NOT NULL,m.manual_status
         FROM assets a JOIN asset_revisions r ON r.asset_id=a.asset_id AND r.revision=a.current_revision
         LEFT JOIN model_moderation m ON m.raw_sha256=r.raw_sha256 LEFT JOIN deleted_assets d ON d.asset_id=a.asset_id
-        WHERE a.asset_id>?1 AND (a.asset_id LIKE ?2 OR r.name LIKE ?2) AND (?3=1 OR d.asset_id IS NULL) ORDER BY a.asset_id LIMIT 81")?;
-    let mut entries=stmt.query_map(params![query.after.unwrap_or_default(),format!("%{}%",query.q.unwrap_or_default().chars().take(128).collect::<String>()),query.deleted],|r|Ok(json!({"asset_id":r.get::<_,String>(0)?,"owner_account_id":r.get::<_,String>(1)?,"visibility":r.get::<_,String>(2)?,"revision":r.get::<_,i64>(3)?,"name":r.get::<_,String>(4)?,"format":r.get::<_,String>(5)?,"byte_length":r.get::<_,i64>(6)?,"raw_sha256":r.get::<_,String>(7)?,"moderation":r.get::<_,String>(8)?,"reason":r.get::<_,Option<String>>(9)?,"scan":r.get::<_,Option<String>>(10)?.and_then(|s|serde_json::from_str::<Value>(&s).ok()),"deleted":r.get::<_,bool>(11)?,"manual_status":r.get::<_,Option<String>>(12)?})))?.collect::<Result<Vec<_>,_>>()?;
-    let more = entries.len() > 80;
-    entries.truncate(80);
+        WHERE a.asset_id>?1 AND (a.asset_id LIKE ?2 OR r.name LIKE ?2 OR a.owner_account_id LIKE ?2 OR r.format LIKE ?2) AND (?3=1 OR d.asset_id IS NULL) ORDER BY a.asset_id LIMIT ?4 OFFSET ?5")?;
+    let mut entries=stmt.query_map(params![query.after.unwrap_or_default(),search,query.deleted,(size+1) as i64,((page-1)*size) as i64],|r|Ok(json!({"asset_id":r.get::<_,String>(0)?,"owner_account_id":r.get::<_,String>(1)?,"visibility":r.get::<_,String>(2)?,"revision":r.get::<_,i64>(3)?,"name":r.get::<_,String>(4)?,"format":r.get::<_,String>(5)?,"byte_length":r.get::<_,i64>(6)?,"raw_sha256":r.get::<_,String>(7)?,"moderation":r.get::<_,String>(8)?,"reason":r.get::<_,Option<String>>(9)?,"scan":r.get::<_,Option<String>>(10)?.and_then(|s|serde_json::from_str::<Value>(&s).ok()),"deleted":r.get::<_,bool>(11)?,"manual_status":r.get::<_,Option<String>>(12)?})))?.collect::<Result<Vec<_>,_>>()?;
+    let more = entries.len() > size;
+    entries.truncate(size);
     let cursor = if more {
         entries.last().map(|e| e["asset_id"].clone())
     } else {
         None
     };
     Ok(Json(
-        json!({"entries":entries,"next_cursor":cursor,"has_more":more}),
+        json!({"entries":entries,"next_cursor":cursor,"has_more":more,"total":total,"page":page,"page_size":size}),
     ))
 }
 async fn upload(
@@ -620,10 +665,11 @@ async fn rescan(
 ) -> Result<Json<Value>, CloudError> {
     let (actor, _) = authorize(&state, &headers, false)?;
     let (_, sha, name) = state.store.admin_asset(&asset)?;
-    let result = crate::moderation::scan(
+    let result = crate::moderation::scan_limited(
         &state.store.object_path_for_sha(&sha),
         &name,
         &state.runtime_config().moderation,
+        state.processing_slots.clone(),
     )
     .await;
     state.store.save_scan(&sha, &result)?;
@@ -635,19 +681,55 @@ async fn rescan(
     )?;
     Ok(Json(json!(result)))
 }
-async fn audit(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, CloudError> {
-    authorize(&state, &headers, false)?;
+#[derive(Deserialize, Default)]
+pub(crate) struct AuditQuery {
+    pub q: Option<String>,
+    pub page: Option<usize>,
+    pub page_size: Option<usize>,
+}
+pub(crate) fn audit_entries(
+    state: &AppState,
+    query: &AuditQuery,
+    export: bool,
+) -> Result<Value, CloudError> {
     let conn = state
         .store
         .connection
         .lock()
         .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-    let mut stmt=conn.prepare("SELECT actor_account_id,action,subject_id,details_json,created_at FROM audit_events WHERE scope_id IS NULL ORDER BY created_at DESC,rowid DESC LIMIT 100")?;
-    let entries=stmt.query_map([],|r|Ok(json!({"actor":r.get::<_,String>(0)?,"action":r.get::<_,String>(1)?,"subject":r.get::<_,Option<String>>(2)?,"details":serde_json::from_str::<Value>(&r.get::<_,String>(3)?).unwrap_or(Value::Null),"created_at":r.get::<_,String>(4)?})))?.collect::<Result<Vec<_>,_>>()?;
-    Ok(Json(json!({"entries":entries})))
+    let search = format!(
+        "%{}%",
+        query
+            .q
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(128)
+            .collect::<String>()
+    );
+    let filter = "scope_id IS NULL AND (actor_account_id LIKE ?1 OR action LIKE ?1 OR COALESCE(subject_id,'') LIKE ?1 OR details_json LIKE ?1 OR created_at LIKE ?1)";
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM audit_events WHERE {filter}"),
+        [&search],
+        |r| r.get(0),
+    )?;
+    let size = if export {
+        total as usize
+    } else {
+        query.page_size.unwrap_or(100).clamp(1, 100)
+    };
+    let page = query.page.unwrap_or(1).clamp(1, 1_000_000);
+    let mut stmt = conn.prepare(&format!("SELECT actor_account_id,action,subject_id,details_json,created_at FROM audit_events WHERE {filter} ORDER BY created_at DESC,rowid DESC LIMIT ?2 OFFSET ?3"))?;
+    let entries=stmt.query_map(params![search,size as i64,if export {0} else {((page-1)*size) as i64}],|r|Ok(json!({"actor":r.get::<_,String>(0)?,"action":r.get::<_,String>(1)?,"subject":r.get::<_,Option<String>>(2)?,"details":serde_json::from_str::<Value>(&r.get::<_,String>(3)?).unwrap_or(Value::Null),"created_at":r.get::<_,String>(4)?})))?.collect::<Result<Vec<_>,_>>()?;
+    Ok(json!({"entries":entries,"total":total,"page":page,"page_size":size}))
+}
+async fn audit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AuditQuery>,
+) -> Result<Json<Value>, CloudError> {
+    authorize(&state, &headers, false)?;
+    Ok(Json(audit_entries(&state, &query, false)?))
 }
 
 impl CloudStore {

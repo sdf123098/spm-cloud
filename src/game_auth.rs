@@ -42,7 +42,7 @@ fn now() -> i64 {
     crate::api::now_unix_ms() / 1000
 }
 
-pub fn migrate(conn: &rusqlite::Connection) -> Result<(), CloudError> {
+pub fn migrate(conn: &crate::database::Connection) -> Result<(), CloudError> {
     // Preserve pre-upgrade link challenges and all existing accounts/assets.
     conn.execute_batch("CREATE TABLE IF NOT EXISTS game_auth_challenges (
         challenge_hash TEXT PRIMARY KEY, purpose TEXT NOT NULL CHECK(purpose IN ('link','login')),

@@ -1,4 +1,4 @@
-//! Mojang public trust anchors and the same domain-bound proofs used by the official Worker.
+//! Mojang public trust anchors and domain-bound profile proofs.
 //! No game access token, private key or client-supplied trust anchor is accepted.
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
@@ -16,7 +16,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const SNAPSHOT: &str = include_str!("../cloudflare/src/mojang-certificate-keys.json");
+const SNAPSHOT: &str = include_str!("../assets/official-profile-certificate-keys.json");
 const ROOT_URL: &str = "https://api.minecraftservices.com/publickeys";
 
 pub fn payload(

@@ -1,10 +1,17 @@
 //! Content-addressed moderation: recognition and enforcement are independent.
+use crate::database::Connection;
 use crate::{CloudStore, error::CloudError};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{io::Read, path::Path};
+
+// Model decoding can temporarily retain decoded JSON, texture bytes, and (for
+// encrypted YSM files) a complete parser output tree. Serialize that work so
+// burst uploads remain viable on low-memory hosts.
+static MODEL_SCAN_SLOTS: std::sync::OnceLock<std::sync::Arc<crate::performance::Limiter>> =
+    std::sync::OnceLock::new();
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -566,7 +573,34 @@ async fn model_inputs(path: &Path, settings: &ModerationSettings) -> anyhow::Res
     })
     .await?
 }
-pub async fn scan(path: &Path, _name: &str, settings: &ModerationSettings) -> ScanResult {
+pub async fn scan(path: &Path, name: &str, settings: &ModerationSettings) -> ScanResult {
+    scan_limited(
+        path,
+        name,
+        settings,
+        MODEL_SCAN_SLOTS
+            .get_or_init(|| crate::performance::Limiter::new(2))
+            .clone(),
+    )
+    .await
+}
+pub async fn scan_limited(
+    path: &Path,
+    _name: &str,
+    settings: &ModerationSettings,
+    limiter: std::sync::Arc<crate::performance::Limiter>,
+) -> ScanResult {
+    let path = path.to_owned();
+    let settings = settings.clone();
+    // Detached worker retains the admission permit until decoding really ends, even on HTTP cancellation.
+    tokio::spawn(async move {
+        let _permit = limiter.acquire().await;
+        scan_inner(&path, &settings).await
+    })
+    .await
+    .unwrap_or_else(|_| ScanResult::unknown("Model scanner worker failed"))
+}
+async fn scan_inner(path: &Path, settings: &ModerationSettings) -> ScanResult {
     if !settings.detection_enabled {
         let mut r = ScanResult::unknown("Recognition disabled");
         r.status = "DISABLED".into();

@@ -18,6 +18,9 @@ pub type Environment = BTreeMap<String, String>;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
+    pub performance: crate::performance::Performance,
+    pub updates: crate::maintenance::UpdateSettings,
+    pub cache: crate::catalog_cache::CacheSettings,
     pub schema_version: u32,
     pub instance: Instance,
     pub storage: Storage,
@@ -32,6 +35,9 @@ pub struct FileConfig {
 impl Default for FileConfig {
     fn default() -> Self {
         Self {
+            performance: Default::default(),
+            updates: Default::default(),
+            cache: Default::default(),
             schema_version: 1,
             instance: Instance::default(),
             storage: Storage::default(),
@@ -66,6 +72,8 @@ impl Default for Instance {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Storage {
+    pub backend: String,
+    pub mysql_url_file: Option<PathBuf>,
     pub data_dir: PathBuf,
     pub database_path: Option<PathBuf>,
     pub object_dir: Option<PathBuf>,
@@ -73,6 +81,8 @@ pub struct Storage {
 impl Default for Storage {
     fn default() -> Self {
         Self {
+            backend: "sqlite".into(),
+            mysql_url_file: None,
             data_dir: "data".into(),
             database_path: None,
             object_dir: None,
@@ -323,6 +333,8 @@ impl LoadedConfig {
             );
         }
         validate(&input, file.is_some())?;
+        input.performance.resolved()?;
+        input.updates.validate()?;
         input.moderation.validate()?;
         validate_slug(&input.instance.instance_id, "instance.instance_id")?;
         validate_slug(
@@ -472,7 +484,50 @@ impl LoadedConfig {
         web_ui.microsoft_client_secret_file = web_ui
             .microsoft_client_secret_file
             .map(|path| absolute(base, &path));
+        let mut cache = input.cache.clone();
+        cache.redis_url = secret(
+            "cache.redis_url_file",
+            "SPM_CLOUD_REDIS_URL",
+            cache.redis_url_file.as_deref(),
+            base,
+            environment,
+            &mut sources,
+        )?;
+        cache.redis_url_file = cache.redis_url_file.map(|path| absolute(base, &path));
+        cache.validate()?;
+        let mysql_url = secret(
+            "storage.mysql_url_file",
+            "SPM_CLOUD_MYSQL_URL",
+            input.storage.mysql_url_file.as_deref(),
+            base,
+            environment,
+            &mut sources,
+        )?;
+        if !["sqlite", "mysql"].contains(&input.storage.backend.as_str()) {
+            return Err(invalid("storage.backend", "use sqlite/mysql"));
+        }
+        if input.storage.backend == "mysql" {
+            let url = mysql_url.as_deref().ok_or_else(|| {
+                invalid(
+                    "storage.mysql_url_file",
+                    "or SPM_CLOUD_MYSQL_URL is required",
+                )
+            })?;
+            let options = mysql::Opts::from_url(url)
+                .map_err(|_| invalid("storage.mysql_url_file", "invalid MySQL URL"))?;
+            if options.get_db_name().is_none() {
+                return Err(invalid(
+                    "storage.mysql_url_file",
+                    "URL must name a database",
+                ));
+            }
+        }
         let cloud = CloudConfig {
+            database_backend: input.storage.backend.clone(),
+            mysql_url,
+            cache,
+            performance: input.performance.clone(),
+            updates: input.updates.clone(),
             instance_id: input.instance.instance_id.clone(),
             origin: origin.clone(),
             bind_addr,
@@ -497,8 +552,12 @@ impl LoadedConfig {
         };
         let mut effective = serde_json::to_value(&input).unwrap();
         effective["instance"]["origin"] = json!(origin);
-        effective["storage"] =
-            json!({"data_dir":data_dir,"database_path":database_path,"object_dir":object_dir});
+        effective["cache"]["redis_url_file"] = json!(if cloud.cache.redis_url.is_some() {
+            Some("[REDACTED]")
+        } else {
+            None
+        });
+        effective["storage"] = json!({"data_dir":data_dir,"database_path":database_path,"object_dir":object_dir,"backend":cloud.database_backend,"mysql_url_file":if cloud.mysql_url.is_some() { Some("[REDACTED]") } else { None }});
         effective["auth"]["bootstrap_access_token_file"] = json!(if cloud.access_token.is_some() {
             Some("[REDACTED]")
         } else {

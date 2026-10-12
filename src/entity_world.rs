@@ -1,4 +1,5 @@
 //! World-scoped, Cloud-ACL-managed entity appearances without a Minecraft server plugin.
+use crate::database::Connection;
 use crate::{
     CloudStore,
     api::{AppState, authenticate},
@@ -10,7 +11,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -53,6 +54,11 @@ mod tests {
             max_asset_bytes: 1024,
             max_message_bytes: 16384,
             max_entity_query_count: 64,
+            performance: Default::default(),
+            updates: Default::default(),
+            cache: Default::default(),
+            database_backend: "sqlite".into(),
+            mysql_url: None,
             visual: Default::default(),
             trusted_proxy_ips: vec![],
             config_path: None,

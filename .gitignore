@@ -25,4 +25,5 @@ deploy/runtime/
 /.playwright-mcp/
 /playwright-report/
 /test-results/
+/web/node_modules/
 *.har

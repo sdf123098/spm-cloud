@@ -1,4 +1,5 @@
 //! Self-service account connections; credentials prove ownership, never confer a role.
+use crate::database::Connection;
 use crate::{
     CloudStore,
     api::{AppState, authenticate},
@@ -10,7 +11,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
