@@ -1,0 +1,11 @@
+# Optional overlay: docker compose -f docker-compose.json.yml -f docker-compose.moderation.yml up -d
+# Set moderation.scanner_url to http://nudenet:8080/infer in the Cloud JSON.
+services:
+  nudenet:
+    image: ghcr.io/notai-tech/nudenet:latest
+    restart: unless-stopped
+    expose:
+      - "8080"
+    # Inference is available only on the Compose network, with no host port published.
+    mem_limit: 1g
+    cpus: 2

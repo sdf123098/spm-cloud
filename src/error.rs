@@ -20,6 +20,10 @@ pub enum CloudError {
     NotFound,
     #[error("access denied")]
     AccessDenied,
+    #[error("R18 model blocked by Cloud policy")]
+    R18Blocked,
+    #[error("Model could not be classified; blocked by Cloud policy")]
+    ModerationUnclassified,
     #[error("scope access denied")]
     ScopeAccessDenied,
     #[error("provider configuration access denied")]
@@ -85,6 +89,8 @@ impl CloudError {
             Self::RefreshReused => "REFRESH_REUSED",
             Self::NotFound => "ASSET_NOT_FOUND",
             Self::AccessDenied => "ASSET_ACCESS_DENIED",
+            Self::R18Blocked => "R18_MODEL_BLOCKED",
+            Self::ModerationUnclassified => "MODEL_UNCLASSIFIED",
             Self::ScopeAccessDenied => "SCOPE_ACCESS_DENIED",
             Self::ProviderAccessDenied => "ACCESS_DENIED",
             Self::AccountExists => "ACCOUNT_EXISTS",
@@ -119,9 +125,11 @@ impl CloudError {
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::SearchRequired => StatusCode::BAD_REQUEST,
             Self::SessionExpired | Self::RefreshReused => StatusCode::UNAUTHORIZED,
-            Self::AccessDenied | Self::ScopeAccessDenied | Self::ProviderAccessDenied => {
-                StatusCode::FORBIDDEN
-            }
+            Self::AccessDenied
+            | Self::ScopeAccessDenied
+            | Self::ProviderAccessDenied
+            | Self::R18Blocked
+            | Self::ModerationUnclassified => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::AssetRangeInvalid => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::AssetHashMismatch => StatusCode::UNPROCESSABLE_ENTITY,

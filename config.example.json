@@ -45,5 +45,23 @@
   "logging": {
     "level": "info",
     "format": "text"
+  },
+  "web_ui": {
+    "enabled": true,
+    "microsoft_client_id": null,
+    "microsoft_client_secret_file": null,
+    "microsoft_redirect_uri": null
+  },
+  "moderation": {
+    "detection_enabled": false,
+    "block_r18": false,
+    "block_unclassified": false,
+    "texture_detection_enabled": false,
+    "scanner_url": null,
+    "score_threshold": 0.7,
+    "timeout_seconds": 30,
+    "max_textures": 64,
+    "max_texture_bytes": 8388608,
+    "ysm_parser_path": null
   }
 }

@@ -145,7 +145,7 @@ impl CloudStore {
         query: &SnapshotQuery,
         time: i64,
     ) -> Result<Vec<VehicleEntry>, CloudError> {
-        if query.entity_uuids.len() > self.visual.limits.max_entity_query_count {
+        if query.entity_uuids.len() > self.visual_settings().limits.max_entity_query_count {
             return Err(CloudError::invalid_metadata("entity query limit exceeded"));
         }
         let conn = self

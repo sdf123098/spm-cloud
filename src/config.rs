@@ -18,6 +18,9 @@ pub struct CloudConfig {
     pub max_entity_query_count: usize,
     pub visual: crate::visual::VisualSettings,
     pub trusted_proxy_ips: Vec<std::net::IpAddr>,
+    pub config_path: Option<PathBuf>,
+    pub web_ui: crate::admin::WebUiSettings,
+    pub moderation: crate::moderation::ModerationSettings,
 }
 
 impl CloudConfig {

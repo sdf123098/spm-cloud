@@ -189,7 +189,7 @@ pub(crate) fn resource(
             "invalid exact resource reference",
         ));
     }
-    let allowed: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM asset_revisions r JOIN assets a ON a.asset_id=r.asset_id LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?4 WHERE r.asset_id=?1 AND r.revision=?2 AND r.raw_sha256=?3 AND r.format=?5 AND (a.visibility='PUBLIC' OR acl.permission IN ('manage','render_read')))", params![value.asset_id, value.asset_revision as i64, value.raw_sha256, account, value.format], |row| row.get(0))?;
+    let allowed: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM available_asset_revisions r JOIN assets a ON a.asset_id=r.asset_id LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?4 WHERE r.asset_id=?1 AND r.revision=?2 AND r.raw_sha256=?3 AND r.format=?5 AND (a.visibility='PUBLIC' OR acl.permission IN ('manage','render_read')))", params![value.asset_id, value.asset_revision as i64, value.raw_sha256, account, value.format], |row| row.get(0))?;
     if !allowed {
         return Err(CloudError::AccessDenied);
     }

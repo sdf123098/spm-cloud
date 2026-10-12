@@ -58,7 +58,7 @@ Stop the old process before switching configuration. Initialize a JSON file, pre
 
 ## Native systemd
 
-After installing the binary and creating the `spm-cloud` service account, initialize the config as that account. This creates `/etc/spm-cloud/secrets/bootstrap-token.txt`; initialization refuses to overwrite either file. Keep the config directory writable during initialization and readable by the service account. Edit the generated JSON to set the public HTTPS origin and use these absolute storage paths so the read-only configuration directory contains no mutable database:
+After installing the binary and creating the `spm-cloud` service account, initialize the config as that account. This creates `/etc/spm-cloud/secrets/bootstrap-token.txt`; initialization refuses to overwrite either file. Keep the configuration directory writable by the service account for WebUI saves, with secret files readable only by that account. The JSON unit permits writes to `/etc/spm-cloud`. Edit the generated JSON to set the public HTTPS origin and use these absolute storage paths so the configuration directory contains no mutable database:
 
 ```bash
 sudo install -d -o spm-cloud -g spm-cloud -m 750 /etc/spm-cloud
@@ -86,7 +86,7 @@ sudo -u spm-cloud /usr/local/bin/spm-cloud --config /etc/spm-cloud/config.json -
 
 ## Docker Compose
 
-Build the image once, then use its binary to initialize `deploy/runtime/config.json` and the token file. Edit the origin, instance ID, storage paths and proxy address. The container runs as UID 10001; the config and token must be readable by that UID. Mount the runtime directory read-only. The runtime directory is ignored by Git.
+Build the image once, then use its binary to initialize `deploy/runtime/config.json` and the token file. Edit the origin, instance ID, storage paths and proxy address. The container runs as UID 10001; the config directory must be writable and the token readable by that UID. The JSON Compose template mounts the directory writable for WebUI saves; deployments that retain a read-only mount can view settings but cannot save. The runtime directory is ignored by Git.
 
 ```bash
 mkdir -p deploy/runtime

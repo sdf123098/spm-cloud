@@ -131,7 +131,7 @@ mod tests {
         let state = AppState::new(config, store);
         let mut runtime_config = state.runtime_config();
         runtime_config.visual.limits.max_visual_state_bytes = 4;
-        state.update_runtime_config(runtime_config);
+        state.update_runtime_config(runtime_config).unwrap();
         let request = Request::builder()
             .header("content-type", "application/json")
             .body(axum::body::Body::from_stream(futures_util::stream::iter([

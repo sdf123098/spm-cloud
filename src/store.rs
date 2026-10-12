@@ -31,8 +31,8 @@ use crate::{
 pub struct CloudStore {
     pub(crate) connection: Arc<Mutex<Connection>>,
     object_dir: Arc<PathBuf>,
-    pub(crate) max_entity_query_count: usize,
-    pub(crate) visual: Arc<crate::visual::VisualSettings>,
+    pub(crate) max_entity_query_count: Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) visual: Arc<std::sync::RwLock<crate::visual::VisualSettings>>,
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +70,23 @@ pub struct AnimationMutation {
 }
 
 impl CloudStore {
+    pub(crate) fn visual_settings(&self) -> crate::visual::VisualSettings {
+        self.visual
+            .read()
+            .expect("visual settings lock poisoned")
+            .clone()
+    }
+    pub(crate) fn entity_query_limit(&self) -> usize {
+        self.max_entity_query_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub(crate) fn update_runtime_settings(&self, config: &CloudConfig) {
+        *self.visual.write().expect("visual settings lock poisoned") = config.visual.clone();
+        self.max_entity_query_count.store(
+            config.max_entity_query_count,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     pub fn open(config: &CloudConfig) -> Result<Self, CloudError> {
         if let Some(parent) = config.database_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -83,13 +100,16 @@ impl CloudStore {
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
             object_dir: Arc::new(config.object_dir.clone()),
-            max_entity_query_count: config.max_entity_query_count,
-            visual: Arc::new(config.visual.clone()),
+            max_entity_query_count: Arc::new(std::sync::atomic::AtomicUsize::new(
+                config.max_entity_query_count,
+            )),
+            visual: Arc::new(std::sync::RwLock::new(config.visual.clone())),
         };
         store.seed_bootstrap(
             &config.bootstrap_account_id,
             config.bootstrap_password_hash.as_deref(),
         )?;
+        store.set_moderation_policy(&config.moderation)?;
         Ok(store)
     }
 
@@ -366,6 +386,8 @@ impl CloudStore {
         crate::display::migrate(connection)?;
         crate::vehicle::migrate(connection)?;
         crate::entity_motion::migrate(connection)?;
+        crate::admin::migrate(connection)?;
+        crate::moderation::migrate(connection)?;
         Ok(())
     }
 
@@ -398,7 +420,7 @@ impl CloudStore {
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let session: Option<(String, i64, i64)> = conn.query_row("SELECT account_id, access_expires_at, revoked FROM sessions WHERE access_hash = ?1", [&access_hash], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
+        let session: Option<(String, i64, i64)> = conn.query_row("SELECT s.account_id,s.access_expires_at,s.revoked OR COALESCE(a.disabled,0) FROM sessions s LEFT JOIN admin_accounts a ON a.account_id=s.account_id WHERE access_hash=?1", [&access_hash], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?;
         let Some((account_id, expires_at, revoked)) = session else {
             return Err(CloudError::Unauthenticated);
         };
@@ -409,6 +431,20 @@ impl CloudStore {
     }
 
     pub fn issue_session(&self, login: &LoginRequest) -> Result<SessionResponse, CloudError> {
+        {
+            let conn = self
+                .connection
+                .lock()
+                .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+            let disabled: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM admin_accounts WHERE account_id=?1 AND disabled=1)",
+                [&login.account_id],
+                |r| r.get(0),
+            )?;
+            if disabled {
+                return Err(CloudError::Unauthenticated);
+            }
+        }
         validate_slug(&login.account_id, "account_id")?;
         if login.password.is_empty()
             || login.password.encode_utf16().count() > 1024
@@ -1606,7 +1642,7 @@ impl CloudStore {
         if target_role(&conn, target_id, account_id)?.is_none() {
             return Err(CloudError::AccessDenied);
         }
-        conn.query_row("SELECT a.target_id, a.revision, a.asset_id, a.asset_revision, a.raw_sha256, a.texture_id, a.scale, a.disabled FROM appearances a WHERE a.target_id = ?1", [target_id], |row| Ok(AppearanceState { target_id: row.get(0)?, revision: row.get::<_, i64>(1)? as u64, asset_id: row.get(2)?, asset_revision: row.get::<_, Option<i64>>(3)?.map(|value| value as u64), raw_sha256: row.get(4)?, texture_id: row.get(5)?, scale: row.get(6)?, disabled: row.get::<_, i64>(7)? != 0 })).optional()?.ok_or(CloudError::NotFound)
+        conn.query_row("SELECT a.target_id, a.revision, a.asset_id, a.asset_revision, a.raw_sha256, a.texture_id, a.scale, CASE WHEN a.asset_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM available_asset_revisions r WHERE r.asset_id=a.asset_id AND r.revision=a.asset_revision AND r.raw_sha256=a.raw_sha256) THEN 1 ELSE a.disabled END FROM appearances a WHERE a.target_id = ?1", [target_id], |row| Ok(AppearanceState { target_id: row.get(0)?, revision: row.get::<_, i64>(1)? as u64, asset_id: row.get(2)?, asset_revision: row.get::<_, Option<i64>>(3)?.map(|value| value as u64), raw_sha256: row.get(4)?, texture_id: row.get(5)?, scale: row.get(6)?, disabled: row.get::<_, i64>(7)? != 0 })).optional()?.ok_or(CloudError::NotFound)
     }
 
     pub fn update_appearance(
@@ -1642,6 +1678,10 @@ impl CloudStore {
             return Err(CloudError::AccessDenied);
         }
         if let Some(asset_id) = update.asset_id.as_deref() {
+            let available:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM available_asset_revisions WHERE asset_id=?1 AND revision=?2 AND raw_sha256=?3)",params![asset_id,update.asset_revision.map(|v|v as i64),update.raw_sha256],|r|r.get(0))?;
+            if !available {
+                return Err(CloudError::AccessDenied);
+            }
             if asset_permission(&tx, asset_id, account_id)?
                 .is_none_or(|permission| !matches!(permission.as_str(), "manage" | "use"))
             {
@@ -1905,7 +1945,7 @@ impl CloudStore {
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let mut stmt = conn.prepare("SELECT r.asset_id, r.revision, r.name, r.format, r.raw_sha256, r.byte_length, a.visibility FROM asset_revisions r JOIN assets a ON a.asset_id = r.asset_id LEFT JOIN asset_acl acl ON acl.asset_id = r.asset_id AND acl.account_id = ?1 WHERE a.visibility = 'PUBLIC' OR acl.permission IN ('manage', 'use', 'discover') ORDER BY r.asset_id, r.revision")?;
+        let mut stmt = conn.prepare("SELECT r.asset_id, r.revision, r.name, r.format, r.raw_sha256, r.byte_length, a.visibility FROM available_asset_revisions r JOIN assets a ON a.asset_id = r.asset_id LEFT JOIN asset_acl acl ON acl.asset_id = r.asset_id AND acl.account_id = ?1 WHERE a.visibility = 'PUBLIC' OR acl.permission IN ('manage', 'use', 'discover') ORDER BY r.asset_id, r.revision")?;
         let rows = stmt.query_map([account_id], |row| {
             Ok(AssetSummary {
                 asset_id: row.get(0)?,
@@ -2006,6 +2046,13 @@ impl CloudStore {
                 return serde_json::from_str(&response_json).map_err(|_| CloudError::Internal(anyhow::anyhow!("stored asset idempotency response is invalid")));
             }
         }
+        if tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deleted_assets WHERE asset_id=?1)",
+            [asset_id],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(CloudError::AccessDenied);
+        }
         let existing_owner: Option<String> = tx
             .query_row(
                 "SELECT owner_account_id FROM assets WHERE asset_id = ?1",
@@ -2024,7 +2071,7 @@ impl CloudStore {
             )
             .optional()?;
         let visibility =
-            requested_visibility.unwrap_or(old_visibility.as_deref().unwrap_or("PRIVATE"));
+            requested_visibility.unwrap_or(old_visibility.as_deref().unwrap_or("PUBLIC"));
         tx.execute("INSERT INTO assets(asset_id, owner_account_id, current_revision, visibility) VALUES (?1, ?2, 1, ?3) ON CONFLICT(asset_id) DO UPDATE SET current_revision = current_revision + 1, visibility = excluded.visibility", params![asset_id, account_id, visibility])?;
         let revision: i64 = tx.query_row(
             "SELECT current_revision FROM assets WHERE asset_id = ?1",
@@ -2066,7 +2113,7 @@ impl CloudStore {
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let mut stmt = conn.prepare("SELECT e.sequence, r.asset_id, r.revision, r.name, r.raw_sha256, r.byte_length FROM catalog_events e JOIN asset_revisions r ON r.asset_id = e.asset_id AND r.revision = e.revision WHERE e.tenant_id = ?1 AND e.sequence > ?2 ORDER BY e.sequence LIMIT ?3")?;
+        let mut stmt = conn.prepare("SELECT e.sequence, r.asset_id, r.revision, r.name, r.raw_sha256, r.byte_length FROM catalog_events e JOIN available_asset_revisions r ON r.asset_id = e.asset_id AND r.revision = e.revision WHERE e.tenant_id = ?1 AND e.sequence > ?2 ORDER BY e.sequence LIMIT ?3")?;
         let rows = stmt.query_map(params![account_id, after as i64, limit as i64], |row| {
             Ok(serde_json::json!({
                 "sequence": row.get::<_, i64>(0)?,
@@ -2118,7 +2165,7 @@ impl CloudStore {
         {
             return Err(CloudError::AccessDenied);
         }
-        conn.query_row("SELECT object_path, byte_length, raw_sha256, name, format FROM asset_revisions WHERE asset_id = ?1 AND revision = ?2", params![asset_id, revision as i64], |row| Ok(AssetContent { path: PathBuf::from(row.get::<_, String>(0)?), length: row.get::<_, i64>(1)? as u64, raw_sha256: row.get(2)?, name: row.get(3)?, format: row.get(4)? })).optional()?.ok_or(CloudError::NotFound)
+        conn.query_row("SELECT object_path, byte_length, raw_sha256, name, format FROM available_asset_revisions WHERE asset_id = ?1 AND revision = ?2", params![asset_id, revision as i64], |row| Ok(AssetContent { path: PathBuf::from(row.get::<_, String>(0)?), length: row.get::<_, i64>(1)? as u64, raw_sha256: row.get(2)?, name: row.get(3)?, format: row.get(4)? })).optional()?.ok_or(CloudError::NotFound)
     }
 
     pub fn set_asset_visibility(
@@ -2365,7 +2412,7 @@ impl CloudStore {
     }
 }
 
-fn write_audit(
+pub(crate) fn write_audit(
     conn: &Connection,
     actor_account_id: &str,
     action: &str,
@@ -2384,7 +2431,7 @@ fn asset_permission(
     account_id: &str,
 ) -> Result<Option<String>, CloudError> {
     conn.query_row(
-        "SELECT permission FROM asset_acl WHERE asset_id = ?1 AND account_id = ?2",
+        "SELECT permission FROM asset_acl WHERE asset_id = ?1 AND account_id = ?2 AND EXISTS(SELECT 1 FROM available_asset_revisions r WHERE r.asset_id=?1)",
         params![asset_id, account_id],
         |row| row.get(0),
     )
@@ -2754,6 +2801,9 @@ mod tests {
             max_entity_query_count: 64,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
+            config_path: None,
+            web_ui: Default::default(),
+            moderation: Default::default(),
         };
         let store = CloudStore::open(&config).unwrap();
         assert_eq!(
@@ -3043,7 +3093,7 @@ mod tests {
         ));
 
         let asset = store
-            .register_asset(
+            .register_asset_with_visibility(
                 "account_local",
                 "asset",
                 "model.ysm",
@@ -3051,6 +3101,8 @@ mod tests {
                 &"a".repeat(64),
                 1,
                 &dir.path().join("asset"),
+                None,
+                Some("PRIVATE"),
             )
             .unwrap();
         assert_eq!(asset.revision, 1);
@@ -3182,6 +3234,9 @@ mod tests {
             max_entity_query_count: 64,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
+            config_path: None,
+            web_ui: Default::default(),
+            moderation: Default::default(),
         };
         let store = CloudStore::open(&config).unwrap();
         store

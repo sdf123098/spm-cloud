@@ -7,7 +7,7 @@ services:
     volumes:
       - spm-cloud-data:/var/lib/spm-cloud/data
       - spm-cloud-objects:/var/lib/spm-cloud/objects
-      - ${SPM_CLOUD_CONFIG_DIR:-./deploy/runtime}:/etc/spm-cloud:ro
+      - ${SPM_CLOUD_CONFIG_DIR:-./deploy/runtime}:/etc/spm-cloud
     expose:
       - "8787"
 

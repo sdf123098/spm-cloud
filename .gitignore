@@ -19,3 +19,10 @@ cloudflare/worker-configuration.d.ts
 
 # Administrator JSON deployment credentials and mutable local runtime
 deploy/runtime/
+
+# Private browser/session captures and local environment variants
+/.env.*
+/.playwright-mcp/
+/playwright-report/
+/test-results/
+*.har

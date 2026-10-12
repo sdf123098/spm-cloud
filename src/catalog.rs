@@ -64,7 +64,7 @@ pub async fn list(
         .lock()
         .map_err(|_| CloudError::configuration("database lock poisoned"))?;
     let mut statement=conn.prepare("SELECT a.asset_id,r.revision,r.name,r.format,r.raw_sha256,r.byte_length,a.visibility
-        FROM assets a JOIN asset_revisions r ON r.asset_id=a.asset_id AND r.revision=a.current_revision
+        FROM assets a JOIN available_asset_revisions r ON r.asset_id=a.asset_id AND r.revision=a.current_revision
         LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?1
         WHERE ((?2='mine' AND a.owner_account_id=?1)
             OR (?2='shared' AND a.owner_account_id<>?1 AND acl.permission IN ('use','discover','render_read'))

@@ -5,3 +5,14 @@ data
 objects
 *.db
 *.db-*
+
+# Private runtime and browser authentication material
+secrets
+deploy/runtime
+config.json
+.env
+.env.*
+.playwright-mcp
+playwright-report
+test-results
+*.har

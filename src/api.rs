@@ -41,6 +41,8 @@ pub struct AppState {
     runtime_config: Arc<std::sync::RwLock<CloudConfig>>,
     pub store: CloudStore,
     pub events: broadcast::Sender<CloudEvent>,
+    pub(crate) admin_login_attempts: Arc<std::sync::Mutex<std::collections::VecDeque<i64>>>,
+    pub(crate) config_edit_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -73,6 +75,8 @@ impl AppState {
             runtime_config: Arc::new(std::sync::RwLock::new(config)),
             store,
             events,
+            admin_login_attempts: Default::default(),
+            config_edit_lock: Default::default(),
         }
     }
 
@@ -83,11 +87,17 @@ impl AppState {
             .clone()
     }
 
-    pub fn update_runtime_config(&self, config: CloudConfig) {
+    pub fn update_runtime_config(&self, config: CloudConfig) -> Result<(), CloudError> {
+        self.store.set_moderation_policy(&config.moderation)?;
+        self.store.update_runtime_settings(&config);
         *self
             .runtime_config
             .write()
             .expect("runtime configuration lock poisoned") = config;
+        Ok(())
+    }
+    pub async fn config_edit_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.config_edit_lock.lock().await
     }
 }
 
@@ -238,6 +248,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/targets/{target_id}/acl", get(list_acl).put(set_acl))
         .with_state(state.clone())
+        .merge(crate::admin::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state,
             dynamic_body_limit,
@@ -252,7 +263,10 @@ async fn dynamic_body_limit(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if request.method() == axum::http::Method::POST && request.uri().path() == "/v1/assets" {
+    if request.uri().path().starts_with("/admin/")
+        || request.uri().path() == "/admin"
+        || (request.method() == axum::http::Method::POST && request.uri().path() == "/v1/assets")
+    {
         return next.run(request).await;
     }
     let limit = state.runtime_config().max_message_bytes;
@@ -267,14 +281,21 @@ async fn dynamic_body_limit(
 }
 
 async fn api_headers(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let request_is_admin = request.uri().path().starts_with("/admin");
+    let request_is_font = request.uri().path().starts_with("/admin/fonts/");
     let mut response = if request.method() == axum::http::Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
     } else {
         next.run(request).await
     };
+    let cache_font = request_is_font && response.status().is_success();
     let headers = response.headers_mut();
-    headers.insert("cache-control", HeaderValue::from_static("no-store"));
-    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    if !cache_font {
+        headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    }
+    if !request_is_admin {
+        headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    }
     headers.insert(
         "access-control-allow-methods",
         HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
@@ -810,12 +831,24 @@ struct CatalogQuery {
     limit: Option<usize>,
 }
 
-async fn upload_asset(
+pub(crate) async fn upload_asset(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, CloudError> {
-    let account = authenticate(&state, &headers)?;
+    if headers.contains_key("x-asset-owner-account") {
+        return Err(CloudError::AccessDenied);
+    }
+    upload_asset_as(state, headers, body, None).await
+}
+pub(crate) async fn upload_asset_as(
+    state: AppState,
+    headers: HeaderMap,
+    body: Body,
+    owner: Option<String>,
+) -> Result<Response, CloudError> {
+    let actor = authenticate(&state, &headers)?;
+    let account = owner.unwrap_or_else(|| actor.clone());
     let request_id = header_string(&headers, "idempotency-key")?
         .ok_or_else(|| CloudError::invalid_metadata("Idempotency-Key is required"))?;
     let asset_id = asset_metadata_header(&headers, "x-asset-id")?
@@ -900,6 +933,22 @@ async fn upload_asset(
         return Err(CloudError::AssetHashMismatch);
     }
     let object_path = state.store.object_path_for_sha(&sha256);
+    let moderation = state.runtime_config().moderation;
+    let scan = crate::moderation::scan(&temp_path, &name, &moderation).await;
+    state.store.save_scan(&sha256, &scan)?;
+    if let Err(error) = state.store.enforce_content_policy(&sha256) {
+        let _ = fs::remove_file(&temp_path).await;
+        state
+            .store
+            .fail_upload_operation(&operation_id, error.code())?;
+        state.store.admin_audit(
+            &actor,
+            "MODEL_UPLOAD_REJECTED",
+            Some(&asset_id),
+            serde_json::json!({"code":error.code(),"sha256":sha256,"recognition":scan.status}),
+        )?;
+        return Err(error);
+    }
     if let Some(parent) = object_path.parent() {
         fs::create_dir_all(parent).await?;
     }
@@ -946,6 +995,12 @@ async fn upload_asset(
     state
         .store
         .complete_upload_operation(&operation_id, &summary)?;
+    state.store.admin_audit(
+        &actor,
+        "MODEL_UPLOADED",
+        Some(&asset_id),
+        serde_json::json!({"status":scan.status,"revision":summary.revision,"owner_account_id":account}),
+    )?;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
         header::HeaderName::from_static("x-operation-id"),
@@ -1262,6 +1317,9 @@ pub(crate) mod tests {
             max_entity_query_count: 64,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
+            config_path: None,
+            web_ui: Default::default(),
+            moderation: Default::default(),
         });
         let store = CloudStore::open(&config).unwrap();
         let (events, _) = broadcast::channel(8);
@@ -1271,6 +1329,8 @@ pub(crate) mod tests {
                 config,
                 store,
                 events,
+                admin_login_attempts: Default::default(),
+                config_edit_lock: Default::default(),
             },
             directory,
         )

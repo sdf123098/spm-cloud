@@ -6,6 +6,22 @@
 
 The backend runs independently of Minecraft. You can deploy it beside a Minecraft server or on a separate public server. Players need a current SparkleMorpher build and the HTTPS address of your instance.
 
+## Embedded administration and content moderation
+
+Visit `https://your-host/admin/`. The console is embedded in the Rust binary. The bootstrap owner signs in using the token referenced by `auth.bootstrap_access_token_file`, sets an owner password if desired, and creates/distributes administrator accounts. Ordinary self-registration grants no console access. Administrators manage all models and read configuration/activity; only the owner edits configuration or distributes accounts. Account disabling, password resets and role changes revoke existing sessions.
+
+The console supports model upload, search/pagination, visibility, reversible deletion, re-scanning, manual content verdicts, and all JSON settings through forms or an advanced JSON editor. Configuration saves are validated and detect concurrent edits. Start with `--config PATH` and give the service write access to the configuration directory for saving. `web_ui.enabled=false` disables the console and its management API.
+
+The panel layout follows 1Panel's navigation and compact panels. The model library switches between a compact grid and depth-styled cards with pointer tilt; the browser remembers the selection and respects reduced motion. All 48 original HarmonyOS Sans fonts (SC, TC, Latin, condensed, italic and Arabic variants) and pinned Lucide SVG icons are embedded for offline use. Fonts load on demand and use versioned URLs with a seven-day cache. Original fonts add about 75.4 MiB to the binary. Their licenses differ from the application's MIT license: see the console's `/admin/credits`, `web/credits.txt`, and the source asset manifests.
+
+The content area scrolls independently while navigation stays in place. Compact model cards open a detail dialog for individual actions. Select models or all currently loaded results for batch visibility, re-scanning, marking, deletion and restoration; successful items are deselected and failures remain selected for retry. Search/refresh retains selection only for visible results, and the selection survives view switching. Batch marking shares the same content-hash scope as individual marking.
+
+`moderation.detection_enabled` and `moderation.block_r18` are independent. Optional texture recognition uses a self-hosted [NudeNet](https://github.com/notAI-tech/NudeNet) `/infer` endpoint; blocked revisions are excluded from discovery, downloads, player/entity selection and exact resource authorization. `block_unclassified` additionally rejects unreadable, unscanned, disabled, over-budget or failed classifications. Recognition and blocking default to off for compatibility. Re-scan existing models after enabling recognition. Manual verdicts are content-addressed and survive automated re-scans.
+
+For a native deployment (the source checkout paths below have no `tools/` prefix in prebuilt archives), create a Python virtual environment, install `tools/requirements-moderation.txt`, and run `tools/nudenet_service.py --port 8080`. Set `moderation.scanner_url` to `http://127.0.0.1:8080/infer`, enable both recognition flags, and choose `block_r18` separately. The supplied adapter reads PNG/JPEG/WebP/AVIF by content, retains no images, and uses NudeNet 320n. ZIP, bbmodel and embedded glTF/GLB textures are supported; encrypted `.ysm` requires an independently installed [YSMParser](https://github.com/OpenYSM/YSMParser) executable configured with `moderation.ysm_parser_path` (relative paths resolve from the JSON directory). Animated images and incomplete reads remain unclassified. Stylized textures, UV atlases and low-resolution images can produce false positives or misses; retain human review.
+
+For Docker, add `docker-compose.moderation.yml` to the JSON Compose deployment and set the scanner URL to `http://nudenet:8080/infer`. The official scanner image's image-format support depends on its dependencies; use the supplied Python adapter when AVIF support is required. See the [Chinese walkthrough](README_zh.md) and [deployment guide](deploy/ADMIN_JSON.md) for commands and directory permissions.
+
 ## Choose an installation method
 
 | Method | Best for | Initial installation | Updates |
@@ -360,3 +376,15 @@ curl -fsS https://cloud.example.com/v1/accounts \
 Rust development requires Rust 1.87 or newer. Tests additionally need Node.js 22+ for test fixtures; production runtime does not. Build and CI details are in [platform CI](.github/workflows/platforms.yml); Worker deployment is documented in [cloudflare/README.md](cloudflare/README.md).
 
 **License:** MIT.
+
+### Model ownership and self-service account connections
+
+Uploads default to PUBLIC. Private console uploads require an explicit Cloud owner. Administrators can assign owners individually or in bulk; transferring ownership clears existing sharing grants without changing model bytes or revisions.
+
+Users manage their own connections at `/account/`; `/admin/` remains restricted to owner-distributed administrators. Connecting accounts requires proof of both accounts and unifies verified official/Yggdrasil identities while preserving identity IDs. Model ownership and administrative roles are not migrated. Game login in the mod issues the Cloud account session; browser login issues the associated WebUI account session.
+
+Configure a personal-account-compatible Microsoft Entra Web application with `web_ui.microsoft_client_id`, `microsoft_client_secret_file`, and `microsoft_redirect_uri`. Register `/admin/oauth/microsoft/callback` on your public HTTPS origin (localhost HTTP is allowed for local tests). Keep the secret file outside source control and release archives. OAuth uses PKCE, browser-bound expiring state, and a one-time redemption ticket; Xbox and Minecraft profile verification must complete before accepting a game identity.
+
+Trusted HTTPS third-party providers support standard Yggdrasil and Ely authentication, role selection, and join/hasJoined verification. Manual verification accepts service-validated access tokens; names or UUIDs alone never prove ownership. Existing mod-side game identity bindings are shared with the browser account center. See the Chinese README for configuration details.
+
+Microsoft browser login also requires Minecraft Services access for the application. Entra registration alone does not grant this access; new applications can apply through the official AppID Review form at https://aka.ms/mce-reviewappid. If Microsoft and Xbox authentication succeed but Minecraft application authentication returns HTTP 403, check application approval. Failed Minecraft verification never creates a verified game identity. Existing mod-side identity verification remains an independent option.

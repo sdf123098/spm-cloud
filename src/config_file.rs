@@ -26,6 +26,8 @@ pub struct FileConfig {
     pub features: Features,
     pub retention: Retention,
     pub logging: Logging,
+    pub web_ui: crate::admin::WebUiSettings,
+    pub moderation: crate::moderation::ModerationSettings,
 }
 impl Default for FileConfig {
     fn default() -> Self {
@@ -38,6 +40,8 @@ impl Default for FileConfig {
             features: Features::default(),
             retention: Retention::default(),
             logging: Logging::default(),
+            web_ui: Default::default(),
+            moderation: Default::default(),
         }
     }
 }
@@ -319,6 +323,7 @@ impl LoadedConfig {
             );
         }
         validate(&input, file.is_some())?;
+        input.moderation.validate()?;
         validate_slug(&input.instance.instance_id, "instance.instance_id")?;
         validate_slug(
             &input.auth.bootstrap_account_id,
@@ -460,6 +465,13 @@ impl LoadedConfig {
                 "logging.level".into()
             },
         );
+        let mut moderation = input.moderation.clone();
+        moderation.ysm_parser_path = moderation.ysm_parser_path.map(|path| absolute(base, &path));
+        crate::browser_auth::validate_settings(&input.web_ui, &origin)?;
+        let mut web_ui = input.web_ui.clone();
+        web_ui.microsoft_client_secret_file = web_ui
+            .microsoft_client_secret_file
+            .map(|path| absolute(base, &path));
         let cloud = CloudConfig {
             instance_id: input.instance.instance_id.clone(),
             origin: origin.clone(),
@@ -479,6 +491,9 @@ impl LoadedConfig {
                 retention: input.retention.clone(),
             },
             trusted_proxy_ips,
+            config_path: file.clone(),
+            web_ui,
+            moderation,
         };
         let mut effective = serde_json::to_value(&input).unwrap();
         effective["instance"]["origin"] = json!(origin);

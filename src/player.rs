@@ -267,10 +267,10 @@ impl CloudStore {
             validate_motion(motion)?;
         }
         if let Some(display) = &input.display_state {
-            if !self.visual.features.player_display_state {
+            if !self.visual_settings().features.player_display_state {
                 return Err(CloudError::ProtocolUnsupported);
             }
-            crate::display::validate(display, &self.visual)?;
+            crate::display::validate(display, &self.visual_settings())?;
             crate::display::context(
                 &tx,
                 account,
@@ -278,10 +278,10 @@ impl CloudStore {
                 &display.world_epoch,
                 &display.dimension_id,
             )?;
-            crate::visual::rate(&tx, account, &self.visual, now() * 1000)?;
+            crate::visual::rate(&tx, account, &self.visual_settings(), now() * 1000)?;
         }
         if let Some(id) = &input.asset_id {
-            let allowed: Option<(String, String)>=tx.query_row("SELECT r.raw_sha256,r.format FROM asset_revisions r JOIN assets a ON a.asset_id=r.asset_id
+            let allowed: Option<(String, String)>=tx.query_row("SELECT r.raw_sha256,r.format FROM available_asset_revisions r JOIN assets a ON a.asset_id=r.asset_id
                 LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?1
                 WHERE r.asset_id=?2 AND r.revision=?3 AND (a.visibility='PUBLIC' OR a.owner_account_id=?1 OR acl.permission IN ('manage','use','render_read'))",
                 params![account,id,input.asset_revision.map(|v| v as i64)],|row| Ok((row.get(0)?,row.get(1)?))).optional()?;
@@ -381,7 +381,7 @@ impl CloudStore {
         let mut statement=conn.prepare("SELECT p.revision,p.asset_id,p.asset_revision,p.raw_sha256,p.texture_id,r.format,a.visibility,a.owner_account_id,m.motion_json,d.display_json,p.updated_at,i.account_id
             FROM player_appearances p JOIN identities i ON i.identity_id=p.identity_id AND i.verified=1
             JOIN identity_providers provider ON provider.provider_id=COALESCE(i.provider_id,'official') AND provider.enabled=1
-            LEFT JOIN assets a ON a.asset_id=p.asset_id LEFT JOIN asset_revisions r ON r.asset_id=p.asset_id AND r.revision=p.asset_revision AND r.raw_sha256=p.raw_sha256
+            LEFT JOIN assets a ON a.asset_id=p.asset_id LEFT JOIN available_asset_revisions r ON r.asset_id=p.asset_id AND r.revision=p.asset_revision AND r.raw_sha256=p.raw_sha256
             LEFT JOIN player_motion m ON m.identity_id=p.identity_id
             LEFT JOIN player_display_states d ON d.identity_id=p.identity_id
             WHERE p.entity_uuid=?1 AND p.updated_at>?2")?;
@@ -406,7 +406,7 @@ impl CloudStore {
                                 .and_then(|json| serde_json::from_str(&json).ok()),
                             display_state: row
                                 .get::<_, Option<String>>(9)?
-                                .filter(|_| self.visual.features.player_display_state)
+                                .filter(|_| self.visual_settings().features.player_display_state)
                                 .and_then(|text| {
                                     let display: crate::display::PlayerDisplayUpdate =
                                         serde_json::from_str(&text).ok()?;
@@ -782,6 +782,9 @@ mod tests {
             max_entity_query_count: 64,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
+            config_path: None,
+            web_ui: Default::default(),
+            moderation: Default::default(),
         };
         let store = CloudStore::open(&config).unwrap();
         (dir, store)

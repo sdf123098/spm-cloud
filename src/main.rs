@@ -149,6 +149,7 @@ async fn reload_config(
     let mut previous = None::<Vec<u8>>;
     loop {
         sleep(Duration::from_secs(2)).await;
+        let _edit_lock = state.config_edit_guard().await;
         let contents = match tokio::fs::read(&path).await {
             Ok(contents) => contents,
             Err(error) => {
@@ -225,7 +226,12 @@ async fn reload_config(
         next.max_entity_query_count = candidate.max_entity_query_count;
         next.visual = candidate.visual;
         next.trusted_proxy_ips = candidate.trusted_proxy_ips;
-        state.update_runtime_config(next.clone());
+        next.web_ui = candidate.web_ui;
+        next.moderation = candidate.moderation;
+        if let Err(error) = state.update_runtime_config(next.clone()) {
+            tracing::error!(%error,"failed to apply runtime configuration");
+            continue;
+        }
         current_logging = loaded.logging;
         current_log_filter = loaded.log_filter;
         if restart_fields.is_empty() {

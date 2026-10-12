@@ -919,7 +919,7 @@ mod tests {
         let (state, _dir) = test_state(false);
         let mut runtime_config = state.runtime_config();
         runtime_config.trusted_proxy_ips = vec!["127.0.0.1".parse().unwrap()];
-        state.update_runtime_config(runtime_config);
+        state.update_runtime_config(runtime_config).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("x-spm-client-ip", "1.2.3.4".parse().unwrap());
         assert_eq!(

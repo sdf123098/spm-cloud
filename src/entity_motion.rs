@@ -171,7 +171,7 @@ fn authorized_resource(
         "SELECT b.target_id,b.revision,b.entity_kind,a.revision,a.asset_id,a.asset_revision,a.raw_sha256,a.texture_id,r.format,a.disabled,s.role,acl.role
         FROM entity_bindings b JOIN targets t ON t.target_id=b.target_id AND t.scope_id=b.scope_id AND t.target_kind=b.entity_kind
         JOIN scope_acl s ON s.scope_id=b.scope_id AND s.account_id=?4 JOIN target_acl acl ON acl.target_id=b.target_id AND acl.account_id=?4
-        JOIN appearances a ON a.target_id=b.target_id LEFT JOIN asset_revisions r ON r.asset_id=a.asset_id AND r.revision=a.asset_revision AND r.raw_sha256=a.raw_sha256
+        JOIN appearances a ON a.target_id=b.target_id LEFT JOIN available_asset_revisions r ON r.asset_id=a.asset_id AND r.revision=a.asset_revision AND r.raw_sha256=a.raw_sha256
         WHERE b.scope_id=?1 AND b.world_epoch=?2 AND b.entity_uuid=?3",params![scope,input.world_epoch,entity.to_string(),account],
         |r|Ok((r.get(0)?,r.get::<_,i64>(1)? as u64,r.get(2)?,r.get::<_,i64>(3)? as u64,r.get(4)?,r.get::<_,Option<i64>>(5)?.map(|v|v as u64),r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?))).optional()?;
     let Some((
@@ -222,7 +222,7 @@ impl CloudStore {
         scope: &str,
         query: &SnapshotQuery,
     ) -> Result<Vec<MotionRevision>, CloudError> {
-        if query.entity_uuids.len() > self.visual.limits.max_entity_query_count {
+        if query.entity_uuids.len() > self.visual_settings().limits.max_entity_query_count {
             return Err(CloudError::invalid_metadata("entity query limit exceeded"));
         }
         let conn = self
@@ -297,7 +297,7 @@ impl CloudStore {
         input: &EntityMotionUpdate,
         time: i64,
     ) -> Result<EntityMotionEntry, CloudError> {
-        let text = validate(input, &self.visual)?;
+        let text = validate(input, &self.visual_settings())?;
         let mut conn = self
             .connection
             .lock()
@@ -337,7 +337,7 @@ impl CloudStore {
                 }
             }
         }
-        visual::rate(&tx, account, &self.visual, time)?;
+        visual::rate(&tx, account, &self.visual_settings(), time)?;
         let next = revision + 1;
         let expiry = time + 60_000;
         let resource_json = serde_json::to_string(&resource)
@@ -362,7 +362,7 @@ impl CloudStore {
         query: &SnapshotQuery,
         time: i64,
     ) -> Result<Vec<EntityMotionEntry>, CloudError> {
-        if query.entity_uuids.len() > self.visual.limits.max_entity_query_count {
+        if query.entity_uuids.len() > self.visual_settings().limits.max_entity_query_count {
             return Err(CloudError::invalid_metadata("entity query limit exceeded"));
         }
         let conn = self
@@ -655,10 +655,10 @@ mod tests {
             .motion
             .roaming
             .insert("variable.pose".into(), f64::MAX);
-        assert!(validate(&update, &store.visual).is_err());
+        assert!(validate(&update, &store.visual_settings()).is_err());
         update.motion.roaming.clear();
         update.entity_kind = "PLAYER".into();
-        assert!(validate(&update, &store.visual).is_err());
+        assert!(validate(&update, &store.visual_settings()).is_err());
     }
     #[test]
     fn explicit_privacy_withdrawal_clears_payload_and_preserves_authorized_cas() {

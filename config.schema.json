@@ -270,6 +270,111 @@
           ]
         }
       }
+    },
+    "web_ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Serve the embedded owner/admin console at /admin/. Disabling also disables its API."
+        },
+        "microsoft_client_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Microsoft Entra application Client ID. Personal Microsoft account login uses authorization code + PKCE."
+        },
+        "microsoft_client_secret_file": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Server-side client secret file path, relative to the configuration file. The secret is never exposed to the browser."
+        },
+        "microsoft_redirect_uri": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Registered Web redirect URI ending in /admin/oauth/microsoft/callback. HTTPS required except loopback testing. Null derives from instance.origin."
+        }
+      }
+    },
+    "moderation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "detection_enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Recognize model metadata and optionally embedded textures. Independent from blocking."
+        },
+        "block_r18": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reject R18 uploads and suppress all classified/manual R18 revisions from discovery, download and use, even when recognition is disabled."
+        },
+        "block_unclassified": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reject unknown/disabled/unscanned models, including encrypted or unsupported content and scanner failures."
+        },
+        "texture_detection_enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Analyze readable embedded textures using a self-hosted NudeNet-compatible /infer service."
+        },
+        "scanner_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "NudeNet /infer HTTP(S) URL. Required when both recognition and texture recognition are enabled."
+        },
+        "score_threshold": {
+          "type": "number",
+          "default": 0.7,
+          "description": "Exposed-content confidence threshold. Results require human review for stylized textures.",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "default": 30,
+          "description": "Total scanner time budget per model in seconds.",
+          "minimum": 1,
+          "maximum": 300
+        },
+        "max_textures": {
+          "type": "integer",
+          "default": 64,
+          "description": "Maximum embedded images per model. Exceeding budgets yields UNKNOWN.",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "max_texture_bytes": {
+          "type": "integer",
+          "default": 8388608,
+          "description": "Maximum bytes per embedded texture; total extraction is capped at 64 MiB.",
+          "minimum": 1024,
+          "maximum": 33554432
+        },
+        "ysm_parser_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Optional YSMParser executable path for encrypted .ysm textures; relative to the JSON config directory. Not bundled."
+        }
+      }
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

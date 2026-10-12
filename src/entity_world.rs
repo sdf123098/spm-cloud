@@ -55,6 +55,9 @@ mod tests {
             max_entity_query_count: 64,
             visual: Default::default(),
             trusted_proxy_ips: vec![],
+            config_path: None,
+            web_ui: Default::default(),
+            moderation: Default::default(),
         };
         let store = CloudStore::open(&config).unwrap();
         store.connection.lock().unwrap().execute_batch("INSERT INTO accounts(account_id,created_at) VALUES ('observer',datetime('now')),('editor',datetime('now'));").unwrap();
@@ -63,10 +66,30 @@ mod tests {
         std::fs::write(&old, "old").unwrap();
         std::fs::write(&new, "new").unwrap();
         store
-            .register_asset("owner", "private-model", "Model", "ysm", SHA1, 3, &old)
+            .register_asset_with_visibility(
+                "owner",
+                "private-model",
+                "Model",
+                "ysm",
+                SHA1,
+                3,
+                &old,
+                None,
+                Some("PRIVATE"),
+            )
             .unwrap();
         store
-            .register_asset("owner", "private-model", "Model", "ysm", SHA2, 3, &new)
+            .register_asset_with_visibility(
+                "owner",
+                "private-model",
+                "Model",
+                "ysm",
+                SHA2,
+                3,
+                &new,
+                None,
+                Some("PRIVATE"),
+            )
             .unwrap();
         (
             dir,
@@ -391,7 +414,7 @@ fn selection(conn: &Connection, account: &str, target: &str) -> Result<(u64, Val
     let row=conn.query_row("SELECT p.revision,p.asset_id,p.asset_revision,p.raw_sha256,p.texture_id,p.disabled,r.format,
         CASE WHEN a.visibility='PUBLIC' OR acl.permission IN ('manage','render_read') OR (sharing.target_id IS NOT NULL AND (a.owner_account_id=sharing.shared_by_account_id OR sharing_acl.permission='manage')) THEN 1 ELSE 0 END
         FROM appearances p LEFT JOIN assets a ON a.asset_id=p.asset_id
-        LEFT JOIN asset_revisions r ON r.asset_id=p.asset_id AND r.revision=p.asset_revision AND r.raw_sha256=p.raw_sha256
+        LEFT JOIN available_asset_revisions r ON r.asset_id=p.asset_id AND r.revision=p.asset_revision AND r.raw_sha256=p.raw_sha256
         LEFT JOIN asset_acl acl ON acl.asset_id=p.asset_id AND acl.account_id=?1
         LEFT JOIN entity_model_shares sharing ON sharing.target_id=p.target_id AND sharing.asset_id=p.asset_id AND sharing.asset_revision=p.asset_revision AND sharing.raw_sha256=p.raw_sha256
         LEFT JOIN asset_acl sharing_acl ON sharing_acl.asset_id=sharing.asset_id AND sharing_acl.account_id=sharing.shared_by_account_id
@@ -443,10 +466,10 @@ impl CloudStore {
         ids: &[uuid::Uuid],
     ) -> Result<Vec<Value>, CloudError> {
         let scope = key(epoch)?;
-        if ids.len() > self.max_entity_query_count {
+        if ids.len() > self.entity_query_limit() {
             return Err(CloudError::invalid_metadata(format!(
                 "entity_uuids must contain at most {} UUIDs",
-                self.max_entity_query_count
+                self.entity_query_limit()
             )));
         }
         let conn = self
@@ -538,7 +561,7 @@ impl CloudStore {
                     !s.is_empty() && s.chars().count() <= 256 && !s.chars().any(char::is_control)
                 })
                 .ok_or_else(|| CloudError::invalid_metadata("texture required"))?;
-            let refrow:Option<(String,String,String,String,Option<String>)>=tx.query_row("SELECT r.raw_sha256,r.format,a.visibility,a.owner_account_id,acl.permission FROM asset_revisions r JOIN assets a ON a.asset_id=r.asset_id LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?1 WHERE r.asset_id=?2 AND r.revision=?3",params![account,asset,revision as i64],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+            let refrow:Option<(String,String,String,String,Option<String>)>=tx.query_row("SELECT r.raw_sha256,r.format,a.visibility,a.owner_account_id,acl.permission FROM available_asset_revisions r JOIN assets a ON a.asset_id=r.asset_id LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?1 WHERE r.asset_id=?2 AND r.revision=?3",params![account,asset,revision as i64],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
             let r = refrow.ok_or(CloudError::AccessDenied)?;
             if r.0 != *sha
                 || (r.2 != "PUBLIC"
@@ -640,7 +663,7 @@ impl CloudStore {
         if selection(&conn, account, &target)?.1.is_null() {
             return Err(CloudError::AccessDenied);
         }
-        let path:String=conn.query_row("SELECT object_path FROM asset_revisions WHERE asset_id=?1 AND revision=?2 AND raw_sha256=?3",params![current.0,input.asset_revision as i64,input.raw_sha256],|r|r.get(0))?;
+        let path:String=conn.query_row("SELECT object_path FROM available_asset_revisions WHERE asset_id=?1 AND revision=?2 AND raw_sha256=?3",params![current.0,input.asset_revision as i64,input.raw_sha256],|r|r.get(0))?;
         Ok((path, input.raw_sha256.clone()))
     }
 }

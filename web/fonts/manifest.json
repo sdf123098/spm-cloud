@@ -1,0 +1,390 @@
+{
+  "source": "https://developer.huawei.com/images/download/general/HarmonyOS-Sans.zip",
+  "archive_sha256": "fb02c86e358cd9aad8d4dfa957ee502381e7ee2e94499a9133add4324b6ce69a",
+  "fonts": [
+    {
+      "file": "HarmonyOS_Sans_Black.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 900,
+      "style": "normal",
+      "bytes": 145696,
+      "sha256": "ef643b37b20c21d01edb5722934cff45ae885f0b03ca1864386463e12fb03e22"
+    },
+    {
+      "file": "HarmonyOS_Sans_Bold.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 700,
+      "style": "normal",
+      "bytes": 145860,
+      "sha256": "7f973862c42353c9cc372dc2ae891d12c9ea5fe2a01b449adaf1eade9b469b47"
+    },
+    {
+      "file": "HarmonyOS_Sans_Light.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 300,
+      "style": "normal",
+      "bytes": 147552,
+      "sha256": "e63124785efe56484d5ff09eb03ff77db940dcc55cf1c8e98da1aa6dbdf03147"
+    },
+    {
+      "file": "HarmonyOS_Sans_Medium.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 500,
+      "style": "normal",
+      "bytes": 146164,
+      "sha256": "f6b009d07d8d894d55eadeb7080b4916c3a2c83ff3ee60bbe851e6698d73bafd"
+    },
+    {
+      "file": "HarmonyOS_Sans_Regular.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 400,
+      "style": "normal",
+      "bytes": 146616,
+      "sha256": "4f00c7e80329238d0b6fc58e5c829c4086432ba9fa1a8c5ca3da9a0442ce0452"
+    },
+    {
+      "file": "HarmonyOS_Sans_Thin.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 100,
+      "style": "normal",
+      "bytes": 148124,
+      "sha256": "d282f31c5c160915cdb10d228119c35d6eb640f6fdac9960e9891272bdb4adf4"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Black.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 900,
+      "style": "normal",
+      "bytes": 136116,
+      "sha256": "0e2c83fc6b9731470cda9b132f769da5c5459545b63c573385c70637300baceb"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Bold.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 700,
+      "style": "normal",
+      "bytes": 135788,
+      "sha256": "f4cab6822128e2fde6ea91751b9af4407001f01ca6235451ee6c968aa47ff022"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Light.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 300,
+      "style": "normal",
+      "bytes": 137316,
+      "sha256": "f1e77102835485a444589d9ad73c248ba9d11e9240fd007e26771912d8341eeb"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Medium.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 500,
+      "style": "normal",
+      "bytes": 136560,
+      "sha256": "49c3695ffa2924175a9bfe995691559aecd15697587c109b35c2ca66183e93ad"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Regular.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 400,
+      "style": "normal",
+      "bytes": 135844,
+      "sha256": "ef6accddbc7c494c87f5d264cfbf1b4d7def914d115b94528ffbe71f5cc7bf80"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Thin.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 100,
+      "style": "normal",
+      "bytes": 139100,
+      "sha256": "f123028c19c96c5e59a5075e4095aec60077b5ee00b7060c4bc0c2274aa12eac"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Black_Italic.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 900,
+      "style": "italic",
+      "bytes": 136348,
+      "sha256": "4227b1c8c72286f17d2b05312b21d1c882bf51e330ced81143a148f2ba9a1de9"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Bold_Italic.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 700,
+      "style": "italic",
+      "bytes": 136892,
+      "sha256": "286307c47de5bbc28b33002bfe5c2d24af3c476d228e84037fd66d4cfc700e3c"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Light_Italic.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 300,
+      "style": "italic",
+      "bytes": 138960,
+      "sha256": "85aace7b39dbd2a2f26ba86fa8a9959dd56f874e75bd70f2f2645b891b2df0c6"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Medium_Italic.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 500,
+      "style": "italic",
+      "bytes": 138048,
+      "sha256": "5913a16b155bb42cde9c88bc96639ce43f843eb4322d386c911863627aedef70"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Regular_Italic.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 400,
+      "style": "italic",
+      "bytes": 137876,
+      "sha256": "ec61739bd2e3e0ed233c4aed98ac604584018017a5f85dc116b8cf6e064c16d4"
+    },
+    {
+      "file": "HarmonyOS_Sans_Condensed_Thin_Italic.ttf",
+      "family": "HarmonyOS Sans Condensed",
+      "weight": 100,
+      "style": "italic",
+      "bytes": 139556,
+      "sha256": "5a700626d25162999defd99008ca7164433c8f0992b519f315bb9a94de05bd7f"
+    },
+    {
+      "file": "HarmonyOS_Sans_Black_Italic.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 900,
+      "style": "italic",
+      "bytes": 140060,
+      "sha256": "8559e332a72b7fe68496056b36584d75560585505b1ce69d7d2ae78f4ca99a3b"
+    },
+    {
+      "file": "HarmonyOS_Sans_Bold_Italic.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 700,
+      "style": "italic",
+      "bytes": 140568,
+      "sha256": "05eccf749d6602d1832a5214d1b704c0b3010497580cdbe7fc2a153558856153"
+    },
+    {
+      "file": "HarmonyOS_Sans_Light_Italic.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 300,
+      "style": "italic",
+      "bytes": 142136,
+      "sha256": "032dcc9c42ab19f4e4eeaef06fe10ee7fab552138a7bf16d607dabda78850d7e"
+    },
+    {
+      "file": "HarmonyOS_Sans_Medium_Italic.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 500,
+      "style": "italic",
+      "bytes": 140932,
+      "sha256": "8035933cb913dd714de3cdcb74044477f9c2ddc315ccea9f81ec1e7f593ae095"
+    },
+    {
+      "file": "HarmonyOS_Sans_Regular_Italic.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 400,
+      "style": "italic",
+      "bytes": 140500,
+      "sha256": "3c90775b60f11328c3a84d7ba75443a667dee7458cef765ceb0fa10badad3c7e"
+    },
+    {
+      "file": "HarmonyOS_Sans_Thin_Italic.ttf",
+      "family": "HarmonyOS Sans",
+      "weight": 100,
+      "style": "italic",
+      "bytes": 143400,
+      "sha256": "156338dc0ca9d908a95f58cd9eb489314a0dfc669f618f5005a5b4044101eae5"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_Black.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic",
+      "weight": 900,
+      "style": "normal",
+      "bytes": 121568,
+      "sha256": "eaf20098b8dbb617e07e067f216c84eee7e6ba6ec6b31e42895a75e4d0b25c63"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_Bold.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic",
+      "weight": 700,
+      "style": "normal",
+      "bytes": 121392,
+      "sha256": "5b97ebd4d73dc3c0c23685340d4b96332ea4d942137515f5e0bfb542b75c139e"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_Light.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic",
+      "weight": 300,
+      "style": "normal",
+      "bytes": 122072,
+      "sha256": "98274dc8d6014de9c203faf64c7332cf7b7b4cce16626dfc813707fc0fb90304"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_Medium.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic",
+      "weight": 500,
+      "style": "normal",
+      "bytes": 120888,
+      "sha256": "a8c9a03590c817b535d97c0b8c4557d17fa7961ac39c8c57f9238308190a92e1"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_Regular.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic",
+      "weight": 400,
+      "style": "normal",
+      "bytes": 119876,
+      "sha256": "227af807198673c235e91c28ff16bd995cad6d94af0e9099b6ae0b3462f9fcdc"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_Thin.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic",
+      "weight": 100,
+      "style": "normal",
+      "bytes": 123668,
+      "sha256": "38f0c1e9cc76f03b0da1cdfb646150ab9e934a5331e907322d1730a89d0a3d52"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_UI_Black.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic UI",
+      "weight": 900,
+      "style": "normal",
+      "bytes": 121640,
+      "sha256": "a5bae9cf6a8b970945a71a54c3b4ef557309e262a74ca9cf10306eaa5cee2072"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_UI_Bold.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic UI",
+      "weight": 700,
+      "style": "normal",
+      "bytes": 121484,
+      "sha256": "d46bd2d709d514c1538a3ce60902854406314f0877ba3d044a051d81ff85ace7"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_UI_Light.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic UI",
+      "weight": 300,
+      "style": "normal",
+      "bytes": 122100,
+      "sha256": "505a2ef366ce4c7ebd67b79ea273fb46ed3fe4bdbdf43c7e362730f0bf94803e"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_UI_Medium.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic UI",
+      "weight": 500,
+      "style": "normal",
+      "bytes": 120928,
+      "sha256": "71d65225d41b829830d0c7a7d7299c831765a18cf83d68320966fa1528a55669"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_UI_Regular.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic UI",
+      "weight": 400,
+      "style": "normal",
+      "bytes": 119896,
+      "sha256": "f21d33cd0a49fac9c37eba7adc43ca9a8bb5f9191a8d7ba2a954663d6fba4da9"
+    },
+    {
+      "file": "HarmonyOS_Sans_Naskh_Arabic_UI_Thin.ttf",
+      "family": "HarmonyOS Sans Naskh Arabic UI",
+      "weight": 100,
+      "style": "normal",
+      "bytes": 123704,
+      "sha256": "a53bfcb57c1441b8519b1d06109db8ec400d66246a49c1925c9432bb1806aeb2"
+    },
+    {
+      "file": "HarmonyOS_Sans_SC_Black.ttf",
+      "family": "HarmonyOS Sans SC",
+      "weight": 900,
+      "style": "normal",
+      "bytes": 8125608,
+      "sha256": "5de9560908e88820df2e0a5ed9465bc44644ae2ce1cd6c194b76f2ed8e8f186e"
+    },
+    {
+      "file": "HarmonyOS_Sans_SC_Bold.ttf",
+      "family": "HarmonyOS Sans SC",
+      "weight": 700,
+      "style": "normal",
+      "bytes": 8158996,
+      "sha256": "43a424b85e47fb53a17b3b32026a71801f86f8e022ca6798d186b47d39fa5f01"
+    },
+    {
+      "file": "HarmonyOS_Sans_SC_Light.ttf",
+      "family": "HarmonyOS Sans SC",
+      "weight": 300,
+      "style": "normal",
+      "bytes": 8336364,
+      "sha256": "dd366290b40861bc6ced85801e850ab66d6fe4c5b33bc43095a9747fa29288d8"
+    },
+    {
+      "file": "HarmonyOS_Sans_SC_Medium.ttf",
+      "family": "HarmonyOS Sans SC",
+      "weight": 500,
+      "style": "normal",
+      "bytes": 8227312,
+      "sha256": "6ed1553edccddc48eb27ff25d134a4a715cf54211238d4840b3038576cba1944"
+    },
+    {
+      "file": "HarmonyOS_Sans_SC_Regular.ttf",
+      "family": "HarmonyOS Sans SC",
+      "weight": 400,
+      "style": "normal",
+      "bytes": 8261128,
+      "sha256": "297b088424be212207df2ce8b98e335468b782aa6b96832af0b8b773d711e2b1"
+    },
+    {
+      "file": "HarmonyOS_Sans_SC_Thin.ttf",
+      "family": "HarmonyOS Sans SC",
+      "weight": 100,
+      "style": "normal",
+      "bytes": 8408996,
+      "sha256": "a88d9065dc144bf462e6553e308e9d5256bfe1a068abb47a3ee1081d636ea91a"
+    },
+    {
+      "file": "HarmonyOS_Sans_TC_Black.ttf",
+      "family": "HarmonyOS Sans TC",
+      "weight": 900,
+      "style": "normal",
+      "bytes": 4052064,
+      "sha256": "7d9a922077812a1b6ad39116e80ac283219d27ddafcc1da245e7679a2463c621"
+    },
+    {
+      "file": "HarmonyOS_Sans_TC_Bold.ttf",
+      "family": "HarmonyOS Sans TC",
+      "weight": 700,
+      "style": "normal",
+      "bytes": 4064528,
+      "sha256": "6382485ee421f54d87d0cdbd63e7028b5b1a2988fbdc7a6a6d233158c511994e"
+    },
+    {
+      "file": "HarmonyOS_Sans_TC_Light.ttf",
+      "family": "HarmonyOS Sans TC",
+      "weight": 300,
+      "style": "normal",
+      "bytes": 4157996,
+      "sha256": "9b3501b7b5ad676852efc81a2833ca2293f708f54c8028d4d3267e9e4c3d06d7"
+    },
+    {
+      "file": "HarmonyOS_Sans_TC_Medium.ttf",
+      "family": "HarmonyOS Sans TC",
+      "weight": 500,
+      "style": "normal",
+      "bytes": 4112712,
+      "sha256": "ef094d04ee84d6c3711204eaf053d00a38a0de60f4ca35ee909aed80bd8baeb9"
+    },
+    {
+      "file": "HarmonyOS_Sans_TC_Regular.ttf",
+      "family": "HarmonyOS Sans TC",
+      "weight": 400,
+      "style": "normal",
+      "bytes": 4119636,
+      "sha256": "b63084477c1b5cd0db3b88fdba581ae0f05c947445f47d03810f1189544cd5a0"
+    },
+    {
+      "file": "HarmonyOS_Sans_TC_Thin.ttf",
+      "family": "HarmonyOS Sans TC",
+      "weight": 100,
+      "style": "normal",
+      "bytes": 4164648,
+      "sha256": "97e61257b9e7700ca160b06d67ce769187c63b48eb34aa0b7bb0b18028d3f3a5"
+    }
+  ]
+}

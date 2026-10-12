@@ -16,7 +16,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/spm-cloud
+ReadWritePaths=/var/lib/spm-cloud /etc/spm-cloud
 
 [Install]
 WantedBy=multi-user.target

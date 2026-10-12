@@ -6,6 +6,48 @@
 
 后端独立于 Minecraft 运行，可以和 Minecraft 服务器放在同一台机器，也可以部署到单独的公网服务器。玩家需要更新 SparkleMorpher，并获得服主提供的实例 HTTPS 地址。
 
+## 服主管理控制台与 R18 策略
+
+启动后访问 `https://你的域名/admin/`。WebUI 已内置在 Rust 程序中，无需安装 Node.js 或单独构建前端。服主首次用 `auth.bootstrap_access_token_file` 中的初始令牌登录，可在“账号与权限”设置服主密码，创建并自行分发管理员账号。普通注册账号没有控制台权限；管理员可管理所有模型、查看配置和操作记录，只有服主能修改配置或管理账号。停用、重置密码或撤销管理权都会撤销该账号的已有会话。
+
+模型库支持上传、搜索、分页、修改公开／私有状态、删除／恢复、重新识别和人工标记。删除会停止目录展示、下载和使用，原始文件保留用于恢复。配置页覆盖 JSON 中的所有设置，支持表单与 JSON 编辑、保存验证和冲突检查；以 `--config PATH` 启动且配置目录可写时才能保存。`web_ui.enabled=false` 关闭控制台及其管理 API。
+
+控制台参考 1Panel 的侧栏导航和紧凑面板布局。模型库可切换“网格 / 3D 卡片”；3D 卡片悬停倾斜并展示模型信息，浏览器记住显示选择，触屏与系统减少动画设置会关闭倾斜。内置华为官方 48 个未经修改的 HarmonyOS Sans 字体文件，包含 SC、TC、常规、斜体、窄体与阿拉伯字体，并使用固定上游版本的 Lucide SVG 开源图标，无需外部 CDN。字体按需加载，内容哈希 URL 和七天缓存避免重复下载；完整字体增加约 75.4 MiB 的程序体积。字体与图标遵循各自许可，版权和协议可在 `/admin/credits`、`web/credits.txt` 与源文件清单中查看。
+
+内容区支持独立滚轮滚动，导航固定。缩小后的模型卡片点击名称打开详情，单模型操作集中在详情中。支持多选与全选当前已加载结果，批量修改可见性、重新识别、人工标记、删除及恢复；成功项取消选择，失败项保留选择供重试。视图切换保留选择，搜索和刷新只保留仍在当前结果中的选择。批量人工标记同样影响相同内容哈希的其他模型。
+
+`moderation.detection_enabled` 控制识别，`moderation.block_r18` 独立控制阻止。识别支持模型文件内的 R18 元数据，以及可选的贴图内容检测；阻止适用于普通客户端的目录、下载、玩家和实体模型使用入口。`block_unclassified` 可进一步拒绝识别关闭、解析失败、识别服务故障或超限的模型。默认保持识别和阻止关闭，服主启用后对已有模型执行“重新识别”。人工标记按 SHA-256 关联相同内容，重新识别不会覆盖人工复核结果。
+
+原生部署的贴图识别可使用仓库提供的本地 [NudeNet](https://github.com/notAI-tech/NudeNet) 适配服务（建议 Python 3.10–3.12）。创建独立环境并启动（源码仓库路径如下；预构建压缩包中这两个文件位于根目录，省略 `tools/` 前缀）：
+
+```bash
+python -m venv .venv-moderation
+# Linux/macOS:
+.venv-moderation/bin/python -m pip install -r tools/requirements-moderation.txt
+.venv-moderation/bin/python tools/nudenet_service.py --port 8080
+# Windows 使用 .venv-moderation/Scripts/python.exe 替代上述 Python 路径。
+```
+
+在 JSON 或 WebUI 中设置：
+
+```json
+{
+  "moderation": {
+    "detection_enabled": true,
+    "texture_detection_enabled": true,
+    "scanner_url": "http://127.0.0.1:8080/infer",
+    "ysm_parser_path": null,
+    "block_r18": true,
+    "block_unclassified": false,
+    "score_threshold": 0.7
+  }
+}
+```
+
+ZIP、bbmodel、内嵌贴图的 glTF／GLB 可直接检测；加密 `.ysm` 需另外安装 [YSMParser](https://github.com/OpenYSM/YSMParser)，将 `ysm_parser_path` 设置为其可执行程序路径（相对路径以 JSON 配置目录为基准）。解析器仅在临时目录解包，原始上传文件不变。服务支持识别真实内容为 PNG、JPEG、WebP、AVIF 的贴图，即使扩展名不同；动画图片和无法完整读取的模型会归为未识别。NudeNet 对二次元、UV 图集和低分辨率贴图可能漏检或误判，“未检出”不代表一定安全，应保留人工复核。
+
+Docker 可使用 `docker compose -f docker-compose.json.yml -f docker-compose.moderation.yml up -d` 加入 NudeNet 服务，`scanner_url` 设置为 `http://nudenet:8080/infer`。官方镜像的可解码格式取决于该镜像的图像依赖；需 AVIF 支持时使用仓库提供的 Python 适配服务。Cloud 容器内的 `127.0.0.1` 指向容器自身，不能直接访问宿主机识别服务。详细权限与目录设置见[部署指南](deploy/ADMIN_JSON.md)。
+
 ## 选择安装方式
 
 | 方式 | 适合谁 | 初次安装 | 后续更新 |
@@ -360,3 +402,21 @@ curl -fsS https://cloud.example.com/v1/accounts \
 Rust 开发需要 1.87 或更新版本。测试额外需要 Node.js 22+ 提供测试夹具；正式运行不需要 Node.js。构建和 CI 说明见[跨平台 CI 配置](.github/workflows/platforms.yml)，官方 Worker 部署见 [cloudflare/README.md](cloudflare/README.md)。
 
 **许可证：** MIT。
+
+### 控制台中的日常设置与多文件上传
+
+服务器配置按“模型与内容安全、账号与权限、服务访问、维护与清理”展示日常设置。模型大小直接使用 MB；识别服务连接、服务器路径和协议参数位于折叠的高级设置，完整 JSON 编辑仍可用于精细配置。管理员只能查看配置，修改权限属于服主。
+
+“上传模型”可一次选择多个文件，逐个上传、识别并显示结果。失败项可以重试，已成功的文件不会重复上传；批量命名使用可选名称前缀。即使连接远程 Cloud，文件选择器仍由操作者本机浏览器打开，选择后才发送到服务器。服务器不能读取未被选择的本机文件。
+
+### 模型归属与用户自助绑定
+
+上传默认公有；设置私有时，控制台必须明确填写模型归属的 Cloud 账号。服主或管理员可在模型详情及多选工具栏设置归属。转移归属会清除旧账号及分享授权，模型原始文件和版本保持不变。
+
+普通用户通过 `/account/` 登录自己的 Cloud 账号中心；管理人员通过 `/admin/` 登录管理控制台。用户可自行验证另一 Cloud 账号的密码进行一对一关联，也可验证已绑定该 Cloud 账号的游戏身份进行关联，无需服主审批。已验证的正版／第三方游戏身份会统一到关联的 Cloud 账号，保留身份 ID；模型归属不会自动迁移，管理员权限仍由服主分配。绑定后，模组游戏登录返回 Cloud 账号会话，网页游戏登录返回关联 WebUI 账号会话。
+
+微软登录使用服主自己的 Microsoft Entra Web 应用（支持个人 Microsoft 账号），配置 `web_ui.microsoft_client_id`、`microsoft_client_secret_file`、`microsoft_redirect_uri`。回调固定为 `/admin/oauth/microsoft/callback`；生产使用 HTTPS，本机可登记 `http://localhost:18822/admin/oauth/microsoft/callback`。密钥文件仅由服务器读取，勿放入构建包或提交 Git。浏览器必须通过与回调相同的源访问页面。授权后依次验证 Xbox 与 Minecraft 正版角色；仅微软授权成功不算完成游戏身份验证。应用或游戏服务拒绝访问时，页面显示失败阶段和 HTTP 状态。
+
+第三方登录仅连接服主已启用的 HTTPS Yggdrasil 服务，支持标准 `/authserver/authenticate` 与 Ely `/auth/authenticate`；多角色账号可选择角色，再经 join／hasJoined 验证。服务返回的密码或令牌不会持久化。手动入口支持经服务校验的 Minecraft／第三方访问令牌，也可在现有模组中先绑定当前游戏账号，然后刷新账号中心；单独输入 UUID 或名称不能证明身份。
+
+微软网页登录还需应用具备 Minecraft Services 接入资格；注册 Entra 应用并不自动授予该资格。新应用可通过微软官方 AppID Review 表单（https://aka.ms/mce-reviewappid）申请。若授权码兑换和 Xbox 验证成功，但 Minecraft 应用授权返回 403，请检查应用接入审批。未经 Minecraft 角色验证的账号不会标记为已验证正版；既有模组游戏身份验证入口可独立使用。
