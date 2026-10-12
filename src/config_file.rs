@@ -298,17 +298,17 @@ impl LoadedConfig {
                 "SPM_CLOUD_TRUSTED_PROXY_IPS".into(),
             );
         }
-        for (key, path, destination) in [(
-            "SPM_CLOUD_MAX_ASSET_BYTES",
-            "limits.max_asset_bytes",
-            &mut input.limits.max_asset_bytes,
-        )] {
-            if let Some(value) = environment.get(key) {
-                *destination = value
-                    .parse()
-                    .map_err(|_| invalid(path, format!("invalid {key}")))?;
-                sources.insert(path.into(), key.into());
-            }
+        if let Some(value) = environment.get("SPM_CLOUD_MAX_ASSET_BYTES") {
+            input.limits.max_asset_bytes = value.parse().map_err(|_| {
+                invalid(
+                    "limits.max_asset_bytes",
+                    "invalid SPM_CLOUD_MAX_ASSET_BYTES",
+                )
+            })?;
+            sources.insert(
+                "limits.max_asset_bytes".into(),
+                "SPM_CLOUD_MAX_ASSET_BYTES".into(),
+            );
         }
         if let Some(value) = environment.get("SPM_CLOUD_MAX_MESSAGE_BYTES") {
             input.limits.max_message_bytes = value.parse().map_err(|_| {
@@ -828,13 +828,11 @@ fn validate(input: &FileConfig, file_mode: bool) -> Result<(), CloudError> {
             "must not exceed idle TTL",
         ));
     }
-    for (name, value) in [("projectile_snapshots", input.features.projectile_snapshots)] {
-        if value {
-            return Err(invalid(
-                &format!("features.{name}"),
-                "capability is not implemented in this build; set false",
-            ));
-        }
+    if input.features.projectile_snapshots {
+        return Err(invalid(
+            "features.projectile_snapshots",
+            "capability is not implemented in this build; set false",
+        ));
     }
     if !["text", "json"].contains(&input.logging.format.as_str()) {
         return Err(invalid("logging.format", "use text/json"));
