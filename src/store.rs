@@ -559,15 +559,11 @@ impl CloudStore {
                 "invalid provider display name",
             ));
         }
-        let (base_url, session_path) = crate::game_auth::provider_endpoint(input)?;
         let conn = self
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        conn.execute("INSERT INTO identity_providers(provider_id, display_name, base_url, enabled, session_path) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(provider_id) DO UPDATE SET display_name = excluded.display_name, base_url = excluded.base_url, enabled = excluded.enabled, session_path=excluded.session_path", params![input.provider_id, input.display_name, base_url, i64::from(input.enabled),session_path])?;
-        Ok(
-            serde_json::json!({"provider_id": input.provider_id, "display_name": input.display_name, "base_url": base_url, "session_path": session_path, "enabled": input.enabled}),
-        )
+        crate::admin_settings::upsert_provider(&conn, input)
     }
 
     pub fn create_identity_challenge(
@@ -2666,6 +2662,7 @@ mod tests {
                 enabled: true,
                 session_path: None,
                 has_joined_url: None,
+                authenticate_path: None,
             })
             .unwrap();
     }
@@ -2810,6 +2807,7 @@ mod tests {
                 enabled: true,
                 session_path: None,
                 has_joined_url: None,
+                authenticate_path: None,
             })
             .unwrap_err();
         assert_eq!(error.code(), "ACCESS_DENIED");
@@ -2931,6 +2929,7 @@ mod tests {
             cache: Default::default(),
             database_backend: "sqlite".into(),
             mysql_url: None,
+            microsoft_client_secret: None,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
             config_path: None,
@@ -2987,6 +2986,7 @@ mod tests {
             store.configure_provider(&crate::models::IdentityProviderUpdate {
                 session_path: None,
                 has_joined_url: None,
+                authenticate_path: None,
                 provider_id: "private".into(),
                 display_name: "Private".into(),
                 base_url: "https://127.0.0.1".into(),
@@ -3369,6 +3369,7 @@ mod tests {
             cache: Default::default(),
             database_backend: "sqlite".into(),
             mysql_url: None,
+            microsoft_client_secret: None,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
             config_path: None,

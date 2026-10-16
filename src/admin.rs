@@ -3,7 +3,6 @@ use crate::database::Connection;
 use crate::{
     CloudStore,
     api::{AppState, authenticate},
-    config_file::LoadedConfig,
     error::CloudError,
     models::LoginRequest,
 };
@@ -22,7 +21,6 @@ use axum::{
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 #[path = "admin_fonts.rs"]
 mod fonts;
 
@@ -80,6 +78,7 @@ pub fn router(state: AppState) -> Router {
             post(crate::browser_auth::microsoft_redeem),
         )
         .route("/admin/app.js", get(script))
+        .route("/admin/settings.js", get(settings_script))
         .route("/admin/style.css", get(style))
         .route("/admin/fonts.css", get(font_styles))
         .route("/admin/fonts/{file}", get(font))
@@ -87,7 +86,22 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/credits", get(credits))
         .route("/admin/api/login", post(login))
         .route("/admin/api/me", get(me))
-        .route("/admin/api/config", get(config).put(save_config))
+        .route(
+            "/admin/api/config",
+            get(crate::admin_settings::get).put(crate::admin_settings::save),
+        )
+        .route(
+            "/admin/api/config/validate",
+            post(crate::admin_settings::validate),
+        )
+        .route(
+            "/admin/api/providers/check",
+            post(crate::admin_settings::provider_check),
+        )
+        .route(
+            "/admin/api/config/check-connection",
+            post(crate::admin_settings::check_connection),
+        )
         .route("/admin/api/accounts", get(accounts).post(create_account))
         .route("/admin/api/accounts/{account}", put(update_account))
         .route("/admin/api/assets", get(assets).post(upload))
@@ -173,6 +187,12 @@ async fn script() -> impl IntoResponse {
     (
         [("content-type", "text/javascript; charset=utf-8")],
         include_str!("../web/admin.js"),
+    )
+}
+async fn settings_script() -> impl IntoResponse {
+    (
+        [("content-type", "text/javascript; charset=utf-8")],
+        include_str!("../web/settings.js"),
     )
 }
 async fn style() -> impl IntoResponse {
@@ -282,102 +302,6 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Va
         json!({"account_id":account,"role":role,"instance_id":state.config.instance_id}),
     ))
 }
-async fn config(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, CloudError> {
-    authorize(&state, &headers, false)?;
-    let runtime = state.runtime_config();
-    let (editable, revision, effective) = if let Some(path) = &runtime.config_path {
-        let bytes = std::fs::read(path)?;
-        let value: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| CloudError::invalid_metadata("Selected configuration is invalid JSON"))?;
-        let loaded = LoadedConfig::load(Some(path))?;
-        (
-            value,
-            json!(hex::encode(Sha256::digest(&bytes))),
-            loaded.effective_report().clone(),
-        )
-    } else {
-        (
-            Value::Null,
-            Value::Null,
-            json!({"moderation":runtime.moderation,"web_ui":runtime.web_ui,"allow_self_registration":runtime.allow_self_registration,"max_asset_bytes":runtime.max_asset_bytes}),
-        )
-    };
-    let schema: Value = serde_json::from_str(include_str!("../config.schema.json")).unwrap();
-    Ok(Json(
-        json!({"config":editable,"revision":revision,"effective":effective,"schema":schema,"writable":runtime.config_path.is_some(),"restart_fields":["instance.instance_id","instance.origin","instance.bind","storage","auth.bootstrap_account_id","auth.bootstrap_access_token_file","auth.bootstrap_password_hash_file","logging"]}),
-    ))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConfigUpdate {
-    config: Value,
-    revision: String,
-}
-async fn save_config(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(input): Json<ConfigUpdate>,
-) -> Result<Json<Value>, CloudError> {
-    let (actor, _) = authorize(&state, &headers, true)?;
-    let _lock = state.config_edit_lock.lock().await;
-    let path = state.runtime_config().config_path.ok_or_else(|| {
-        CloudError::invalid_metadata("Start Cloud with --config to edit settings")
-    })?;
-    if hex::encode(Sha256::digest(std::fs::read(&path)?)) != input.revision {
-        return Err(CloudError::RevisionConflict);
-    }
-    let temp = path.with_file_name(format!(
-        ".cloud-config-{}.json",
-        uuid::Uuid::new_v4().simple()
-    ));
-    let bytes = serde_json::to_vec_pretty(&input.config)
-        .map_err(|_| CloudError::invalid_metadata("invalid configuration"))?;
-    std::fs::write(&temp, &bytes)?;
-    let candidate = match LoadedConfig::load(Some(&temp)) {
-        Ok(loaded) => loaded,
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp);
-            return Err(CloudError::invalid_metadata(e.to_string()));
-        }
-    };
-    if candidate.cloud.bootstrap_account_id != state.config.bootstrap_account_id {
-        let _ = std::fs::remove_file(&temp);
-        return Err(CloudError::invalid_metadata(
-            "Change the bootstrap owner only in the server configuration file",
-        ));
-    }
-    if let Err(e) = std::fs::rename(&temp, &path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(e.into());
-    }
-    let current = state.runtime_config();
-    let mut next = current.clone();
-    next.allow_self_registration = candidate.cloud.allow_self_registration;
-    next.max_asset_bytes = candidate.cloud.max_asset_bytes;
-    next.max_message_bytes = candidate.cloud.max_message_bytes;
-    next.max_entity_query_count = candidate.cloud.max_entity_query_count;
-    next.performance = candidate.cloud.performance;
-    next.updates = candidate.cloud.updates;
-    next.cache = candidate.cloud.cache;
-    next.visual = candidate.cloud.visual;
-    next.trusted_proxy_ips = candidate.cloud.trusted_proxy_ips;
-    next.moderation = candidate.cloud.moderation;
-    next.web_ui = candidate.cloud.web_ui;
-    for provider in candidate.providers {
-        state.store.configure_provider(&provider)?;
-    }
-    state.update_runtime_config(next)?;
-    state
-        .store
-        .admin_audit(&actor, "CONFIG_UPDATED", None, json!({}))?;
-    Ok(Json(
-        json!({"saved":true,"revision":hex::encode(Sha256::digest(&bytes)),"message":"Runtime settings applied. Listener, origin, storage, bootstrap credentials and logging changes require restart."}),
-    ))
-}
-
 #[derive(Deserialize)]
 struct AccountQuery {
     page: Option<usize>,

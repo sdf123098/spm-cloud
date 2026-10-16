@@ -54,6 +54,11 @@ pub fn migrate(conn: &crate::database::Connection) -> Result<(), CloudError> {
     if !has_path {
         conn.execute_batch("ALTER TABLE identity_providers ADD COLUMN session_path TEXT NOT NULL DEFAULT '/session/minecraft/hasJoined';")?;
     }
+    let has_auth: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('identity_providers') WHERE name='authenticate_path')", [], |r| r.get(0))?;
+    if !has_auth {
+        conn.execute_batch("ALTER TABLE identity_providers ADD COLUMN authenticate_path TEXT;")?;
+    }
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS config_managed_providers(provider_id TEXT PRIMARY KEY REFERENCES identity_providers(provider_id));")?;
     for (id, name, base, path) in [
         (
             "official",
@@ -317,6 +322,9 @@ pub fn session_path(path: &str) -> Result<(), CloudError> {
 pub fn provider_endpoint(
     input: &crate::models::IdentityProviderUpdate,
 ) -> Result<(String, String), CloudError> {
+    if let Some(path) = &input.authenticate_path {
+        session_path(path)?;
+    }
     if let Some(endpoint) = &input.has_joined_url {
         if !input.base_url.is_empty() || input.session_path.is_some() {
             return Err(CloudError::invalid_metadata(
@@ -372,6 +380,7 @@ pub fn providers_from_environment(
             enabled: true,
             session_path: None,
             has_joined_url: Some(url.trim().into()),
+            authenticate_path: None,
         }]
     } else {
         Vec::new()
@@ -407,6 +416,9 @@ pub fn provider_url(base: &str) -> Result<reqwest::Url, CloudError> {
         .host_str()
         .ok_or(CloudError::IdentityProviderUntrusted)?;
     if url.scheme() != "https"
+        || base
+            .split_once("://")
+            .is_some_and(|(_, rest)| rest.split('/').next().unwrap_or("").contains(':'))
         || !url.username().is_empty()
         || url.password().is_some()
         || url.port().is_some()
@@ -422,14 +434,28 @@ pub fn provider_url(base: &str) -> Result<reqwest::Url, CloudError> {
     Ok(url)
 }
 
-async fn session_name(challenge: &Challenge, base: &str, path: &str) -> Result<String, CloudError> {
-    session_path(path)?;
-    let mut url = provider_url(base)?;
-    let host = url.host_str().unwrap().to_owned();
-    let addresses: Vec<_> = tokio::net::lookup_host((host.as_str(), 443))
+pub(crate) async fn provider_client(
+    base: &str,
+    timeout: Duration,
+) -> Result<(reqwest::Client, reqwest::Url), CloudError> {
+    let url = provider_url(base)?;
+    let host = url.host_str().unwrap();
+    let addresses: Vec<_> = tokio::time::timeout(timeout, tokio::net::lookup_host((host, 443)))
         .await
         .map_err(|_| CloudError::IdentityProviderUnavailable)?
+        .map_err(|_| CloudError::IdentityProviderUnavailable)?
         .collect();
+    provider_addresses(&addresses)?;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .resolve_to_addrs(host, &addresses)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()
+        .map_err(|_| CloudError::IdentityProviderUnavailable)?;
+    Ok((client, url))
+}
+fn provider_addresses(addresses: &[SocketAddr]) -> Result<(), CloudError> {
     if addresses.is_empty()
         || addresses
             .iter()
@@ -437,16 +463,16 @@ async fn session_name(challenge: &Challenge, base: &str, path: &str) -> Result<S
     {
         return Err(CloudError::IdentityProviderUntrusted);
     }
+    Ok(())
+}
+
+async fn session_name(challenge: &Challenge, base: &str, path: &str) -> Result<String, CloudError> {
+    session_path(path)?;
+    let (client, mut url) = provider_client(base, Duration::from_secs(5)).await?;
     url.set_path(&format!("{}{}", url.path().trim_end_matches('/'), path));
     url.query_pairs_mut()
         .append_pair("username", &challenge.username)
         .append_pair("serverId", &challenge.nonce);
-    let client = reqwest::Client::builder()
-        .resolve_to_addrs(&host, &addresses)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|_| CloudError::IdentityProviderUnavailable)?;
     let response = client
         .get(url)
         .header("accept", "application/json")
@@ -530,6 +556,13 @@ impl CloudStore {
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
         let tx = conn.transaction()?;
+        if !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM identity_providers WHERE provider_id=?1 AND enabled=1)",
+            [provider],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(CloudError::IdentityProviderUntrusted);
+        }
         let kind = if provider == "official" {
             "official"
         } else {
@@ -593,6 +626,26 @@ impl CloudStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_check_dns_rejects_empty_private_and_mixed_answers() {
+        use super::provider_addresses;
+        assert!(provider_addresses(&[]).is_err());
+        for address in [
+            "127.0.0.1:443",
+            "10.0.0.1:443",
+            "169.254.1.1:443",
+            "[::1]:443",
+            "[::ffff:127.0.0.1]:443",
+        ] {
+            assert!(provider_addresses(&[address.parse().unwrap()]).is_err());
+            assert!(
+                provider_addresses(&["1.1.1.1:443".parse().unwrap(), address.parse().unwrap()])
+                    .is_err()
+            );
+        }
+        assert!(provider_addresses(&["1.1.1.1:443".parse().unwrap()]).is_ok());
+        assert!(super::provider_url("https://example.com:443").is_err());
+    }
     #[test]
     fn operator_environment_accepts_one_gateway_or_a_provider_list() {
         let gateway =

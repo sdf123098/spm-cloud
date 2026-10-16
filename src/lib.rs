@@ -1,9 +1,11 @@
 pub mod account_links;
 pub mod admin;
+pub mod admin_settings;
 pub mod api;
 pub mod browser_auth;
 pub mod compat;
 pub mod config;
+pub mod config_apply;
 pub mod config_file;
 pub mod error;
 pub mod identity;

@@ -39,7 +39,9 @@ impl Default for UpdateSettings {
 impl UpdateSettings {
     pub fn validate(&self) -> Result<(), CloudError> {
         if !(1..=168).contains(&self.check_interval_hours) {
-            return Err(CloudError::invalid_metadata("更新检查间隔应为 1–168 小时"));
+            return Err(CloudError::invalid_metadata(
+                "updates.check_interval_hours: 更新检查间隔应为 1–168 小时",
+            ));
         }
         Ok(())
     }
@@ -56,7 +58,7 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/api/exports/audit", get(audit))
         .route("/admin/api/exports/logs", get(logs))
 }
-fn native_supported() -> bool {
+pub(crate) fn native_supported() -> bool {
     std::env::var_os("SPM_CLOUD_CONTAINER").is_none()
         && !std::path::Path::new("/.dockerenv").exists()
 }

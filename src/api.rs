@@ -47,10 +47,13 @@ pub struct AppState {
     pub(crate) catalog_cache: Arc<std::sync::RwLock<Arc<crate::catalog_cache::CatalogCache>>>,
     pub config: Arc<CloudConfig>,
     runtime_config: Arc<std::sync::RwLock<CloudConfig>>,
+    pub(crate) active_settings: Arc<std::sync::RwLock<serde_json::Value>>,
+    pub(crate) diagnostic_slots: Arc<tokio::sync::Semaphore>,
     pub store: CloudStore,
     pub events: broadcast::Sender<CloudEvent>,
     pub(crate) admin_login_attempts: Arc<std::sync::Mutex<std::collections::VecDeque<i64>>>,
     pub(crate) config_edit_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) settings_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -77,6 +80,8 @@ impl CloudEvent {
 
 impl AppState {
     pub fn new(config: CloudConfig, store: CloudStore) -> Self {
+        // Values absent from CloudConfig stay unknown until the caller supplies startup metadata.
+        let active = crate::config_apply::snapshot(&config);
         let (events, _) = broadcast::channel(512);
         let (uploads, processing) = config
             .performance
@@ -91,10 +96,13 @@ impl AppState {
             ))),
             config: Arc::new(config.clone()),
             runtime_config: Arc::new(std::sync::RwLock::new(config)),
+            active_settings: Arc::new(std::sync::RwLock::new(active)),
+            diagnostic_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             store,
             events,
             admin_login_attempts: Default::default(),
             config_edit_lock: Default::default(),
+            settings_generation: Default::default(),
         }
     }
 
@@ -106,15 +114,23 @@ impl AppState {
     }
 
     pub fn update_runtime_config(&self, config: CloudConfig) -> Result<(), CloudError> {
-        let (uploads, processing) = config.performance.resolved()?;
+        config.performance.resolved()?;
         config.updates.validate()?;
         config.cache.validate()?;
+        self.store.set_moderation_policy(&config.moderation)?;
+        self.install_runtime_config(config);
+        Ok(())
+    }
+    pub(crate) fn install_runtime_config(&self, config: CloudConfig) {
+        let (uploads, processing) = config
+            .performance
+            .resolved()
+            .expect("prevalidated performance");
         if config.cache != self.runtime_config().cache {
             *self.catalog_cache.write().unwrap() = Arc::new(
                 crate::catalog_cache::CatalogCache::new(config.cache.clone(), &config.instance_id),
             );
         }
-        self.store.set_moderation_policy(&config.moderation)?;
         self.upload_slots.set_limit(uploads);
         self.processing_slots.set_limit(processing);
         self.store.update_runtime_settings(&config);
@@ -122,10 +138,22 @@ impl AppState {
             .runtime_config
             .write()
             .expect("runtime configuration lock poisoned") = config;
-        Ok(())
+    }
+    pub fn initialize_settings(&self, loaded: &crate::config_file::LoadedConfig) {
+        let mut settings = loaded.effective_report()["effective"].clone();
+        crate::config_apply::resolved_performance(&mut settings, &loaded.cloud);
+        *self
+            .active_settings
+            .write()
+            .expect("active settings lock poisoned") = settings;
     }
     pub async fn config_edit_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.config_edit_lock.lock().await
+    }
+    /// Successful file/API applications invalidate the watcher's last observation.
+    pub fn settings_generation(&self) -> u64 {
+        self.settings_generation
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -1355,6 +1383,7 @@ pub(crate) mod tests {
             cache: Default::default(),
             database_backend: "sqlite".into(),
             mysql_url: None,
+            microsoft_client_secret: None,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
             config_path: None,
@@ -1375,11 +1404,16 @@ pub(crate) mod tests {
                     ),
                 ))),
                 runtime_config: Arc::new(std::sync::RwLock::new(config.as_ref().clone())),
+                active_settings: Arc::new(std::sync::RwLock::new(crate::config_apply::snapshot(
+                    &config,
+                ))),
+                diagnostic_slots: Arc::new(tokio::sync::Semaphore::new(2)),
                 config,
                 store,
                 events,
                 admin_login_attempts: Default::default(),
                 config_edit_lock: Default::default(),
+                settings_generation: Default::default(),
             },
             directory,
         )

@@ -43,23 +43,32 @@ impl std::fmt::Debug for CacheSettings {
 }
 impl CacheSettings {
     pub fn validate(&self) -> Result<(), crate::error::CloudError> {
-        if !["memory", "redis", "none"].contains(&self.backend.as_str())
-            || !(1..=3600).contains(&self.ttl_seconds)
-            || !(1..=4096).contains(&self.max_pages)
-            || !(50..=5000).contains(&self.timeout_ms)
-        {
+        if !["memory", "redis", "none"].contains(&self.backend.as_str()) {
             return Err(crate::error::CloudError::configuration(
-                "cache requires backend memory/redis/none, TTL 1..3600, pages 1..4096 and timeout 50..5000 ms",
+                "cache.backend: choose memory, redis or none",
             ));
+        }
+        for (path, value, min, max) in [
+            ("ttl_seconds", self.ttl_seconds, 1, 3600),
+            ("max_pages", self.max_pages as u64, 1, 4096),
+            ("timeout_ms", self.timeout_ms, 50, 5000),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(crate::error::CloudError::configuration(format!(
+                    "cache.{path}: must be in {min}..={max}"
+                )));
+            }
         }
         if self.backend == "redis" && self.redis_url.is_none() {
             return Err(crate::error::CloudError::configuration(
-                "cache.redis_url_file or SPM_CLOUD_REDIS_URL is required for Redis",
+                "cache.redis_url_file: a credential file or SPM_CLOUD_REDIS_URL is required for Redis",
             ));
         }
         if let Some(url) = &self.redis_url {
             redis::Client::open(url.as_str()).map_err(|_| {
-                crate::error::CloudError::configuration("invalid Redis connection URL")
+                crate::error::CloudError::configuration(
+                    "cache.redis_url_file: invalid Redis connection URL",
+                )
             })?;
         }
         Ok(())

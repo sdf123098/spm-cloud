@@ -7,37 +7,21 @@ let uploadQueue = [], uploadRunning = false;
 try { if (localStorage.getItem('spm-cloud-model-view') === 'cards') modelView = 'cards'; } catch {}
 const roleNames = { owner: '服主', admin: '管理员', member: '普通账号' };
 const statusNames = { R18: 'R18', CLEAN: '未检出', UNKNOWN: '未识别', DISABLED: '识别关闭' };
-const tabs = { overview: '概览', models: '模型库', settings: '服务器配置', accounts: '账号与权限', profile:'我的账号与绑定', maintenance:'更新与导出', audit: '操作记录' };
-const groups = { instance: '实例与网络', storage: '存储路径', auth: '账号与身份验证', limits: '资源与请求限制', features: '功能开关', retention: '保留与清理', logging: '日志', web_ui: '管理控制台', moderation: 'R18 内容策略' };
-const labels = { detection_enabled:'R18 识别',block_r18:'阻止 R18 模型',texture_detection_enabled:'贴图内容识别',scanner_url:'NudeNet 服务地址',ysm_parser_path:'YSMParser 程序路径',score_threshold:'识别置信度阈值',timeout_seconds:'识别超时（秒）',max_textures:'单模型贴图上限',max_texture_bytes:'单贴图字节上限',block_unclassified:'阻止未识别模型',enabled:'启用 WebUI',allow_self_registration:'允许普通账号自行注册',bootstrap_account_id:'服主账号 ID',bootstrap_access_token_file:'服主初始令牌文件',bootstrap_password_hash_file:'服主密码哈希文件',identity_providers:'外部身份提供方',instance_id:'实例 ID',origin:'公开 HTTPS 地址',bind:'监听地址',trusted_proxy_ips:'可信代理 IP',data_dir:'数据目录',database_path:'数据库路径',object_dir:'模型文件目录',max_asset_bytes:'模型大小上限（字节）',max_message_bytes:'请求消息上限（字节）',max_entity_query_count:'实体查询数量上限',entity_motion:'实体动作',player_display_state:'玩家显示状态',vehicle_bindings:'载具绑定',projectile_snapshots:'弹射物快照（暂不可用）',level:'日志级别',format:'日志格式' };
-const hints = { detection_enabled:'关闭后停止新识别；已有识别与人工标记保留。',block_r18:'拒绝 R18 上传、目录展示、下载和使用。可独立于识别开启。',texture_detection_enabled:'将内嵌贴图发送到你配置的 NudeNet 服务。',scanner_url:'例如 http://127.0.0.1:8080/infer。仅访问服主配置的服务。',block_unclassified:'拒绝识别关闭、加密、无贴图、超限或检测失败的模型。',score_threshold:'0 到 1；初始值 0.7。未检出不代表内容一定安全。',enabled:'关闭后控制台和管理 API 停止访问；需修改服务器 JSON 文件重新开启。' };
-Object.assign(labels,{max_message_bytes:'请求消息大小上限',max_texture_bytes:'单张贴图大小上限',score_threshold:'裸露内容识别置信度',timeout_seconds:'识别等待上限',max_visual_state_bytes:'玩家显示状态大小上限',max_visual_variables:'玩家显示变量数量上限',max_projectile_snapshots_per_publisher:'每个发布者的弹射物快照上限',max_projectile_snapshots_per_world:'每个世界的弹射物快照上限',visual_publish_requests_per_second:'显示状态每秒发布次数',visual_publish_burst:'显示状态瞬时发布次数',projectile_idle_ttl_seconds:'弹射物闲置保留时间',projectile_max_lifetime_seconds:'弹射物最长保留时间',cleanup_interval_seconds:'过期显示数据检查间隔'});
-Object.assign(hints,{instance_id:'用于区分不同 Cloud 实例。请保留稳定的英文、数字或短横线标识；修改需重启。',origin:'玩家连接这台 Cloud 使用的 HTTPS 域名，例如 https://cloud.example.com，不包含路径。修改需重启。',bind:'Cloud 进程监听的 IP 与端口；通常让反向代理连接这里。修改需重启。',trusted_proxy_ips:'每行一个可信反向代理 IP；只有这些代理可以转发客户端 IP。',data_dir:'服务器上的数据目录。修改前请迁移原有数据库与模型文件，修改需重启。',database_path:'服务器上的 SQLite 数据库路径；留空使用数据目录内的默认位置。修改需重启。',object_dir:'服务器上的模型文件目录；留空使用数据目录内的默认位置。修改需重启。',bootstrap_account_id:'初始服主账号，不能在控制台中更名。管理员账号由服主在“账号与权限”创建。',bootstrap_access_token_file:'服务器上的初始令牌文件路径；这里只配置路径，不显示令牌。修改需重启。',bootstrap_password_hash_file:'服务器上的服主密码哈希文件路径；留空不使用该文件。修改需重启。',identity_providers:'外置 Yggdrasil 认证服务列表；仅在需要接入外置登录时配置。',ysm_parser_path:'服务器上的 YSMParser 可执行文件路径，用于读取受支持的加密 YSM 贴图；程序需单独安装。',timeout_seconds:'每个模型等待贴图识别的最长时间；超时后标记为未识别。',max_textures:'单个模型最多识别的贴图数量；超过上限标记为未识别。',max_texture_bytes:'单张贴图的读取大小上限；超过上限标记为未识别。',max_message_bytes:'客户端单条协议消息大小上限。一般保留默认值。',max_entity_query_count:'客户端一次最多查询的实体数量。一般保留默认值。',max_visual_state_bytes:'单次玩家显示状态的数据大小上限。',max_visual_variables:'单个玩家显示状态可包含的变量数量。',max_projectile_snapshots_per_publisher:'预留的弹射物快照限制；当前版本该功能不可开启。',max_projectile_snapshots_per_world:'预留的弹射物快照限制；当前版本该功能不可开启。',visual_publish_requests_per_second:'限制客户端持续发布显示状态的频率。',visual_publish_burst:'允许客户端短时间内突发发布的次数。',entity_motion:'允许支持的客户端同步已绑定女仆与假玩家的显示动作。',player_display_state:'允许支持的客户端同步玩家显示状态。',vehicle_bindings:'允许支持的客户端同步已绑定载具的显示信息。',projectile_snapshots:'当前版本暂未实现此功能，保持关闭。',projectile_idle_ttl_seconds:'预留的弹射物快照闲置时限；当前版本不启用弹射物快照。',projectile_max_lifetime_seconds:'预留的弹射物快照最长时限；需大于闲置保留时间。',cleanup_interval_seconds:'定期检查过期的临时显示状态；不会删除模型库文件。一般保持 60 秒。',level:'日常使用“常规”；排查问题时可临时使用“调试”。修改需重启。',format:'文本便于人工阅读，JSON 便于日志收集工具处理。修改需重启。'});
-const settingSections=[
-  {title:'模型与内容安全',description:'控制模型上传大小，以及哪些内容允许玩家查看和使用。',fields:[
-    ['limits','max_asset_bytes','单个模型最大大小','超过此大小的文件无法上传。默认 128 MB；远程部署时代理也需允许相同大小。',1048576,'MB'],
-    ['moderation','detection_enabled','识别 R18 内容'],['moderation','block_r18','阻止 R18 内容'],
-    ['moderation','block_unclassified','拒绝未能完成识别的模型'],['moderation','texture_detection_enabled','识别模型贴图中的裸露内容','需要先在下方高级设置中连接识别服务；目前支持自建 NudeNet。'],
-  ]},
-  {title:'账号与权限',description:'管理员由服主创建并分发；普通玩家注册不会获得管理权限。',fields:[['auth','allow_self_registration','允许玩家自行注册普通账号','关闭后，普通账号也需要由服主创建。管理员始终由服主在“账号与权限”分发。']]},
-  {title:'服务访问',description:'填写玩家实际连接的地址。通常只需在首次部署时设置。',fields:[['instance','origin','玩家连接地址']]},
-  {title:'维护与清理',description:'调整临时数据清理与日志记录，便于日常维护。',fields:[['retention','cleanup_interval_seconds','临时显示数据清理间隔',null,1,'秒'],['logging','level','日志详细程度']]},
-];
-const settingUnits={max_message_bytes:[1024,'KB'],max_visual_state_bytes:[1024,'KB'],max_texture_bytes:[1048576,'MB'],timeout_seconds:[1,'秒'],projectile_idle_ttl_seconds:[1,'秒'],projectile_max_lifetime_seconds:[1,'秒'],score_threshold:[.01,'%']};
+const tabs = { overview: '概览', models: '模型库', settings: '服务器配置', accounts: '账号与权限', profile:'我的账号与绑定' };
 function notice(message,error=false){ $('notice').textContent=message;$('notice').className=error?'error':'';$('notice').hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>{$('notice').hidden=true;},error?12000:7000); }
 async function request(path,options={},retry=true){
-  const headers=new Headers(options.headers||{});if(session)headers.set('Authorization',`Bearer ${session.access_token}`);
+  const headers=new Headers(options.headers||{}),accessToken=session?.access_token;if(accessToken)headers.set('Authorization',`Bearer ${accessToken}`);
   if(options.json!==undefined){headers.set('Content-Type','application/json');options.body=JSON.stringify(options.json);}
   const response=await fetch(path,{...options,headers});
   const credentialProof=path==='/account/api/link-cloud'||path==='/account/api/game';
-  if(response.status===401&&!credentialProof&&retry&&session?.refresh_token){
+  if(response.status===401&&!credentialProof&&retry&&session?.refresh_token&&session.access_token===accessToken){
     const refreshed=await fetch('/v1/sessions/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_token:session.refresh_token})});
     if(refreshed.ok){session={...session,...await refreshed.json()};return request(path,options,false);}
   }
   if(!response.ok){let detail;try{detail=await response.json();}catch{detail={message:`HTTP ${response.status}`};}
-    if(response.status===401&&!credentialProof&&session){session=null;$('console').hidden=true;$('login').hidden=false;}
+    if(response.status===401&&!credentialProof&&session&&session.access_token===accessToken&&!settingsUI?.saving){settingsUI?.clear();session=null;$('console').hidden=true;$('login').hidden=false;}
     const messages={R18_MODEL_BLOCKED:'该模型被识别或标记为 R18，已按内容策略阻止上传。',MODEL_UNCLASSIFIED:'该模型未能完成内容识别，已按“拒绝未能完成识别的模型”策略阻止上传。',ASSET_TOO_LARGE:'文件超过服务器允许的模型大小，请调整大小上限或选择较小文件。',IDENTITY_NOT_LINKED:'该游戏身份尚未绑定 Cloud 账号，请先用 Cloud 账号登录并完成绑定。',IDENTITY_ALREADY_LINKED:'该身份或账号已有不同的关联，请检查当前绑定，不能覆盖他人的关联。',IDENTITY_PROFILE_MISMATCH:'身份验证失败，请检查账号、令牌或微软应用授权。',IDENTITY_PROVIDER_UNAVAILABLE:'身份服务暂时无法访问，请稍后重试。',IDENTITY_PROVIDER_UNTRUSTED:'该身份服务尚未启用，或服务地址不符合要求。',ASSET_ACCESS_DENIED:'当前账号没有执行此操作的权限。',UNAUTHENTICATED:'账号或密码不正确，或当前登录已失效。',IDENTITY_CHALLENGE_EXPIRED:'验证已过期，请重新开始。',RATE_LIMITED:'操作过于频繁，请稍后再试。'};
-    throw new Error(messages[detail.code]||detail.message||detail.code||`HTTP ${response.status}`);
+    const error=new Error(messages[detail.code]||detail.message||detail.code||`HTTP ${response.status}`);error.status=response.status;error.code=detail.code;error.errors=detail.errors;throw error;
   }
   if(response.status===204)return null;return response.json();
 }
@@ -49,26 +33,26 @@ function action(text,fn,iconName){const b=node('button');b.type='button';if(icon
 function cell(row,text){const el=node('td',text);row.append(el);return el;}
 function options(select,entries,current){for(const [value,label] of entries){const o=node('option',label);o.value=value;select.append(o);}select.value=current;}
 function bytes(n){if(!Number.isFinite(Number(n)))return '未知';n=Number(n);if(n<1024)return `${n} B`;const i=Math.min(3,Math.floor(Math.log(n)/Math.log(1024)));return `${(n/1024**i).toFixed(2)} ${['B','KiB','MiB','GiB'][i]}`;}
-async function show(tab){if(['accounts','maintenance'].includes(tab)&&session?.role!=='owner')return;
+async function show(tab,settingsTab){if(tab==='maintenance'||tab==='audit'){settingsTab=tab==='maintenance'?'updates':'audit';tab='settings';}if(tab==='accounts'&&session?.role!=='owner')return;
   if(accountPortal&&tab!=='profile')return;
   for(const name of Object.keys(tabs))$(`tab-${name}`).hidden=name!==tab;
   for(const button of document.querySelectorAll('[data-tab]'))button.classList.toggle('active',button.dataset.tab===tab);
   $('breadcrumb').textContent=tabs[tab];
   document.querySelector('.content').scrollTop=0;
-  try{if(tab==='overview')await loadOverview();if(tab==='models'){await loadModels();await loadOwners();}if(tab==='settings')await loadSettings();if(tab==='accounts')await loadAccounts();if(tab==='audit')await loadAudit();if(tab==='profile')await loadProfile();if(tab==='maintenance')await loadMaintenance();}catch(e){notice(e.message,true);}
+  try{if(tab==='overview')await loadOverview();if(tab==='models'){await loadModels();await loadOwners();}if(tab==='settings')await loadSettings(settingsTab);if(tab==='accounts')await loadAccounts();if(tab==='profile')await loadProfile();}catch(e){notice(e.message,true);}
 }
 async function loadOverview(){const result=await request('/admin/api/config');const effective=result.effective?.effective||result.effective;const moderation=effective.moderation||{};for(const [id,key]of [['detection','detection_enabled'],['block','block_r18'],['texture','texture_detection_enabled']])$(`overview-${id}`).textContent=moderation[key]===true?'已开启':moderation[key]===false?'已关闭':'未配置';$('overview-instance').textContent=effective.instance?.instance_id||'—';$('overview-origin').textContent=effective.instance?.origin||location.origin;$('overview-role').textContent=roleNames[session.role];}
 async function enter(result){session=result;const me=await request('/account/api/profile');session={...session,...me};
   $('login').hidden=true;$('console').hidden=false;$('identity').textContent=me.account_id;$('role-badge').textContent=roleNames[me.role];
   document.querySelectorAll('[data-owner]').forEach(el=>el.hidden=accountPortal||me.role!=='owner');
-  document.querySelectorAll('nav [data-tab]').forEach(el=>{if(accountPortal)el.hidden=el.dataset.tab!=='profile';});
+  document.querySelectorAll('.sidebar [data-tab]').forEach(el=>{if(accountPortal)el.hidden=el.dataset.tab!=='profile';});
   $('upload-owner').value=me.cloud_account_id;
   await show(accountPortal?'profile':'overview');
 }
 for(const id of ['login-form','token-form'])$(id).addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,async()=>{const data=Object.fromEntries(new FormData(e.target));const result=await request(accountPortal&&id==='login-form'?'/account/api/login':'/admin/api/login',{method:'POST',json:data});e.target.reset();await enter(result);});});
-$('logout').addEventListener('click',()=>busy($('logout'),async()=>{if(session?.refresh_token)try{await request('/v1/sessions/current',{method:'DELETE'});}catch{}session=null;configResponse=null;formConfig=null;models=[];SPMPreview.clear();selectedModels.clear();uploadQueue=[];$('upload-form').reset();renderUploads();$('upload-status').textContent='';$('model-cards').replaceChildren();syncSelection();$('model-detail').close();$('raw-config').value='';$('config-fields').replaceChildren();$('console').hidden=true;$('login').hidden=false;}));
+$('logout').addEventListener('click',()=>{if(settingsUI.saving)return;return busy($('logout'),async()=>{if(session?.refresh_token)try{await request('/v1/sessions/current',{method:'DELETE'});}catch{}settingsUI.clear();session=null;configResponse=null;formConfig=null;models=[];SPMPreview.clear();selectedModels.clear();uploadQueue=[];$('upload-form').reset();for(const form of document.querySelectorAll('.game-form,.game-token-form,#self-cloud-form'))form.reset();renderUploads();$('upload-status').textContent='';$('model-cards').replaceChildren();syncSelection();$('model-detail').close();$('raw-config').value='';$('console').hidden=true;$('login').hidden=false;});});
 document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.tab)));
-document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.go)));
+document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.go,b.dataset.settingsTarget)));
 $('show-upload').addEventListener('click',()=>{$('upload-form').hidden=false;});
 $('cancel-upload').addEventListener('click',()=>{if(!uploadRunning)$('upload-form').hidden=true;});
 function renderUploads(){
@@ -109,7 +93,7 @@ $('upload-form').addEventListener('submit',async e=>{
     const failed=uploadQueue.filter(item=>item.state==='failed').length,pending=uploadQueue.filter(item=>item.state==='pending').length;
     $('upload-status').textContent=`本次成功 ${succeeded} 个${failed?`，失败 ${failed} 个，可重试未完成项`:''}${pending?`，待处理 ${pending} 个`:''}。`;
     if(session&&succeeded)try{await loadModels();}catch(error){notice(`上传结果已保留，模型列表刷新失败：${error.message}`,true);}
-  }finally{uploadRunning=false;$('logout').disabled=bulkRunning;for(const control of form.querySelectorAll('input,select,button'))control.disabled=false;renderUploads();}
+  }finally{uploadRunning=false;$('logout').disabled=bulkRunning||settingsUI.saving;for(const control of form.querySelectorAll('input,select,button'))control.disabled=false;renderUploads();}
 });
 $('search-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,()=>loadModels());});$('include-deleted').addEventListener('change',()=>loadModels().catch(e=>notice(e.message,true)));$('refresh-models').addEventListener('click',()=>busy($('refresh-models'),()=>loadModels()));
 function setModelView(view){
@@ -166,7 +150,7 @@ function syncSelection(){
   all.checked=models.length>0&&count===models.length;all.indeterminate=count>0&&count<models.length;all.disabled=bulkRunning||models.length===0;
   $('selection-toolbar').hidden=count===0;$('selection-count').textContent=`已选 ${count} 个`;
   for(const el of document.querySelectorAll('#selection-toolbar button, #selection-toolbar select, #selection-toolbar input'))el.disabled=bulkRunning;
-  $('logout').disabled=bulkRunning||uploadRunning;
+  $('logout').disabled=bulkRunning||uploadRunning||settingsUI.saving;
   for(const card of $('model-cards').querySelectorAll('.model-card')){const checked=selectedModels.has(card.dataset.asset);card.classList.toggle('selected',checked);const input=card.querySelector('input[type=checkbox]');input.checked=checked;input.disabled=bulkRunning;}
   document.querySelectorAll('.model-name').forEach(button=>button.disabled=bulkRunning);
   const active=models.filter(model=>selectedModels.has(model.asset_id)&&!model.deleted).length;
@@ -244,79 +228,7 @@ async function runBulk(kind,mark){
 document.querySelectorAll('[data-bulk]').forEach(button=>button.addEventListener('click',()=>runBulk(button.dataset.bulk)));
 $('bulk-mark').addEventListener('change',event=>{if(event.target.value)runBulk('mark',event.target.value);});
 
-function defaults(schema){if(schema.type==='object'){const value={};for(const [key,s]of Object.entries(schema.properties||{})){const v=defaults(s);if(v!==undefined)value[key]=v;}return value;}if('default'in schema)return structuredClone(schema.default);return undefined;}
-function merge(base,value){for(const [key,v]of Object.entries(value||{})){if(v&&typeof v==='object'&&!Array.isArray(v))base[key]=merge(base[key]||{},v);else base[key]=v;}return base;}
-async function loadSettings(){
-  configResponse=await request('/admin/api/config');
-  $('settings-note').textContent=configResponse.writable?(session.role==='owner'?'保存后，内容策略和上传限制立即生效；标注需重启的设置将在重启后生效。':'当前为管理员权限，可以查看设置；只有服主能够修改。'):'当前由服务器启动环境控制设置，只能查看。使用配置文件启动服务后，服主可以在此保存修改。';
-  $('save-settings').disabled=!configResponse.writable||session.role!=='owner';$('apply-raw').disabled=$('save-settings').disabled;$('raw-config').readOnly=$('save-settings').disabled;
-  const effective=configResponse.effective?.effective||configResponse.effective;
-  formConfig=merge(defaults(configResponse.schema),configResponse.config||effective);renderConfig();
-}
-function configField(group,key,title,description,scale=1,unit=''){
-  const field=configResponse.schema.properties[group].properties[key],value=formConfig[group]?.[key];
-  const label=node('label',undefined,field.type==='boolean'?'check':'setting-field');label.append(node('span',title||labels[key]||key));let input;
-  const nullable=Array.isArray(field.type)&&field.type.includes('null');
-  if(field.type==='boolean'){input=node('input');input.type='checkbox';input.checked=Boolean(value);}
-  else if(key==='trusted_proxy_ips'){input=node('textarea');input.value=(value||[]).join('\n');input.rows=3;}
-  else if(field.type==='array'){input=node('textarea');input.value=JSON.stringify(value||[],null,2);}
-  else if(field.enum){input=node('select');options(input,field.enum.map(v=>[v,v==='text'?'文本（便于阅读）':v==='json'?'JSON（日志收集）':v]),value);}
-  else if(key==='level'){
-    input=node('select');const entries=[['info','常规：运行信息与错误（推荐）'],['warn','精简：警告与错误'],['error','仅记录错误'],['debug','调试：记录更多排查信息'],['trace','追踪：非常详细']];
-    if(!entries.some(([v])=>v===value))entries.push([value,`自定义过滤规则：${value}`]);options(input,entries,value);
-  }else{input=node('input');input.type=field.type==='integer'||field.type==='number'?'number':'text';input.value=value===null||value===undefined?'':input.type==='number'?Number((value/scale).toPrecision(15)):value;
-    if(field.minimum!==undefined)input.min=field.minimum/scale;if(field.maximum!==undefined)input.max=field.maximum/scale;if(input.type==='number')input.step='any';
-    if(field.pattern)input.pattern=field.pattern.replace('._-', '._\\-');if(field.maxLength)input.maxLength=field.maxLength;
-  }
-  input.dataset.group=group;input.dataset.key=key;input.dataset.scale=scale;input.dataset.label=title||labels[key]||key;
-  input.dataset.kind=key==='trusted_proxy_ips'?'lines':field.type==='array'?'array':field.type==='boolean'?'boolean':input.type==='number'?'number':nullable||field.default===null?'nullable':'text';
-  input.disabled=session.role!=='owner'||!configResponse.writable||key==='bootstrap_account_id'||key==='projectile_snapshots';
-  if(unit){const wrap=node('div',undefined,'setting-unit');wrap.append(input,node('span',unit));label.append(wrap);}else label.append(input);
-  label.append(node('small',description||hints[key]||'一般保留默认设置。'));
-  if(key==='score_threshold')label.lastChild.textContent='初始值 70%；达到此置信度的裸露内容会标记为 R18。二次元贴图可能误判，建议人工复核。';
-  return label;
-}
-function renderConfig(){
-  const root=$('config-fields');root.replaceChildren();const used=new Set();
-  for(const spec of settingSections){const section=node('section',undefined,'panel config-section everyday-settings');section.append(node('h2',spec.title),node('p',spec.description,'setting-description'));const grid=node('div',undefined,'config-grid');
-    for(const [group,key,title,description,scale,unit]of spec.fields){used.add(`${group}.${key}`);grid.append(configField(group,key,title,description,scale,unit));}
-    section.append(grid);
-    if(spec.title==='账号与权限'&&session.role==='owner')section.append(action('管理与分发账号',()=>show('accounts'),'users'));
-    root.append(section);
-  }
-  const advanced=node('details',undefined,'panel advanced-settings');advanced.id='advanced-settings';advanced.append(node('summary','高级设置 · 识别服务连接、客户端功能、存储与网络'),node('p','首次接入贴图识别时，请配置 NudeNet 服务地址与 YSMParser 路径。其他参数通常保留默认值。','setting-description'));
-  for(const group of ['moderation','features','instance','storage','auth','limits','retention','logging','web_ui','performance','updates']){
-    const fields=Object.keys(configResponse.schema.properties[group].properties).filter(key=>!used.has(`${group}.${key}`));if(!fields.length)continue;
-    const section=node('section',undefined,'advanced-group');section.append(node('h3',group==='moderation'?'贴图识别服务（NudeNet）':groups[group]));const grid=node('div',undefined,'config-grid');
-    for(const key of fields){const [scale,unit]=settingUnits[key]||[1,''];grid.append(configField(group,key,null,null,scale,unit));}section.append(grid);advanced.append(section);
-  }
-  root.append(advanced);wirePerformance();filterSettings();$('raw-config').value=JSON.stringify(formConfig,null,2);
-}
-function readConfig(){
-  const copy=structuredClone(formConfig);
-  for(const input of document.querySelectorAll('#config-fields [data-group]')){
-    const title=input.dataset.label;let value=input.value;
-    switch(input.dataset.kind){
-      case 'boolean':value=input.checked;break;
-      case 'number':{
-        if(!input.validity.valid||value==='')throw new Error(`请检查“${title}”的数值范围`);
-        const scale=Number(input.dataset.scale),original=copy[input.dataset.group][input.dataset.key];
-        value=Number(value)===Number((original/scale).toPrecision(15))?original:Number((Number(value)*scale).toPrecision(15));
-        const field=configResponse.schema.properties[input.dataset.group].properties[input.dataset.key];
-        if(field.type==='integer'){const rounded=Math.round(value);if(Math.abs(value-rounded)>1e-6)throw new Error(`“${title}”换算后必须为整数`);value=rounded;}
-        break;
-      }
-      case 'array':try{value=JSON.parse(value);if(!Array.isArray(value))throw new Error();}catch{throw new Error(`“${title}”需要填写有效的 JSON 数组`);}break;
-      case 'lines':value=value.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);break;
-      case 'nullable':if(value==='')value=null;break;
-    }
-    if(!input.validity.valid)throw new Error(`请检查“${title}”的格式`);
-    copy[input.dataset.group][input.dataset.key]=value;
-  }
-  return copy;
-}
-$('reload-settings').addEventListener('click',()=>busy($('reload-settings'),()=>loadSettings()));$('apply-raw').addEventListener('click',()=>{try{const parsed=JSON.parse($('raw-config').value);if(!parsed||Array.isArray(parsed)||typeof parsed!=='object')throw new Error('完整配置必须是 JSON 对象');formConfig=merge(defaults(configResponse.schema),parsed);renderConfig();notice('JSON 已应用到表单，点击保存后生效。');}catch(e){notice(e.message,true);}});
-$('settings-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,async()=>{const config=readConfig();if(!config.web_ui.enabled&&!confirm('关闭 WebUI 后需在服务器上修改 JSON 才能重新开启。继续保存？'))return;await request('/admin/api/config',{method:'PUT',json:{config,revision:configResponse.revision}});notice('配置已保存。运行时设置已生效；监听地址、存储、凭据和日志更改需重启。');if(!config.web_ui.enabled){session=null;$('console').hidden=true;$('login').hidden=false;return;}await loadSettings();});});
+async function loadSettings(tab){await settingsUI.open(tab);}
 $('account-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,async()=>{await request('/admin/api/accounts',{method:'POST',json:Object.fromEntries(new FormData(e.target))});e.target.reset();notice('账号已创建，请自行分发账号和初始密码。');await loadAccounts();});});
 async function loadAccounts(page=1){
   const serial=++loadSerial.accounts;const params=new URLSearchParams({q:new FormData($('account-search-form')).get('q'),page,page_size:paging.accounts.size});
@@ -338,11 +250,9 @@ async function loadAudit(page=1){
 }
 $('refresh-audit').addEventListener('click',()=>busy($('refresh-audit'),()=>loadAudit(auditPage)));
 $('audit-search-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,()=>loadAudit());});
-$('export-audit').addEventListener('click',()=>busy($('export-audit'),()=>download('/admin/api/exports/audit?'+new URLSearchParams({q:new FormData($('audit-search-form')).get('q')}))));
+$('export-audit').addEventListener('click',()=>busy($('export-audit'),async()=>{if(!await settingsUI.beforeMaintenance())return;await download('/admin/api/exports/audit?'+new URLSearchParams({q:new FormData($('audit-search-form')).get('q')}));}));
 $('account-search-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,()=>loadAccounts());});$('refresh-accounts').addEventListener('click',()=>busy($('refresh-accounts'),()=>loadAccounts(accountPage)));
 
-Object.assign(labels,{microsoft_client_id:'微软登录应用 Client ID',microsoft_client_secret_file:'微软应用密钥文件路径',microsoft_redirect_uri:'微软登录回调地址'});
-Object.assign(hints,{microsoft_client_id:'在 Microsoft Entra 注册支持个人 Microsoft 账号的 Web 应用后，填写应用程序（客户端）ID。',microsoft_client_secret_file:'服务器上保存客户端密码“值”的文本文件路径，密钥不会发送到浏览器。相对路径以 Cloud 配置文件目录为准。',microsoft_redirect_uri:'与微软应用登记的 Web 回调地址完全一致，以 /admin/oauth/microsoft/callback 结尾；本机可使用 http://localhost:18822/admin/oauth/microsoft/callback。'});
 let ownerSearchTimer,authProviders=[];
 async function loadOwners(q=''){
   if(accountPortal||!session)return;
@@ -392,26 +302,27 @@ async function finishOAuth(){
   if(params.has('oauth')){const result=await request('/admin/oauth/microsoft/redeem',{method:'POST',json:{ticket:params.get('oauth')}});await enter(result);if(result.linked_identity){await show('profile');notice('微软正版身份已验证并绑定。');}}
 }
 
-Object.assign(groups,{performance:'性能与并发',updates:'服务更新'});
-Object.assign(labels,{preset:'性能预设',upload_concurrency:'上传并发',model_processing_concurrency:'扫描与解码并发',auto_update:'自动更新',check_interval_hours:'更新检查间隔（小时）'});
-Object.assign(hints,{preset:'低配 2 / 1；中配 4 / 2（默认）；高配 8 / 4；自定义可分别设置。',upload_concurrency:'同时上传的文件数量；0 表示不限制。',model_processing_concurrency:'模型扫描、解码及预览共同使用此限制；0 表示不限制。',auto_update:'开启后定期检查正式版本。原生部署先校验下载包并备份，再自动安装和重启；容器请由部署平台更新。',check_interval_hours:'自动更新启用后，每隔指定小时检查正式版本。'});
-settingSections.splice(1,0,{title:'性能与并发',description:'选择服务器性能档位，或自定义并发。0 表示该项不限制；0 / 0 表示两项均不限制。',fields:[['performance','preset'],['performance','upload_concurrency'],['performance','model_processing_concurrency']]});
-settingSections.push({title:'服务更新',description:'默认关闭自动更新。开启后原生部署会在备份和校验成功后自动安装并重启。',fields:[['updates','auto_update'],['updates','check_interval_hours']]});
-function wirePerformance(){const preset=document.querySelector('[data-group="performance"][data-key="preset"]');if(!preset)return;const uploads=document.querySelector('[data-key="upload_concurrency"]'),processing=document.querySelector('[data-key="model_processing_concurrency"]');for(const option of preset.options)option.textContent={low:'低配 · 2 / 1',medium:'中配 · 4 / 2（默认）',high:'高配 · 8 / 4',custom:'自定义'}[option.value];const apply=()=>{const values={low:[2,1],medium:[4,2],high:[8,4]}[preset.value];if(values){uploads.value=values[0];processing.value=values[1];}uploads.readOnly=processing.readOnly=!!values;};preset.addEventListener('change',apply);apply();}
-function filterSettings(){const q=$('settings-search').value.trim().toLowerCase();for(const section of document.querySelectorAll('#config-fields section')){let count=0;for(const label of section.querySelectorAll('.config-grid>label')){const input=label.querySelector('[data-key]');const match=(label.textContent+' '+input?.dataset.key).toLowerCase().includes(q);label.hidden=!match;if(match)count++;}section.hidden=count===0;}const advanced=$('advanced-settings');if(advanced){advanced.hidden=![...advanced.querySelectorAll('section')].some(s=>!s.hidden);if(q&&!advanced.hidden)advanced.open=true;}}
-$('settings-search').addEventListener('input',filterSettings);
 function filterIdentities(){const q=$('identity-search').value.trim().toLowerCase();for(const row of $('bound-game-identities').querySelectorAll('.bound-identity'))row.hidden=!row.textContent.toLowerCase().includes(q);}
 $('identity-search').addEventListener('input',filterIdentities);
 async function download(path,retry=true){
   const response=await fetch(path,{headers:{Authorization:`Bearer ${session.access_token}`}});
   if(response.status===401&&retry&&session.refresh_token){await request('/account/api/profile');return download(path,false);}
   if(!response.ok){let detail;try{detail=await response.json();}catch{}throw new Error(detail?.message||`导出失败：HTTP ${response.status}`);}
-  const blob=await response.blob(),url=URL.createObjectURL(blob),link=node('a');link.href=url;link.download=response.headers.get('content-disposition')?.match(/filename="([^"]+)"/)?.[1]||'spm-cloud-export';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);notice('导出已完成，文件已下载。');
+  const blob=await response.blob(),url=URL.createObjectURL(blob),link=node('a');link.href=url;link.download=response.headers.get('content-disposition')?.match(/filename="([^"]+)"/)?.[1]||'spm-cloud-export';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);notice('导出内容已生成，请在浏览器下载中核对文件。');
 }
 let latestRelease=null;
-async function loadMaintenance(){const result=await request('/admin/api/maintenance');$('update-status').textContent=`当前版本 ${result.version}`;$('update-mode').textContent=`自动更新：${result.updates.auto_update?'已开启':'已关闭'} · 检查间隔 ${result.updates.check_interval_hours} 小时。${result.native_update_supported?'原生部署支持自动安装，更新前生成数据库与模型备份。':'当前为容器部署，请通过部署平台更新镜像。'}`;latestRelease=null;$('install-update').disabled=true;$('release-link').hidden=true;}
+async function loadMaintenance(){const result=await request('/admin/api/maintenance');$('install-update').hidden=!result.native_update_supported;$('update-status').textContent=`当前版本 ${result.version}`;$('update-mode').textContent=`自动更新：${result.updates.auto_update?'已开启':'已关闭'} · 检查间隔 ${result.updates.check_interval_hours} 小时。${result.native_update_supported?'原生部署支持自动安装，更新前生成数据库与模型备份。':'当前为容器部署，请通过部署平台更新镜像。'}`;latestRelease=null;$('install-update').disabled=true;$('release-link').hidden=true;}
 $('check-update').addEventListener('click',()=>busy($('check-update'),async()=>{latestRelease=await request('/admin/api/updates/check',{method:'POST'});$('update-status').textContent=latestRelease.update_available?`当前 ${latestRelease.current_version} · 发现新版本 ${latestRelease.latest_version}`:`当前 ${latestRelease.current_version} · 已是最新正式版本`;$('install-update').disabled=!latestRelease.update_available||!latestRelease.native_update_supported;const link=$('release-link');if(typeof latestRelease.release_url==='string'&&latestRelease.release_url.startsWith('https://github.com/sdf123098/spm-cloud/releases/')){link.href=latestRelease.release_url;link.hidden=false;}}));
-$('install-update').addEventListener('click',()=>busy($('install-update'),async()=>{if(!confirm(`安装 ${latestRelease?.latest_version} 并重启 Cloud？更新前将自动备份数据。`))return;const result=await request('/admin/api/updates/install',{method:'POST'});notice(result.message);$('update-status').textContent=result.message;}));
-document.querySelectorAll('[data-export]').forEach(button=>button.addEventListener('click',()=>busy(button,()=>download(`/admin/api/exports/${button.dataset.export}`))));
+$('install-update').addEventListener('click',()=>busy($('install-update'),async()=>{if(!await settingsUI.beforeMaintenance(true))return;if(!confirm(`安装 ${latestRelease?.latest_version} 并重启 Cloud？更新前将自动备份数据。`))return;const result=await request('/admin/api/updates/install',{method:'POST'});notice(result.message);$('update-status').textContent=result.message;}));
+document.querySelectorAll('[data-export]').forEach(button=>button.addEventListener('click',()=>busy(button,async()=>{if(await settingsUI.beforeMaintenance())await download(`/admin/api/exports/${button.dataset.export}`);})));
+
+
+const settingsUI=SPMSettings.mount({request,notice,getSession:()=>session,loadMaintenance,loadAudit,
+ onSavingChange:value=>{$('logout').disabled=value||uploadRunning||bulkRunning;},
+ downloadBackup:()=>download('/admin/api/exports/backup'),
+ onBootstrapChanged:async value=>{if(session?.refresh_token)return true;if(value){const result=await request('/admin/api/login',{method:'POST',json:{bootstrap_token:value}});session=result;session={...session,...await request('/account/api/profile')};return true;}settingsUI.clear();session=null;$('console').hidden=true;$('login').hidden=false;notice('配置已保存，初始令牌已清除。请使用账号密码重新登录。');return false;},
+ onDisabled:command=>{session=null;$('console').hidden=true;$('login').hidden=false;for(const section of $('login').children)section.hidden=true;const info=node('section',undefined,'webui-disabled panel');info.append(node('h2','管理网页已关闭'),node('p','在服务器执行以下命令恢复，然后刷新本页。'),node('pre',command));$('login').append(info);},
+ onPasswordChanged:()=>{settingsUI.clear();session=null;$('console').hidden=true;$('login').hidden=false;}
+});
 
 loadAuthProviders().then(()=>finishOAuth()).catch(e=>notice(e.message,true));

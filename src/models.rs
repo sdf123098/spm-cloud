@@ -181,6 +181,8 @@ pub struct IdentityProviderUpdate {
     pub session_path: Option<String>,
     #[serde(default)]
     pub has_joined_url: Option<String>,
+    #[serde(default)]
+    pub authenticate_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

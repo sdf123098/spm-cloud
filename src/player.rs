@@ -785,6 +785,7 @@ mod tests {
             cache: Default::default(),
             database_backend: "sqlite".into(),
             mysql_url: None,
+            microsoft_client_secret: None,
             visual: Default::default(),
             trusted_proxy_ips: Vec::new(),
             config_path: None,

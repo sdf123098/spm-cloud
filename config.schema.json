@@ -145,7 +145,14 @@
                 ],
                 "default": null
               },
-              "has_joined_url": {
+                "authenticate_path": {
+                  "type": ["string", "null"],
+                  "default": null,
+                  "description": "Optional authenticate endpoint path relative to the validated provider base URL; omitted preserves legacy path inference.",
+                  "maxLength": 512,
+                  "pattern": "^/(?!/)[A-Za-z0-9/_.-]*$"
+                },
+                "has_joined_url": {
                 "type": [
                   "string",
                   "null"

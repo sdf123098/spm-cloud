@@ -45,15 +45,26 @@ impl Default for ModerationSettings {
 }
 impl ModerationSettings {
     pub fn validate(&self) -> Result<(), CloudError> {
-        if !self.score_threshold.is_finite()
-            || !(0.0..=1.0).contains(&self.score_threshold)
-            || !(1..=300).contains(&self.timeout_seconds)
-            || !(1..=256).contains(&self.max_textures)
-            || !(1024..=32 * 1024 * 1024).contains(&self.max_texture_bytes)
-        {
+        if !self.score_threshold.is_finite() || !(0.0..=1.0).contains(&self.score_threshold) {
             return Err(CloudError::configuration(
-                "moderation: invalid threshold, timeout or texture budget",
+                "moderation.score_threshold: must be in 0..=1",
             ));
+        }
+        for (path, value, min, max) in [
+            ("timeout_seconds", self.timeout_seconds, 1, 300),
+            ("max_textures", self.max_textures as u64, 1, 256),
+            (
+                "max_texture_bytes",
+                self.max_texture_bytes as u64,
+                1024,
+                32 * 1024 * 1024,
+            ),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(CloudError::configuration(format!(
+                    "moderation.{path}: must be in {min}..={max}"
+                )));
+            }
         }
         if let Some(url) = &self.scanner_url {
             let parsed = reqwest::Url::parse(url)
@@ -71,7 +82,7 @@ impl ModerationSettings {
         }
         if self.detection_enabled && self.texture_detection_enabled && self.scanner_url.is_none() {
             return Err(CloudError::configuration(
-                "moderation.scanner_url is required for texture detection",
+                "moderation.scanner_url: required for texture detection",
             ));
         }
         Ok(())

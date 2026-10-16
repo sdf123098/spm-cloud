@@ -88,9 +88,47 @@ Players add the Cloud root address in a compatible version of the mod, select th
 - Open a model name for details. Select models to change visibility, rescan, manually label, delete, or restore. Ordinary deletion is reversible; permanent cleanup is not. Back up before permanent cleanup.
 - Model cards show the original file size with B/KiB/MiB units. Minecraft previews face the front and support BBModel, Bedrock ZIP/YSM, and GLTF/GLB files with embedded resources. Encrypted YSM previews require YSMParser. GLTF/GLB previews do not access external network resources.
 - Settings, identity links, and audit records support search. Model search includes name, asset ID, owner, and format. Pages avoid loading the entire catalog at once.
-- “Maintenance & cleanup” checks stable releases and exports a consistent database/model backup, the full model library, the current process's most recent 2 MiB of logs, and all or filtered audit records. Full backups are owner-only. Follow the permission shown for each export.
+- Open “Server settings” near the bottom of the sidebar, above the current account and sign-out button. Update and audit tools are inside these settings; “My account & links” remains in the main navigation.
 
 Uploads are public by default. A private model belongs to one Cloud account and is accessible only to its owner. Choose the correct account during upload. File selection happens on the operator's computer even when Cloud is remote; only selected files are uploaded.
+
+### Server settings
+
+| Tab | What you can configure or do |
+|---|---|
+| General & network | Public address, instance identity, listener, trusted proxies, and WebUI availability. |
+| Accounts & authentication | Registration, Microsoft sign-in, third-party services, initial owner credentials, and actual owner password changes. |
+| Models & content safety | Upload size, detection, blocking, scanner connection, texture budgets, and YSMParser. |
+| Performance & cache | Performance presets, custom concurrency, memory/Redis/disabled caching, and all cache limits. |
+| Storage & database | Data paths, SQLite/MySQL connection settings, and database-switch guidance. |
+| Client features | Supported capabilities, protocol limits, and temporary-state cleanup. Unimplemented projectile features remain unavailable. |
+| Logging | Log level, per-module filter rows, and text/JSON output. |
+| Updates & backups | Owner-only update checks/installation, automatic-update settings, backups, and library/audit/runtime-log exports. |
+| Audit records | Search, page through, inspect, and export filtered records as an owner or admin, preserving existing permissions. |
+
+Only the owner can edit server configuration, and saving requires a writable configuration file selected with `--config`. Admins can read settings without receiving secret values; environment-only configuration is read-only. Search settings by name or technical alias to open the relevant tab. Use the arrow keys, Home, and End to navigate the tab bar.
+
+Changes across tabs share one draft. Switching tabs, searching, viewing audit records, or checking for updates keeps that draft. Validate before saving, restore individual defaults, or undo all changes. “Reload” discards the draft after confirmation. A failed save preserves it. On a revision conflict (HTTP 409), load the new server values for comparison, choose to keep your changes with the new revision, then validate and save again. Reloading or leaving the page may discard drafts; sign-out clears them. Secret inputs stay only in browser memory. The optional configuration import/export tool edits the same draft and excludes secret values.
+
+The page distinguishes saved values, values actually in use, and settings awaiting restart. Listener, instance identity/public address, storage, and logging changes require restart. A save with no relevant change does not create a restart requirement. Initial password hashes apply only to initial account creation. Install updates after saving or discarding drafts; backups and exports use the active configuration and exclude drafts.
+
+### Add a third-party authentication service
+
+In “Accounts & authentication,” choose “Add third-party service.” For a standard Yggdrasil service, enter its display name and public HTTPS base address. A custom compatible service exposes separate session-verification and account-login path fields; gateway mode accepts the complete session-verification URL and an optional login path. Use the form rather than writing provider JSON.
+
+“Check service” tests the supported address/connectivity rules without saving or linking a player. “Reachable” does not establish that a player's credentials work; verify login/linking separately. Add the service to the draft and save. New services receive a stable internal ID automatically. Editing its display name keeps that ID and existing links. Disable a service to stop authentication while retaining links, then restore it from the disabled-services list when needed. Removing a configuration-managed service also soft-disables it. Legacy database entries can be brought under configuration management; the built-in `official` provider is protected.
+
+### Credentials, database switching, and WebUI recovery
+
+MySQL and Redis forms accept host, port, username, password, and database separately; Redis also offers TLS. Microsoft secrets and initial owner credentials have their own controls. Choose “Keep,” “Replace,” or explicit “Clear”; existing server-side credential files remain an option. Replacing a secret writes a new server-side credential file, and saved secrets cannot be read back. Generating an initial token displays its value once after saving; copy and protect it immediately. Changing the real owner password uses “Change owner password,” revokes existing password sessions, and requires signing in again. Replacing the initial password-hash reference does not change an existing account password.
+
+To switch from SQLite to MySQL, check the target connection, download and verify a backup, preserve the existing model directory and SQLite path, save the MySQL settings, then restart. On startup, the supported import requires a valid SQLite source with accounts and a MySQL target with no accounts or models. Connection checks do not create tables or migrate data. Non-empty targets are not overwritten or merged, and MySQL-to-SQLite migration is not automatic. Changing a directory setting does not move files. Redis settings apply live; an unavailable Redis service falls back to bounded memory.
+
+Before disabling the WebUI under “General & network,” copy the instance-specific recovery command shown by the confirmation dialog. Run it on the server with the installed executable, for example:
+
+    spm-cloud --config /path/to/config.json --enable-web-ui
+
+The running file watcher reopens the website and management API; otherwise the next service startup applies it. This command changes WebUI availability without initializing or migrating a database. It requires a valid writable configuration file.
 
 ### Content detection and blocking
 
@@ -130,7 +168,7 @@ When a JSON file is selected, it is authoritative and environment variables do n
 | auth.bootstrap_access_token_file | Server-side initial token file. Do not put the token itself in JSON. |
 | auth.bootstrap_password_hash_file | Optional Argon2id password-hash file; never put a plaintext password here. |
 | auth.allow_self_registration | Allow or refuse player self-registration. |
-| auth.identity_providers | Optional Yggdrasil providers. Use has_joined_url, or base_url plus session_path. Keep provider IDs stable. To disable an existing provider, keep its record and set enabled=false. |
+| auth.identity_providers | Optional Yggdrasil providers. Use has_joined_url, or base_url plus session_path. Optional authenticate_path selects a relative login endpoint; omitting it preserves legacy inference. Keep provider IDs stable. To disable an existing provider, keep its record and set enabled=false. |
 | limits.max_asset_bytes / max_message_bytes | Per-model and ordinary protocol message limits. Defaults are 128 MiB and 64 KiB. The reverse proxy upload limit must be large enough too. |
 | performance.preset | Low: 2 uploads / 1 model processor; medium: 4 / 2 (default); high: 8 / 4; or custom upload and scan/decode concurrency. Each custom value may be 0 for unlimited; 0 / 0 leaves both unlimited. Lowering a limit does not interrupt existing work. |
 | updates.auto_update / check_interval_hours | Automatic updates are disabled by default; checks default to every 24 hours. Container images are updated by the deployment platform. |
@@ -139,11 +177,23 @@ When a JSON file is selected, it is authoritative and environment variables do n
 | moderation.* | Detection, blocking, scanner URL, thresholds, decode budgets, and YSMParser path. |
 | features.* / retention.* | Optional game capability switches and state retention. Enable only capabilities supported by deployed clients. |
 | logging.level / format | Log filter and text/JSON format. A restart is required. |
-| web_ui.enabled | Whether to expose the admin website. If disabled, re-enable it through server config. |
+| web_ui.enabled | Whether to expose the admin website and management API. Recover with --config PATH --enable-web-ui. |
 
-The process checks a selected JSON file every two seconds. Valid runtime options apply in place; invalid edits leave the last valid settings active. Listen address, instance identity, public origin, storage paths, startup credentials, and logging settings require a restart. Saving through WebUI requires startup with --config PATH and write permission to the config directory. Do not reinitialize an existing instance: initialization does not overwrite files or reset passwords.
+The process checks a selected JSON file every two seconds. Valid runtime options apply in place; invalid edits leave the last valid settings active. Listen address, instance identity, public origin, storage paths, and logging settings require a restart. Bootstrap tokens can be replaced live. The bootstrap password hash initializes new accounts only; changing its file does not overwrite an existing password. Saving through WebUI requires startup with --config PATH and write permission to the config directory. Do not reinitialize an existing instance: initialization does not overwrite files or reset passwords.
 
 Legacy ENV files are not loaded automatically by the Rust service. To migrate, stop the service, back up data and credentials, create JSON, map the existing database/object/token paths, then run --check-config. SPM_CLOUD_CONFIG only selects a JSON file. Historical environment names and their JSON equivalents are covered in the configuration reference above and in .env.example.
+
+Recover a disabled WebUI without opening a database, migrating data, or resetting accounts:
+
+    spm-cloud --config /path/to/config.json --enable-web-ui
+
+The running file watcher restores access, or the next startup applies the change. Environment-only deployments remain read-only.
+
+The settings API distinguishes saved `config`, actual `active` settings, and `pending_restart_fields`. Owners can validate drafts with `/admin/api/config/validate`, check fixed MySQL/Redis/NudeNet connections with `/admin/api/config/check-connection`, and probe candidate authentication services with `/admin/api/providers/check`. A successful probe does not verify an account login or create a binding. Administrators may read configuration but cannot save settings or run these checks.
+
+`PUT /admin/api/config` retains `{config, revision}` and accepts optional `managed_secrets` entries (mysql, redis, microsoft, bootstrap_token, bootstrap_password_hash): `keep`, `replace`, or explicit `clear`. Bootstrap tokens also support `generate`; the generated value appears only in that successful save response. Structured MySQL/Redis connection inputs create distinct server-side files in `.managed-secrets/` beside the configuration. Passwords and complete connection strings are never read back. Existing credential files remain supported and old files are retained for rollback. Backups exclude configuration and credential files; back these up securely and separately. Actual owner password changes continue through the account update endpoint and revoke old sessions.
+
+Removing a previously configuration-managed provider soft-disables it while retaining bindings. Legacy database providers are preserved on the first save. `provider_admin_entries` includes sources, disabled entries, and endpoint metadata; `official` is protected. Database switching still supports only existing SQLite data imported into empty MySQL. Connection checks neither create business tables nor migrate data.
 
 ## 5. Optional MySQL storage and Redis cache
 
@@ -186,7 +236,7 @@ Legacy ENV-only installations may use SPM_CLOUD_REDIS_URL. The cache bounds page
 
 ### WebUI exports
 
-The owner can download a consistent backup ZIP containing the database and immutable model revisions, a ZIP of the full library in original formats, the current process's most recent 2 MiB of logs, and all or filtered audit records. Single-model export preserves its original bytes. Config, credentials, proxy certificates, and container environment files are not included; protect them separately. Get logs from systemd, Docker, or your deployment platform for periods before the current process started.
+Under “Server settings → Updates & backups,” the owner can download a consistent backup ZIP containing the database and immutable model revisions, a ZIP of the full library in original formats, the current process's most recent 2 MiB of logs, and all or filtered audit records. “Audit records” also offers filtered export to owners and admins, preserving its existing permission. Full backups, library archives, runtime-log exports, and updates remain owner-only. Single-model export preserves its original bytes. Config, credentials, proxy certificates, and container environment files are not included; protect them separately. Get logs from systemd, Docker, or your deployment platform for periods before the current process started.
 
 Extract a WebUI backup ZIP before restoring it:
 
@@ -265,7 +315,7 @@ Player display state, vehicle bindings, and entity motion timelines have separat
 
 ## 9. Build, test, and contribute
 
-Build the Rust service with the stable toolchain selected by rust-toolchain.toml. The preview bundle is checked in, so ordinary Cargo builds do not need Node.js. To change web/preview.js, install Node.js 22 and rebuild the bundle:
+Build the Rust service with Rust 1.88 or newer. The preview bundle is checked in, so ordinary Cargo builds do not need Node.js. To change web/preview.js, install Node.js 22 and rebuild the bundle:
 
     cd web
     npm ci

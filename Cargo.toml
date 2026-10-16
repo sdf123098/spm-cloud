@@ -1,8 +1,8 @@
 [package]
 name = "spm-cloud"
-version = "2.3.0"
+version = "2.4.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.88"
 description = "Standalone SPM Cloud service for SparkleMorpher clients"
 license = "MIT"
 repository = "https://github.com/sdf123098/spm-cloud"

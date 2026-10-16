@@ -655,6 +655,7 @@ fn mysql_schema(sql: &str) -> String {
                     "username",
                     "texture_id",
                     "session_path",
+                    "authenticate_path",
                 ]
                 .contains(&name)
                 {

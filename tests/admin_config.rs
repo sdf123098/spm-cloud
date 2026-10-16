@@ -491,6 +491,257 @@ fn invalid_password_hash_is_rejected_before_database_creation_and_restart_preser
     }
 }
 
+#[test]
+fn web_ui_recovery_only_changes_enabled_and_has_no_database_side_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config with spaces.json");
+    fs::write(dir.path().join("token"), "offline-recovery-test-secret").unwrap();
+    let before = json!({"instance":{"origin":"https://recovery.example.com"},"auth":{"bootstrap_access_token_file":"token"},"web_ui":{"enabled":false},"limits":{"max_asset_bytes":12345}});
+    fs::write(&path, before.to_string()).unwrap();
+    let output = cli(
+        &[
+            "--config".as_ref(),
+            path.as_os_str(),
+            "--enable-web-ui".as_ref(),
+        ],
+        dir.path(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut expected = before;
+    expected["web_ui"]["enabled"] = json!(true);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap(),
+        expected
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("token")).unwrap(),
+        "offline-recovery-test-secret"
+    );
+    assert!(!dir.path().join("data").exists());
+    assert!(!dir.path().join(".managed-secrets").exists());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("offline-recovery-test-secret"));
+}
+
+#[test]
+fn web_ui_recovery_rejects_conflicts_invalid_and_readonly_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    for args in [
+        vec!["--enable-web-ui"],
+        vec!["--enable-web-ui", "--check-config"],
+        vec!["--enable-web-ui", "--version"],
+    ] {
+        let args = args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+        assert!(!cli(&args, dir.path()).status.success());
+    }
+    fs::write(
+        &path,
+        r#"{"web_ui":{"enabled":false},"features":{"projectile_snapshots":true}}"#,
+    )
+    .unwrap();
+    let original = fs::read(&path).unwrap();
+    assert!(
+        !cli(
+            &[
+                "--config".as_ref(),
+                path.as_os_str(),
+                "--enable-web-ui".as_ref()
+            ],
+            dir.path()
+        )
+        .status
+        .success()
+    );
+    assert_eq!(fs::read(&path).unwrap(), original);
+    fs::write(&path, r#"{"web_ui":{"enabled":false}}"#).unwrap();
+    let original = fs::read(&path).unwrap();
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    let old = permissions.clone();
+    permissions.set_readonly(true);
+    fs::set_permissions(&path, permissions).unwrap();
+    let result = cli(
+        &[
+            "--config".as_ref(),
+            path.as_os_str(),
+            "--enable-web-ui".as_ref(),
+        ],
+        dir.path(),
+    );
+    fs::set_permissions(&path, old).unwrap();
+    assert!(!result.status.success());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(!dir.path().join("data").exists());
+}
+
+#[tokio::test]
+async fn web_ui_recovery_reenables_running_service_and_watcher_keeps_logging_pending() {
+    struct Guard(std::process::Child);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.json");
+    init_config(&file).unwrap();
+    let token = fs::read_to_string(dir.path().join("secrets/bootstrap-token.txt")).unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut config: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    config["instance"]["bind"] = json!(format!("127.0.0.1:{port}"));
+    fs::write(&file, config.to_string()).unwrap();
+    let _guard = Guard(
+        cli_command(dir.path())
+            .args(["--config".as_ref(), file.as_os_str()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let endpoint = format!("http://127.0.0.1:{port}/admin/api/config");
+    let mut initial = None;
+    for _ in 0..100 {
+        if let Ok(response) = client.get(&endpoint).bearer_auth(token.trim()).send().await {
+            if response.status().is_success() {
+                initial = Some(response.json::<Value>().await.unwrap());
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    let initial = initial.expect("test service did not become ready");
+    config = initial["config"].clone();
+    config["web_ui"]["enabled"] = json!(false);
+    config["logging"]["level"] = json!("debug");
+    assert!(
+        client
+            .put(&endpoint)
+            .bearer_auth(token.trim())
+            .json(&json!({"config":config,"revision":initial["revision"]}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    assert_eq!(
+        client
+            .get(&endpoint)
+            .bearer_auth(token.trim())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let output = cli(
+        &[
+            "--config".as_ref(),
+            file.as_os_str(),
+            "--enable-web-ui".as_ref(),
+        ],
+        dir.path(),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut restored = None;
+    for _ in 0..100 {
+        let response = client
+            .get(&endpoint)
+            .bearer_auth(token.trim())
+            .send()
+            .await
+            .unwrap();
+        if response.status().is_success() {
+            restored = Some(response.json::<Value>().await.unwrap());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let restored = restored.expect("watcher did not restore WebUI");
+    assert_eq!(restored["active"]["logging"]["level"], "info");
+    assert!(
+        restored["pending_restart_fields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("logging.level"))
+    );
+    // Observe another watcher tick to catch metadata drifting to the last parsed file.
+    tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+    let final_state: Value = client
+        .get(&endpoint)
+        .bearer_auth(token.trim())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(final_state["active"]["logging"]["level"], "info");
+    // The watcher has observed this exact file. A rapid API disable followed by
+    // offline recovery can restore identical bytes before its next poll.
+    let baseline = fs::read(&file).unwrap();
+    let mut disabled = final_state["config"].clone();
+    disabled["web_ui"]["enabled"] = json!(false);
+    assert!(
+        client
+            .put(&endpoint)
+            .bearer_auth(token.trim())
+            .json(&json!({"config":disabled,"revision":final_state["revision"]}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    spm_cloud::config_file::enable_web_ui(&file).unwrap();
+    assert_eq!(fs::read(&file).unwrap(), baseline);
+    let mut recovered = false;
+    for _ in 0..100 {
+        if client
+            .get(&endpoint)
+            .bearer_auth(token.trim())
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+        {
+            recovered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        recovered,
+        "identical-byte recovery must reapply after an API save"
+    );
+    assert_eq!(
+        client
+            .get(format!("http://127.0.0.1:{port}/admin/"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::OK
+    );
+}
+
 #[tokio::test]
 async fn configured_query_limit_is_enforced_and_discovery_does_not_advertise_reserved_features() {
     let (_dir, loaded) = load(

@@ -102,6 +102,8 @@ pub struct Provider {
     pub session_path: Option<String>,
     #[serde(default)]
     pub has_joined_url: Option<String>,
+    #[serde(default)]
+    pub authenticate_path: Option<String>,
 }
 fn enabled() -> bool {
     true
@@ -115,6 +117,7 @@ impl From<Provider> for IdentityProviderUpdate {
             enabled: p.enabled,
             session_path: p.session_path,
             has_joined_url: p.has_joined_url,
+            authenticate_path: p.authenticate_path,
         }
     }
 }
@@ -237,7 +240,7 @@ impl LoadedConfig {
         } else {
             environment
         };
-        let (mut input, raw) = if let Some(path) = &file {
+        let (input, raw) = if let Some(path) = &file {
             let text = fs::read_to_string(path)
                 .map_err(|_| invalid("config", "cannot read selected file"))?;
             let mut decoder = serde_json::Deserializer::from_str(&text);
@@ -254,6 +257,40 @@ impl LoadedConfig {
             input.instance.instance_id = "local-dev".into();
             (input, json!({}))
         };
+        Self::resolve(input, raw, file, cwd, environment)
+    }
+    /// Validate a browser draft without publishing it or creating any files/databases.
+    pub fn candidate(value: &Value, path: &Path) -> Result<Self, CloudError> {
+        Self::candidate_with_secrets(value, path, &Environment::new())
+    }
+    pub(crate) fn candidate_with_secrets(
+        value: &Value,
+        path: &Path,
+        secrets: &Environment,
+    ) -> Result<Self, CloudError> {
+        let text = serde_json::to_string(value).unwrap();
+        let mut decoder = serde_json::Deserializer::from_str(&text);
+        let input = serde_path_to_error::deserialize(&mut decoder).map_err(|e| {
+            invalid(
+                &e.path().to_string(),
+                "invalid field value or unknown field",
+            )
+        })?;
+        Self::resolve(
+            input,
+            value.clone(),
+            Some(path.to_owned()),
+            &std::env::current_dir()?,
+            secrets,
+        )
+    }
+    fn resolve(
+        mut input: FileConfig,
+        raw: Value,
+        file: Option<PathBuf>,
+        cwd: &Path,
+        environment: &Environment,
+    ) -> Result<Self, CloudError> {
         if input.schema_version != 1 {
             return Err(invalid("schema_version", "only version 1 is supported"));
         }
@@ -484,6 +521,14 @@ impl LoadedConfig {
         web_ui.microsoft_client_secret_file = web_ui
             .microsoft_client_secret_file
             .map(|path| absolute(base, &path));
+        let microsoft_client_secret = secret(
+            "web_ui.microsoft_client_secret_file",
+            "SPM_CLOUD_MICROSOFT_CLIENT_SECRET",
+            input.web_ui.microsoft_client_secret_file.as_deref(),
+            base,
+            environment,
+            &mut sources,
+        )?;
         let mut cache = input.cache.clone();
         cache.redis_url = secret(
             "cache.redis_url_file",
@@ -525,6 +570,7 @@ impl LoadedConfig {
         let cloud = CloudConfig {
             database_backend: input.storage.backend.clone(),
             mysql_url,
+            microsoft_client_secret,
             cache,
             performance: input.performance.clone(),
             updates: input.updates.clone(),
@@ -569,9 +615,9 @@ impl LoadedConfig {
             } else {
                 None
             });
-        effective["auth"]["identity_providers"] = Value::Array(providers.iter().map(|p| json!({"provider_id":p.provider_id,"display_name":p.display_name,"base_url":p.base_url,"enabled":p.enabled,"session_path":p.session_path,"has_joined_url":p.has_joined_url})).collect());
+        effective["auth"]["identity_providers"] = Value::Array(providers.iter().map(|p| json!({"provider_id":p.provider_id,"display_name":p.display_name,"base_url":p.base_url,"enabled":p.enabled,"session_path":p.session_path,"has_joined_url":p.has_joined_url,"authenticate_path":p.authenticate_path})).collect());
         effective["logging"]["filter"] = json!(log_filter);
-        let report = json!({"config_file":file,"effective":effective,"sources":sources,"notes":["Configured providers are upserted by ID; removing an entry does not delete database providers. Use enabled=false to disable.","player_display_state, vehicle_bindings and entity_motion are implemented and opt-in; projectile_snapshots remain unavailable. Visual limits apply to enabled visual inputs, not legacy player motion or uploads."]});
+        let report = json!({"config_file":file,"effective":effective,"sources":sources,"notes":["Configured providers use stable IDs; removal soft-disables only previously configuration-managed providers. Legacy database entries and historical bindings are retained.","player_display_state, vehicle_bindings and entity_motion are implemented and opt-in; projectile_snapshots remain unavailable. Visual limits apply to enabled visual inputs, not legacy player motion or uploads."]});
         Ok(Self {
             cloud,
             providers,
@@ -954,4 +1000,23 @@ pub fn init_config(path: &Path) -> Result<(), CloudError> {
         let _ = fs::remove_file(&path);
     }
     result
+}
+
+/// Offline recovery deliberately never opens a store, initializes accounts, or binds a listener.
+pub fn enable_web_ui(path: &Path) -> Result<(), CloudError> {
+    let path = absolute(&std::env::current_dir()?, path);
+    LoadedConfig::load(Some(&path))?;
+    let bytes = fs::read(&path).map_err(|_| invalid("config", "cannot read selected file"))?;
+    let mut raw: Value =
+        serde_json::from_slice(&bytes).map_err(|_| invalid("config", "invalid JSON"))?;
+    LoadedConfig::candidate(&raw, &path)?;
+    if raw.get("web_ui").is_none() {
+        raw["web_ui"] = json!({});
+    }
+    raw["web_ui"]["enabled"] = json!(true);
+    LoadedConfig::candidate(&raw, &path)?;
+    if fs::read(&path)? != bytes {
+        return Err(CloudError::RevisionConflict);
+    }
+    crate::config_apply::atomic_write(&path, &serde_json::to_vec_pretty(&raw).unwrap())
 }

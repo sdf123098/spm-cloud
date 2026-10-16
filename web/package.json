@@ -2,9 +2,13 @@
   "name": "spm-cloud-admin-preview",
   "private": true,
   "scripts": {
-    "test": "node --test preview.test.cjs",
+    "test": "node --test preview.test.cjs settings.test.cjs",
     "build": "esbuild preview.js --bundle --format=iife --global-name=SPMPreview --minify --legal-comments=linked --outfile=preview.bundle.js"
   },
-  "dependencies": { "three": "0.180.0" },
-  "devDependencies": { "esbuild": "0.25.10" }
+  "dependencies": {
+    "three": "0.180.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
 }

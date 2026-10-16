@@ -1,9 +1,9 @@
 use spm_cloud::{
     api,
-    config_file::{LoadedConfig, Logging, current_environment, init_config, select_file},
+    config_file::{LoadedConfig, current_environment, init_config, select_file},
     store::CloudStore,
 };
-use std::path::Path;
+
 use std::path::PathBuf;
 use tokio::net::TcpListener;
 use tokio::time::{Duration, sleep};
@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     let options = Options::parse(std::env::args_os().skip(1).collect())?;
     if options.help {
         println!(
-            "spm-cloud [--config PATH] [--check-config | --print-effective-config]\nspm-cloud --init-config PATH\nspm-cloud --version\nSelected JSON configuration is reloaded automatically. No selected file keeps the legacy environment mode."
+            "spm-cloud [--config PATH] [--check-config | --print-effective-config | --enable-web-ui]\nspm-cloud --init-config PATH\nspm-cloud --version\nSelected JSON configuration is reloaded automatically. No selected file keeps the legacy environment mode."
         );
         return Ok(());
     }
@@ -34,6 +34,17 @@ async fn main() -> anyhow::Result<()> {
     let environment = current_environment()?;
     let config_path = select_file(options.config.as_deref(), &cwd, &environment)?;
     let loaded = LoadedConfig::load_with(config_path.as_deref(), &cwd, &environment)?;
+    if options.enable_web_ui {
+        spm_cloud::config_file::enable_web_ui(
+            config_path
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--enable-web-ui requires --config PATH"))?,
+        )?;
+        println!(
+            "WebUI enabled in the selected configuration. The running file watcher or next startup will apply it."
+        );
+        return Ok(());
+    }
     if options.print {
         println!(
             "{}",
@@ -62,24 +73,17 @@ async fn main() -> anyhow::Result<()> {
             .with_env_filter(filter)
             .init();
     }
-    let config = loaded.cloud;
-    let providers = loaded.providers;
-    let logging = loaded.logging.clone();
-    let log_filter = loaded.log_filter.clone();
+    let config = loaded.cloud.clone();
     let store = CloudStore::open(&config)?;
-    for provider in providers {
-        store.configure_provider(&provider)?;
-    }
     let state = api::AppState::new(config.clone(), store.clone());
+    state.initialize_settings(&loaded);
+    {
+        let _lock = state.config_edit_guard().await;
+        spm_cloud::config_apply::apply(&state, &loaded, None, None)?;
+    }
     spm_cloud::maintenance::start_update_loop(state.clone());
     if let Some(path) = config_path {
-        tokio::spawn(reload_config(
-            path,
-            state.clone(),
-            store.clone(),
-            logging,
-            log_filter,
-        ));
+        tokio::spawn(reload_config(path, state.clone()));
     }
     let cleanup_state = state.clone();
     let cleanup_store = store.clone();
@@ -149,129 +153,46 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn reload_config(
-    path: PathBuf,
-    state: api::AppState,
-    store: CloudStore,
-    mut current_logging: Logging,
-    mut current_log_filter: String,
-) {
-    let mut previous = None::<Vec<u8>>;
+async fn reload_config(path: PathBuf, state: api::AppState) {
+    let mut previous = None::<(Vec<u8>, u64)>;
     loop {
         sleep(Duration::from_secs(2)).await;
-        let _edit_lock = state.config_edit_guard().await;
+        let _lock = state.config_edit_guard().await;
         let contents = match tokio::fs::read(&path).await {
-            Ok(contents) => contents,
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "unable to read Cloud JSON configuration; keeping active settings");
+            Ok(bytes) => bytes,
+            Err(_) => {
+                tracing::warn!("unable to read Cloud JSON configuration; keeping active settings");
                 continue;
             }
         };
-        if previous.as_ref() == Some(&contents) {
+        if previous.as_ref().is_some_and(|(bytes, generation)| {
+            bytes == &contents && *generation == state.settings_generation()
+        }) {
             continue;
         }
-        let loaded = match LoadedConfig::load(Some(Path::new(&path))) {
+        let loaded = match LoadedConfig::load(Some(&path)) {
             Ok(loaded) => loaded,
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "invalid Cloud JSON update; keeping active settings");
+            Err(_) => {
+                tracing::warn!("invalid Cloud JSON update; keeping active settings");
                 continue;
             }
         };
-        let current = state.runtime_config();
-        let candidate = loaded.cloud;
-        let restart_fields = [
-            (
-                "instance.instance_id",
-                current.instance_id != candidate.instance_id,
-            ),
-            ("instance.origin", current.origin != candidate.origin),
-            ("instance.bind", current.bind_addr != candidate.bind_addr),
-            (
-                "storage.backend / storage.mysql_url_file",
-                current.database_backend != candidate.database_backend
-                    || current.mysql_url != candidate.mysql_url,
-            ),
-            (
-                "storage.database_path",
-                current.database_path != candidate.database_path,
-            ),
-            (
-                "storage.object_dir",
-                current.object_dir != candidate.object_dir,
-            ),
-            (
-                "auth.bootstrap_account_id",
-                current.bootstrap_account_id != candidate.bootstrap_account_id,
-            ),
-            (
-                "auth.bootstrap_password_hash_file",
-                current.bootstrap_password_hash != candidate.bootstrap_password_hash,
-            ),
-            (
-                "logging.level",
-                current_logging.level != loaded.logging.level,
-            ),
-            (
-                "logging.format",
-                current_logging.format != loaded.logging.format,
-            ),
-            ("logging.filter", current_log_filter != loaded.log_filter),
-        ]
-        .into_iter()
-        .filter_map(|(name, changed)| changed.then_some(name))
-        .collect::<Vec<_>>();
-
-        let mut provider_error = None;
-        for provider in &loaded.providers {
-            if let Err(error) = store.configure_provider(provider) {
-                provider_error = Some(error);
-                break;
-            }
-        }
-        if let Some(error) = provider_error {
-            tracing::error!(%error, "failed to apply identity provider configuration; keeping active runtime settings");
+        if spm_cloud::config_apply::apply(&state, &loaded, None, None).is_err() {
+            tracing::error!("failed to apply Cloud JSON update; keeping active settings");
             continue;
         }
-
-        let mut next = current;
-        next.allow_self_registration = candidate.allow_self_registration;
-        next.access_token = candidate.access_token;
-        next.max_asset_bytes = candidate.max_asset_bytes;
-        next.max_message_bytes = candidate.max_message_bytes;
-        next.max_entity_query_count = candidate.max_entity_query_count;
-        next.performance = candidate.performance;
-        next.updates = candidate.updates;
-        next.cache = candidate.cache;
-        next.visual = candidate.visual;
-        next.trusted_proxy_ips = candidate.trusted_proxy_ips;
-        next.web_ui = candidate.web_ui;
-        next.moderation = candidate.moderation;
-        if let Err(error) = state.update_runtime_config(next.clone()) {
-            tracing::error!(%error,"failed to apply runtime configuration");
-            continue;
-        }
-        current_logging = loaded.logging;
-        current_log_filter = loaded.log_filter;
-        if restart_fields.is_empty() {
-            tracing::info!(
-                max_asset_bytes = next.max_asset_bytes,
-                "Cloud JSON runtime settings reloaded"
-            );
-        } else {
-            tracing::warn!(
-                fields = %restart_fields.join(", "),
-                "Cloud JSON updated; these startup-only settings require a service restart"
-            );
-        }
-        previous = Some(contents);
+        tracing::info!(
+            "Cloud JSON runtime settings reloaded; startup-only changes remain pending until restart"
+        );
+        previous = Some((contents, state.settings_generation()));
     }
 }
-
 #[derive(Default)]
 struct Options {
     config: Option<PathBuf>,
     init: Option<PathBuf>,
     check: bool,
+    enable_web_ui: bool,
     print: bool,
     help: bool,
     version: bool,
@@ -302,6 +223,7 @@ impl Options {
                     *destination = Some(path.into());
                 }
                 Some("--check-config") if !result.check => result.check = true,
+                Some("--enable-web-ui") if !result.enable_web_ui => result.enable_web_ui = true,
                 Some("--print-effective-config") if !result.print => result.print = true,
                 Some("--help" | "-h") => result.help = true,
                 Some("--version" | "-V") => result.version = true,
@@ -320,6 +242,26 @@ impl Options {
         anyhow::ensure!(
             !result.help || (result.config.is_none() && !result.check && !result.print),
             "--help cannot be combined with other options"
+        );
+        anyhow::ensure!(
+            !result.enable_web_ui
+                || (result.config.is_some()
+                    && !result.check
+                    && !result.print
+                    && result.init.is_none()
+                    && !result.help
+                    && !result.version),
+            "--enable-web-ui requires --config PATH and cannot be combined with other operations"
+        );
+        anyhow::ensure!(
+            !result.version
+                || (result.config.is_none()
+                    && result.init.is_none()
+                    && !result.check
+                    && !result.print
+                    && !result.help
+                    && !result.enable_web_ui),
+            "--version cannot be combined with other operations"
         );
         Ok(result)
     }

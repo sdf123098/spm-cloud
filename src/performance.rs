@@ -20,11 +20,14 @@ impl Default for Performance {
 }
 impl Performance {
     pub fn resolved(&self) -> Result<(usize, usize), crate::error::CloudError> {
-        if !(0..=32).contains(&self.upload_concurrency)
-            || !(0..=16).contains(&self.model_processing_concurrency)
-        {
+        if !(0..=32).contains(&self.upload_concurrency) {
             return Err(crate::error::CloudError::invalid_metadata(
-                "并发范围：上传 0–32，扫描与解码 0–16；0 表示不限制",
+                "performance.upload_concurrency: 上传并发范围为 0–32；0 表示不限制",
+            ));
+        }
+        if !(0..=16).contains(&self.model_processing_concurrency) {
+            return Err(crate::error::CloudError::invalid_metadata(
+                "performance.model_processing_concurrency: 扫描与解码并发范围为 0–16；0 表示不限制",
             ));
         }
         match self.preset.as_str() {
@@ -32,7 +35,9 @@ impl Performance {
             "medium" => Ok((4, 2)),
             "high" => Ok((8, 4)),
             "custom" => Ok((self.upload_concurrency, self.model_processing_concurrency)),
-            _ => Err(crate::error::CloudError::invalid_metadata("无效的性能预设")),
+            _ => Err(crate::error::CloudError::invalid_metadata(
+                "performance.preset: 无效的性能预设",
+            )),
         }
     }
 }

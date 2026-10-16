@@ -13,6 +13,8 @@ pub struct CloudConfig {
     pub database_path: PathBuf,
     pub database_backend: String,
     pub mysql_url: Option<String>,
+    /// Resolved from the selected file or legacy ENV mode; excluded from reports and Debug.
+    pub microsoft_client_secret: Option<String>,
     pub object_dir: PathBuf,
     pub access_token: Option<String>,
     pub bootstrap_account_id: String,

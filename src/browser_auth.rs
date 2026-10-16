@@ -60,15 +60,19 @@ pub(crate) fn validate_settings(
     origin: &str,
 ) -> Result<(), CloudError> {
     if let Some(id) = &settings.microsoft_client_id {
-        Uuid::parse_str(id)
-            .map_err(|_| CloudError::invalid_metadata("Microsoft Client ID 必须是有效 UUID"))?;
+        Uuid::parse_str(id).map_err(|_| {
+            CloudError::invalid_metadata(
+                "web_ui.microsoft_client_id: Microsoft Client ID 必须是有效 UUID",
+            )
+        })?;
     }
     let uri = settings
         .microsoft_redirect_uri
         .clone()
         .unwrap_or_else(|| format!("{origin}{CALLBACK}"));
-    let url = reqwest::Url::parse(&uri)
-        .map_err(|_| CloudError::invalid_metadata("微软回调地址格式不正确"))?;
+    let url = reqwest::Url::parse(&uri).map_err(|_| {
+        CloudError::invalid_metadata("web_ui.microsoft_redirect_uri: 微软回调地址格式不正确")
+    })?;
     let local = matches!(
         url.host_str(),
         Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
@@ -81,7 +85,7 @@ pub(crate) fn validate_settings(
         || url.fragment().is_some()
     {
         return Err(CloudError::invalid_metadata(
-            "微软回调地址必须使用 HTTPS（本机测试可使用 HTTP），并以 /admin/oauth/microsoft/callback 结尾",
+            "web_ui.microsoft_redirect_uri: 微软回调地址必须使用 HTTPS（本机测试可使用 HTTP），并以 /admin/oauth/microsoft/callback 结尾",
         ));
     }
     Ok(())
@@ -293,16 +297,8 @@ pub async fn microsoft_callback(
             ("redirect_uri", flow.redirect_uri.clone()),
             ("code_verifier", flow.verifier.clone()),
         ];
-        if let Some(path) = state.runtime_config().web_ui.microsoft_client_secret_file {
-            let secret = std::fs::read_to_string(path)
-                .map_err(|_| CloudError::configuration("cannot read Microsoft secret file"))?;
-            if secret.trim().is_empty() || secret.len() > 4096 {
-                return Err(CloudError::configuration("invalid Microsoft secret file"));
-            }
-            form.push((
-                "client_secret",
-                secret.trim_start_matches('\u{feff}').trim().into(),
-            ));
+        if let Some(secret) = microsoft_client_secret(&state.runtime_config())? {
+            form.push(("client_secret", secret));
         }
         let token = stage_json(
             client
@@ -482,13 +478,15 @@ pub async fn game(
             })?;
         minecraft_profile(&client()?, token).await?
     } else {
-        let (base, path) = provider(&state.store, &input.provider_id)?;
+        let (base, path, custom_auth_path) = provider(&state.store, &input.provider_id)?;
         let (client, base) = provider_client(&base).await?;
-        let auth_path = if path == "/session/hasJoined" {
-            "/auth/authenticate"
-        } else {
-            "/authserver/authenticate"
-        };
+        let auth_path = custom_auth_path
+            .as_deref()
+            .unwrap_or(if path == "/session/hasJoined" {
+                "/auth/authenticate"
+            } else {
+                "/authserver/authenticate"
+            });
         let token;
         let selected;
         if let Some(access) = &input.access_token {
@@ -564,42 +562,31 @@ pub async fn game(
         &profile,
     )?))
 }
-fn provider(store: &CloudStore, id: &str) -> Result<(String, String), CloudError> {
+fn provider(store: &CloudStore, id: &str) -> Result<(String, String, Option<String>), CloudError> {
     let conn = store
         .connection
         .lock()
         .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-    conn.query_row(
-        "SELECT base_url,session_path FROM identity_providers WHERE provider_id=?1 AND enabled=1",
-        [id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .optional()?
-    .ok_or(CloudError::IdentityProviderUntrusted)
+    conn.query_row("SELECT base_url,session_path,authenticate_path FROM identity_providers WHERE provider_id=?1 AND enabled=1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(CloudError::IdentityProviderUntrusted)
+}
+fn microsoft_client_secret(config: &crate::CloudConfig) -> Result<Option<String>, CloudError> {
+    let secret = if let Some(secret) = &config.microsoft_client_secret {
+        secret.clone()
+    } else if let Some(path) = &config.web_ui.microsoft_client_secret_file {
+        std::fs::read_to_string(path)
+            .map_err(|_| CloudError::configuration("cannot read Microsoft secret file"))?
+    } else {
+        return Ok(None);
+    };
+    if secret.trim().is_empty() || secret.len() > 4096 {
+        return Err(CloudError::configuration("invalid Microsoft secret file"));
+    }
+    Ok(Some(secret.trim_start_matches('\u{feff}').trim().into()))
 }
 async fn provider_client(base: &str) -> Result<(reqwest::Client, String), CloudError> {
-    let url = crate::game_auth::provider_url(base)?;
-    let host = url.host_str().unwrap();
-    let addresses: Vec<_> = tokio::net::lookup_host((host, 443))
-        .await
-        .map_err(|_| CloudError::IdentityProviderUnavailable)?
-        .collect();
-    if addresses.is_empty()
-        || addresses
-            .iter()
-            .any(|a| !crate::api::is_allowed_provider_address(a.ip()))
-    {
-        return Err(CloudError::IdentityProviderUntrusted);
-    }
-    let client = reqwest::Client::builder()
-        .resolve_to_addrs(host, &addresses)
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(25))
-        .build()
-        .map_err(|_| CloudError::IdentityProviderUnavailable)?;
+    let (client, url) = crate::game_auth::provider_client(base, Duration::from_secs(25)).await?;
     Ok((client, url.as_str().trim_end_matches('/').to_owned()))
 }
-
 fn finish(
     state: &AppState,
     purpose: &str,
@@ -608,6 +595,8 @@ fn finish(
     profile: &VerifiedProfile,
 ) -> Result<Value, CloudError> {
     if purpose == "link" {
+        // The provider may have been disabled while the upstream request was in flight.
+        provider(&state.store, &profile.provider)?;
         let web = web.ok_or(CloudError::Unauthenticated)?;
         state
             .store
@@ -650,6 +639,7 @@ fn finish(
         return Err(CloudError::invalid_metadata("invalid login purpose"));
     }
     let cloud = identity_owner(&state.store, profile)?.ok_or(CloudError::IdentityNotLinked)?;
+    provider(&state.store, &profile.provider)?;
     state
         .store
         .admin_role(&cloud, &state.config.bootstrap_account_id)?;
@@ -709,6 +699,48 @@ fn issue(state: &AppState, account: &str, admin: bool) -> Result<Value, CloudErr
 mod tests {
     use super::*;
     use crate::api::tests::test_state;
+    #[test]
+    fn microsoft_environment_secret_reaches_token_exchange_without_disclosure() {
+        use crate::config_file::{Environment, LoadedConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let environment = Environment::from([(
+            "SPM_CLOUD_MICROSOFT_CLIENT_SECRET".into(),
+            "env-microsoft-secret".into(),
+        )]);
+        let loaded = LoadedConfig::load_with(None, dir.path(), &environment).unwrap();
+        assert_eq!(
+            microsoft_client_secret(&loaded.cloud).unwrap().as_deref(),
+            Some("env-microsoft-secret")
+        );
+        assert!(
+            !loaded
+                .effective_report()
+                .to_string()
+                .contains("env-microsoft-secret")
+        );
+        assert!(!format!("{:?}", loaded.cloud).contains("env-microsoft-secret"));
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            dir.path().join("microsoft.txt"),
+            "\u{feff}file-microsoft-secret\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            r#"{"web_ui":{"microsoft_client_secret_file":"microsoft.txt"}}"#,
+        )
+        .unwrap();
+        let configured = LoadedConfig::load_with(Some(&path), dir.path(), &environment).unwrap();
+        assert_eq!(
+            microsoft_client_secret(&configured.cloud)
+                .unwrap()
+                .as_deref(),
+            Some("file-microsoft-secret")
+        );
+        let report = configured.effective_report().to_string();
+        assert!(!report.contains("file-microsoft-secret"));
+        assert!(!report.contains("env-microsoft-secret"));
+    }
     fn flow() -> Flow {
         Flow {
             purpose: "login".into(),

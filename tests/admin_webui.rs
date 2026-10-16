@@ -497,6 +497,86 @@ async fn saved_custom_zero_concurrency_reaches_live_admission_and_config_revisio
 }
 
 #[tokio::test]
+async fn connection_check_can_validate_a_draft_credential_file_without_publication() {
+    let s = server().await;
+    let original_backend = s.state.runtime_config().cache.backend;
+    let client = Client::new();
+    let before: Value = client
+        .get(format!("{}/admin/api/config", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let original = std::fs::read(s._dir.path().join("config.json")).unwrap();
+    std::fs::write(
+        s._dir.path().join("candidate-redis.txt"),
+        "redis://127.0.0.1:1/0",
+    )
+    .unwrap();
+    let mut draft = before["config"].clone();
+    draft["cache"] = json!({"backend":"memory","redis_url_file":"candidate-redis.txt"});
+    let response = client
+        .post(format!("{}/admin/api/config/check-connection", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .json(&json!({"kind":"redis","draft":{"config":draft,"revision":before["revision"]}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let result: Value = response.json().await.unwrap();
+    assert_eq!(result["connected"], false);
+    assert!(!result.to_string().contains("redis://"));
+    assert_eq!(
+        std::fs::read(s._dir.path().join("config.json")).unwrap(),
+        original
+    );
+    assert!(!s._dir.path().join(".managed-secrets").exists());
+    assert_eq!(s.state.runtime_config().cache.backend, original_backend);
+    let stale = client
+        .post(format!("{}/admin/api/config/check-connection", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .json(&json!({"kind":"redis","draft":{"config":draft,"revision":"stale-revision"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn settings_script_is_served_as_javascript_before_the_application() {
+    let s = server().await;
+    let client = Client::new();
+    let page = client
+        .get(format!("{}/admin/", s.url))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(page.find("/admin/settings.js").unwrap() < page.find("/admin/app.js").unwrap());
+    let script = client
+        .get(format!("{}/admin/settings.js", s.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(script.status(), StatusCode::OK);
+    assert_eq!(
+        script.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    assert_eq!(script.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(script.headers()["cache-control"], "no-store");
+    assert_eq!(
+        script.text().await.unwrap(),
+        include_str!("../web/settings.js")
+    );
+}
+
+#[tokio::test]
 async fn owner_distributes_admins_and_revocation_invalidates_sessions() {
     let s = server().await;
     let client = Client::new();

@@ -6,6 +6,7 @@
 /data/
 /config.json
 /secrets/
+.managed-secrets/
 *.db
 *.db-shm
 *.db-wal

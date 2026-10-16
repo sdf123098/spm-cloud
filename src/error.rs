@@ -8,6 +8,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CloudError {
+    #[error("configuration validation failed")]
+    SettingsValidation(Vec<serde_json::Value>),
     #[error("configuration error: {0}")]
     Configuration(String),
     #[error("unauthenticated")]
@@ -83,6 +85,7 @@ impl CloudError {
     }
     pub fn code(&self) -> &'static str {
         match self {
+            Self::SettingsValidation(_) => "INVALID_METADATA",
             Self::Configuration(_) => "INTERNAL",
             Self::Unauthenticated => "UNAUTHENTICATED",
             Self::SessionExpired => "SESSION_EXPIRED",
@@ -117,6 +120,7 @@ impl CloudError {
     }
     pub fn status(&self) -> StatusCode {
         match self {
+            Self::SettingsValidation(_) => StatusCode::BAD_REQUEST,
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
             Self::IdentityProviderUnavailable => StatusCode::BAD_GATEWAY,
             Self::IdentityNotLinked => StatusCode::NOT_FOUND,
@@ -159,6 +163,9 @@ struct ErrorBody<'a> {
 
 impl IntoResponse for CloudError {
     fn into_response(self) -> Response {
+        if let Self::SettingsValidation(errors) = &self {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok":false,"saved":false,"code":"INVALID_METADATA","retryable":false,"message_key":"cloud.error.invalid_metadata","errors":errors,"message":"Configuration validation failed"}))).into_response();
+        }
         let status = self.status();
         let code = self.code();
         let body = Json(ErrorBody {
