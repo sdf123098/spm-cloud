@@ -59,8 +59,24 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/api/exports/logs", get(logs))
 }
 pub(crate) fn native_supported() -> bool {
-    std::env::var_os("SPM_CLOUD_CONTAINER").is_none()
-        && !std::path::Path::new("/.dockerenv").exists()
+    if std::env::var_os("SPM_CLOUD_CONTAINER").is_some()
+        || std::path::Path::new("/.dockerenv").exists()
+    {
+        return false;
+    }
+    // 真正决定"能否自更新"的是二进制所在目录可写，而不是"不在容器里"。
+    // systemd 的 ProtectSystem=strict / 只读挂载下目录不可写，UI 必须如实显示不支持，
+    // 否则用户点了安装才失败 (Read-only file system)。
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .map(|dir| {
+            tempfile::Builder::new()
+                .prefix(".spm-write-probe")
+                .tempfile_in(&dir)
+                .is_ok()
+        })
+        .unwrap_or(false)
 }
 async fn status(
     State(state): State<AppState>,
@@ -735,5 +751,37 @@ mod tests {
         assert!(version("v2.10.0") > version("2.9.9"));
         assert!(version("2.3.0-beta").is_none());
         assert!(version("2.3").is_none());
+    }
+
+    /// 只读路径的探测必须失败 —— 这正是 systemd ProtectSystem=strict 下
+    /// UI 曾显示虚假"可更新"的根因。
+    #[test]
+    fn write_probe_rejects_readonly_dir() {
+        assert!(
+            tempfile::Builder::new()
+                .prefix(".spm-write-probe-test")
+                .tempfile_in(std::path::Path::new("/proc/1"))
+                .is_err(),
+            "只读路径 /proc/1 不应可写"
+        );
+    }
+
+    /// 二进制所在目录可写时, native_supported() 应为 true (非容器环境)。
+    #[test]
+    fn write_probe_accepts_writable_exe_dir() {
+        let dir = std::env::current_exe()
+            .expect("current_exe")
+            .parent()
+            .expect("exe parent")
+            .to_path_buf();
+        let writable = tempfile::Builder::new()
+            .prefix(".spm-write-probe-test")
+            .tempfile_in(&dir)
+            .is_ok();
+        if !writable {
+            eprintln!("跳过: 二进制目录 {dir:?} 不可写");
+            return;
+        }
+        assert!(native_supported(), "可写目录应报告支持自更新");
     }
 }

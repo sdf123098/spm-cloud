@@ -180,7 +180,30 @@ impl IntoResponse for CloudError {
             ),
             message_key: format!("cloud.error.{}", code.to_lowercase()),
             message: match &self {
-                Self::Internal(_) | Self::Io(_) | Self::Sqlite(_) | Self::Configuration(_) => {
+                // io 层错误保留可操作分类: "文件系统只读/权限不足" 之类的信息
+                // 决定了运维能否自助解决, 比统一的 "Cloud request failed" 有用得多。
+                Self::Internal(err) => match io_error_kind(err) {
+                    Some(std::io::ErrorKind::ReadOnlyFilesystem) => {
+                        "文件系统只读，当前部署不支持写回程序文件".to_owned()
+                    }
+                    Some(std::io::ErrorKind::PermissionDenied) => {
+                        "权限不足，无法修改程序文件".to_owned()
+                    }
+                    Some(std::io::ErrorKind::NotFound) => {
+                        "所需的文件或目录不存在".to_owned()
+                    }
+                    _ => "Cloud request failed".to_owned(),
+                },
+                Self::Io(err) => match err.kind() {
+                    std::io::ErrorKind::ReadOnlyFilesystem => {
+                        "文件系统只读，当前部署不支持写回程序文件".to_owned()
+                    }
+                    std::io::ErrorKind::PermissionDenied => {
+                        "权限不足，无法修改程序文件".to_owned()
+                    }
+                    _ => "Cloud request failed".to_owned(),
+                },
+                Self::Sqlite(_) | Self::Configuration(_) => {
                     "Cloud request failed".to_owned()
                 }
                 _ => self.to_string(),
@@ -188,4 +211,14 @@ impl IntoResponse for CloudError {
         });
         (status, body).into_response()
     }
+}
+
+/// 穿透 anyhow 的错误链找出底层 io::Error 的 kind。
+fn io_error_kind(err: &anyhow::Error) -> Option<std::io::ErrorKind> {
+    for cause in err.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return Some(io.kind());
+        }
+    }
+    None
 }
