@@ -68,10 +68,10 @@ pub async fn list(
         (conn.total_changes(), external)
     };
     let key = cache.key(&json!([account, scope, query, after, limit, epoch]));
-    if let Some(page) = cache.get(&key).await {
-        if cached_page_is_current(&state, &account, &scope, &page)? {
-            return Ok(Json(page));
-        }
+    if let Some(page) = cache.get(&key).await
+        && cached_page_is_current(&state, &account, &scope, &page)?
+    {
+        return Ok(Json(page));
     }
     let page = load_page(&state, &account, &scope, &query, &after, limit)?;
     cache.put(key, page.clone()).await;

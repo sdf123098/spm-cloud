@@ -155,26 +155,26 @@ impl CatalogCache {
         if self.settings.backend == "none" {
             return None;
         }
-        if self.settings.backend == "redis" {
-            if let Some(mut connection) = self.connection().await {
-                match tokio::time::timeout(
-                    Duration::from_millis(self.settings.timeout_ms),
-                    redis::cmd("GET")
-                        .arg(key)
-                        .query_async::<Option<String>>(&mut connection),
-                )
-                .await
-                {
-                    Ok(Ok(Some(value))) => {
-                        if value.len() <= 262_144 {
-                            if let Ok(value) = serde_json::from_str(&value) {
-                                return Some(value);
-                            }
-                        }
+        if self.settings.backend == "redis"
+            && let Some(mut connection) = self.connection().await
+        {
+            match tokio::time::timeout(
+                Duration::from_millis(self.settings.timeout_ms),
+                redis::cmd("GET")
+                    .arg(key)
+                    .query_async::<Option<String>>(&mut connection),
+            )
+            .await
+            {
+                Ok(Ok(Some(value))) => {
+                    if value.len() <= 262_144
+                        && let Ok(value) = serde_json::from_str(&value)
+                    {
+                        return Some(value);
                     }
-                    Ok(Ok(None)) => {}
-                    _ => self.disconnected().await,
                 }
+                Ok(Ok(None)) => {}
+                _ => self.disconnected().await,
             }
         }
         self.memory_get(key)
@@ -199,29 +199,29 @@ impl CatalogCache {
                 pages.pop_front();
             }
         }
-        if self.settings.backend == "redis" {
-            if let Some(mut connection) = self.connection().await {
-                // Bound Redis pages as well as their TTL; the index itself expires when idle.
-                let script = redis::Script::new(
-                    "redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[2]); redis.call('ZADD',KEYS[2],ARGV[3],KEYS[1]); local extra=redis.call('ZCARD',KEYS[2])-tonumber(ARGV[4]); if extra>0 then local old=redis.call('ZRANGE',KEYS[2],0,extra-1); for _,k in ipairs(old) do redis.call('DEL',k) end; redis.call('ZREMRANGEBYRANK',KEYS[2],0,extra-1) end; redis.call('EXPIRE',KEYS[2],tonumber(ARGV[2])*2); return 1",
-                );
-                let mut call = script.prepare_invoke();
-                call.key(&key)
-                    .key(format!("{}:index", self.namespace))
-                    .arg(body)
-                    .arg(self.settings.ttl_seconds)
-                    .arg(chrono::Utc::now().timestamp_millis())
-                    .arg(self.settings.max_pages);
-                if !matches!(
-                    tokio::time::timeout(
-                        Duration::from_millis(self.settings.timeout_ms),
-                        call.invoke_async::<i64>(&mut connection)
-                    )
-                    .await,
-                    Ok(Ok(_))
-                ) {
-                    self.disconnected().await;
-                }
+        if self.settings.backend == "redis"
+            && let Some(mut connection) = self.connection().await
+        {
+            // Bound Redis pages as well as their TTL; the index itself expires when idle.
+            let script = redis::Script::new(
+                "redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[2]); redis.call('ZADD',KEYS[2],ARGV[3],KEYS[1]); local extra=redis.call('ZCARD',KEYS[2])-tonumber(ARGV[4]); if extra>0 then local old=redis.call('ZRANGE',KEYS[2],0,extra-1); for _,k in ipairs(old) do redis.call('DEL',k) end; redis.call('ZREMRANGEBYRANK',KEYS[2],0,extra-1) end; redis.call('EXPIRE',KEYS[2],tonumber(ARGV[2])*2); return 1",
+            );
+            let mut call = script.prepare_invoke();
+            call.key(&key)
+                .key(format!("{}:index", self.namespace))
+                .arg(body)
+                .arg(self.settings.ttl_seconds)
+                .arg(chrono::Utc::now().timestamp_millis())
+                .arg(self.settings.max_pages);
+            if !matches!(
+                tokio::time::timeout(
+                    Duration::from_millis(self.settings.timeout_ms),
+                    call.invoke_async::<i64>(&mut connection)
+                )
+                .await,
+                Ok(Ok(_))
+            ) {
+                self.disconnected().await;
             }
         }
     }

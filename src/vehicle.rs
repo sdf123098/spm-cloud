@@ -172,12 +172,11 @@ impl CloudStore {
             if editable(&conn, &publisher, scope, &binding.target_id).is_err() {
                 continue;
             }
-            if let Some(resource) = &binding.resource {
-                if visual::resource(&conn, &publisher, resource).is_err()
-                    || visual::resource(&conn, account, resource).is_err()
-                {
-                    continue;
-                }
+            if let Some(resource) = &binding.resource
+                && (visual::resource(&conn, &publisher, resource).is_err()
+                    || visual::resource(&conn, account, resource).is_err())
+            {
+                continue;
             }
             result.push(VehicleEntry {
                 entity_uuid: *entity,

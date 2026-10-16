@@ -417,11 +417,11 @@ async fn normal_binary_startup_uses_json_config_and_structured_logs() {
     let url = format!("http://127.0.0.1:{port}/v1/instance");
     let mut found = None;
     for _ in 0..100 {
-        if let Ok(response) = client.get(&url).send().await {
-            if response.status().is_success() {
-                found = Some(response.json::<Value>().await.unwrap());
-                break;
-            }
+        if let Ok(response) = client.get(&url).send().await
+            && response.status().is_success()
+        {
+            found = Some(response.json::<Value>().await.unwrap());
+            break;
         }
         if guard.0.as_mut().unwrap().try_wait().unwrap().is_some() {
             break;
@@ -613,11 +613,11 @@ async fn web_ui_recovery_reenables_running_service_and_watcher_keeps_logging_pen
     let endpoint = format!("http://127.0.0.1:{port}/admin/api/config");
     let mut initial = None;
     for _ in 0..100 {
-        if let Ok(response) = client.get(&endpoint).bearer_auth(token.trim()).send().await {
-            if response.status().is_success() {
-                initial = Some(response.json::<Value>().await.unwrap());
-                break;
-            }
+        if let Ok(response) = client.get(&endpoint).bearer_auth(token.trim()).send().await
+            && response.status().is_success()
+        {
+            initial = Some(response.json::<Value>().await.unwrap());
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     }

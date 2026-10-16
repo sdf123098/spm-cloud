@@ -1162,10 +1162,10 @@ fn parse_range(value: Option<&HeaderValue>, total: u64) -> Result<(u64, u64, boo
 pub fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<String, CloudError> {
     let token = bearer_token(headers)?;
     let runtime = state.runtime_config();
-    if let Some(configured) = runtime.access_token.as_deref() {
-        if configured.as_bytes().ct_eq(token.as_bytes()).unwrap_u8() == 1 {
-            return Ok(runtime.bootstrap_account_id);
-        }
+    if let Some(configured) = runtime.access_token.as_deref()
+        && configured.as_bytes().ct_eq(token.as_bytes()).unwrap_u8() == 1
+    {
+        return Ok(runtime.bootstrap_account_id);
     }
     state.store.authenticate_access_token(token)
 }

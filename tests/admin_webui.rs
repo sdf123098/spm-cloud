@@ -23,15 +23,14 @@ struct Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();
-        if let Some((url, database)) = &self.mysql_cleanup {
-            if let Ok(options) = mysql::Opts::from_url(url) {
-                let mut connection = mysql::Conn::new(
-                    mysql::OptsBuilder::from_opts(options).db_name(None::<String>),
-                )
-                .ok();
-                if let Some(connection) = connection.as_mut() {
-                    let _ = connection.query_drop(format!("DROP DATABASE `{database}`"));
-                }
+        if let Some((url, database)) = &self.mysql_cleanup
+            && let Ok(options) = mysql::Opts::from_url(url)
+        {
+            let mut connection =
+                mysql::Conn::new(mysql::OptsBuilder::from_opts(options).db_name(None::<String>))
+                    .ok();
+            if let Some(connection) = connection.as_mut() {
+                let _ = connection.query_drop(format!("DROP DATABASE `{database}`"));
             }
         }
     }

@@ -135,10 +135,11 @@ async fn guard(
     let upload =
         request.method() == axum::http::Method::POST && request.uri().path() == "/admin/api/assets";
     let path = request.uri().path().to_owned();
-    if path.starts_with("/admin/api/") && path != "/admin/api/login" {
-        if let Err(error) = authorize(&state, request.headers(), false) {
-            return error.into_response();
-        }
+    if path.starts_with("/admin/api/")
+        && path != "/admin/api/login"
+        && let Err(error) = authorize(&state, request.headers(), false)
+    {
+        return error.into_response();
     }
     let mut response = if upload {
         next.run(request).await

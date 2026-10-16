@@ -214,13 +214,13 @@ pub async fn microsoft_start(
         .clone()
         .unwrap_or_else(|| format!("{}{CALLBACK}", cfg.origin));
     let redirect_url = reqwest::Url::parse(&redirect).unwrap();
-    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
-        if origin != redirect_url.origin().ascii_serialization() {
-            return Err(CloudError::invalid_metadata(format!(
-                "请通过 {} 打开控制台后使用微软登录",
-                redirect_url.origin().ascii_serialization()
-            )));
-        }
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok())
+        && origin != redirect_url.origin().ascii_serialization()
+    {
+        return Err(CloudError::invalid_metadata(format!(
+            "请通过 {} 打开控制台后使用微软登录",
+            redirect_url.origin().ascii_serialization()
+        )));
     }
     let (account, session_hash) = actor_for(&state, &headers, &input.purpose)?;
     let state_id = nonce();
@@ -603,15 +603,15 @@ fn finish(
             .admin_role(web, &state.config.bootstrap_account_id)?;
         let mut cloud = state.store.linked_cloud_account(web)?;
         let existing = identity_owner(&state.store, profile)?;
-        if let Some(existing) = existing {
-            if existing != cloud {
-                if cloud != web {
-                    return Err(CloudError::IdentityAlreadyLinked);
-                }
-                // The verified game identity proves access to the already-linked Cloud account.
-                state.store.connect_owned_accounts(web, &existing)?;
-                cloud = existing;
+        if let Some(existing) = existing
+            && existing != cloud
+        {
+            if cloud != web {
+                return Err(CloudError::IdentityAlreadyLinked);
             }
+            // The verified game identity proves access to the already-linked Cloud account.
+            state.store.connect_owned_accounts(web, &existing)?;
+            cloud = existing;
         }
         state
             .store

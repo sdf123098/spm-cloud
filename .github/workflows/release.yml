@@ -54,10 +54,16 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+        working-directory: web
       - run: cargo fmt --all -- --check
       - run: cargo check --all-targets --all-features --locked
       - run: cargo test --all-targets --all-features --locked
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
   # Run 'dist plan' (or host) to determine what tasks we need to do
   plan:

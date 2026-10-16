@@ -121,14 +121,13 @@ pub async fn link_challenge(
 }
 
 fn requester(state: &AppState, headers: &HeaderMap, peer: Option<std::net::IpAddr>) -> String {
-    if peer.is_some_and(|ip| state.runtime_config().trusted_proxy_ips.contains(&ip)) {
-        if let Some(ip) = headers
+    if peer.is_some_and(|ip| state.runtime_config().trusted_proxy_ips.contains(&ip))
+        && let Some(ip) = headers
             .get("x-spm-client-ip")
             .and_then(|h| h.to_str().ok())
             .and_then(|v| v.parse::<std::net::IpAddr>().ok())
-        {
-            return ip.to_string();
-        }
+    {
+        return ip.to_string();
     }
     peer.map(|p| p.to_string())
         .unwrap_or_else(|| "unknown".into())

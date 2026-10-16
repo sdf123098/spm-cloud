@@ -1667,10 +1667,10 @@ impl CloudStore {
         if update.request_id.is_empty() || update.request_id.len() > 128 {
             return Err(CloudError::invalid_metadata("invalid request_id"));
         }
-        if let Some(scale) = update.scale {
-            if !scale.is_finite() || !(0.01..=100.0).contains(&scale) {
-                return Err(CloudError::invalid_metadata("invalid scale"));
-            }
+        if let Some(scale) = update.scale
+            && (!scale.is_finite() || !(0.01..=100.0).contains(&scale))
+        {
+            return Err(CloudError::invalid_metadata("invalid scale"));
         }
         let mut conn = self
             .connection
@@ -2043,22 +2043,21 @@ impl CloudStore {
         if name.is_empty() || name.len() > 16 * 1024 || format.is_empty() || format.len() > 64 {
             return Err(CloudError::invalid_metadata("invalid asset metadata"));
         }
-        if let Some((request_id, _)) = idempotency {
-            if request_id.is_empty() || request_id.len() > 128 {
-                return Err(CloudError::invalid_metadata("invalid Idempotency-Key"));
-            }
+        if let Some((request_id, _)) = idempotency
+            && (request_id.is_empty() || request_id.len() > 128)
+        {
+            return Err(CloudError::invalid_metadata("invalid Idempotency-Key"));
         }
         let mut conn = self
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
         let tx = conn.transaction()?;
-        if let Some((request_id, request_hash)) = idempotency {
-            if let Some((existing_hash, response_json)) = tx.query_row("SELECT request_hash, response_json FROM idempotency WHERE account_id = ?1 AND request_id = ?2", params![account_id, request_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional()? {
+        if let Some((request_id, request_hash)) = idempotency
+            && let Some((existing_hash, response_json)) = tx.query_row("SELECT request_hash, response_json FROM idempotency WHERE account_id = ?1 AND request_id = ?2", params![account_id, request_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional()? {
                 if existing_hash != request_hash { return Err(CloudError::IdempotencyConflict); }
                 return serde_json::from_str(&response_json).map_err(|_| CloudError::Internal(anyhow::anyhow!("stored asset idempotency response is invalid")));
             }
-        }
         if tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM deleted_assets WHERE asset_id=?1)",
             [asset_id],
@@ -2517,19 +2516,19 @@ fn validate_provider_base_url(value: &str) -> Result<(), CloudError> {
     {
         return Err(CloudError::IdentityProviderUntrusted);
     }
-    if let Some(host) = url.host_str() {
-        if let Ok(address) = host.parse::<std::net::IpAddr>() {
-            let private = match address {
-                std::net::IpAddr::V4(ip) => {
-                    ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
-                }
-                std::net::IpAddr::V6(ip) => {
-                    ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local()
-                }
-            };
-            if private {
-                return Err(CloudError::IdentityProviderUntrusted);
+    if let Some(host) = url.host_str()
+        && let Ok(address) = host.parse::<std::net::IpAddr>()
+    {
+        let private = match address {
+            std::net::IpAddr::V4(ip) => {
+                ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
             }
+            std::net::IpAddr::V6(ip) => {
+                ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local()
+            }
+        };
+        if private {
+            return Err(CloudError::IdentityProviderUntrusted);
         }
     }
     Ok(())

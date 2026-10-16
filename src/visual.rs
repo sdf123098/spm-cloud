@@ -410,30 +410,28 @@ impl CloudStore {
                 &query.dimension_id,
                 *entity,
                 time,
-            )? {
-                if !withdrawn
-                    && entry.expires_at_unix_ms > time
-                    && entry.absolute_expires_at_unix_ms > time
-                    && context(
-                        &conn,
-                        &publisher,
-                        scope,
-                        &query.world_epoch,
-                        &query.dimension_id,
-                    )
-                    .is_ok()
-                    && identity(
-                        &conn,
-                        &publisher,
-                        &entry.snapshot.source_identity_id,
-                        entry.snapshot.source_entity_uuid,
-                    )
-                    .is_ok()
-                    && resource(&conn, &publisher, &entry.snapshot.resource).is_ok()
-                    && resource(&conn, account, &entry.snapshot.resource).is_ok()
-                {
-                    result.push(entry);
-                }
+            )? && !withdrawn
+                && entry.expires_at_unix_ms > time
+                && entry.absolute_expires_at_unix_ms > time
+                && context(
+                    &conn,
+                    &publisher,
+                    scope,
+                    &query.world_epoch,
+                    &query.dimension_id,
+                )
+                .is_ok()
+                && identity(
+                    &conn,
+                    &publisher,
+                    &entry.snapshot.source_identity_id,
+                    entry.snapshot.source_entity_uuid,
+                )
+                .is_ok()
+                && resource(&conn, &publisher, &entry.snapshot.resource).is_ok()
+                && resource(&conn, account, &entry.snapshot.resource).is_ok()
+            {
+                result.push(entry);
             }
         }
         Ok(result)

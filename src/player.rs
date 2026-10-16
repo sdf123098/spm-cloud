@@ -465,7 +465,7 @@ pub fn offline_uuid(name: &str) -> uuid::Uuid {
     bytes[len - 8..len].copy_from_slice(&((input.len() as u64) * 8).to_le_bytes());
     let shifts = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
     let mut state = [0x67452301u32, 0xefcdab89, 0x98badcfe, 0x10325476];
-    for chunk in bytes.chunks_exact(64) {
+    for chunk in bytes.as_chunks::<64>().0 {
         let [mut a, mut b, mut c, mut d] = state;
         for i in 0..64usize {
             let round = i / 16;

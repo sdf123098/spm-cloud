@@ -130,14 +130,13 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
             || lower.ends_with(".bbmodel")
             || lower.ends_with(".gltf")
         {
-            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                if value.get("elements").is_some()
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+                && (value.get("elements").is_some()
                     || value.get("minecraft:geometry").is_some()
                     || value.get("bones").is_some()
-                    || value.get("asset").is_some()
-                {
-                    documents.push(json!({"path":name,"value":value}));
-                }
+                    || value.get("asset").is_some())
+            {
+                documents.push(json!({"path":name,"value":value}));
             }
         } else if lower.ends_with(".glb") {
             documents.push(json!({"path":name,"glb":STANDARD.encode(bytes)}));
