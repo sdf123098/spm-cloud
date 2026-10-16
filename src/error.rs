@@ -189,23 +189,17 @@ impl IntoResponse for CloudError {
                     Some(std::io::ErrorKind::PermissionDenied) => {
                         "权限不足，无法修改程序文件".to_owned()
                     }
-                    Some(std::io::ErrorKind::NotFound) => {
-                        "所需的文件或目录不存在".to_owned()
-                    }
+                    Some(std::io::ErrorKind::NotFound) => "所需的文件或目录不存在".to_owned(),
                     _ => "Cloud request failed".to_owned(),
                 },
                 Self::Io(err) => match err.kind() {
                     std::io::ErrorKind::ReadOnlyFilesystem => {
                         "文件系统只读，当前部署不支持写回程序文件".to_owned()
                     }
-                    std::io::ErrorKind::PermissionDenied => {
-                        "权限不足，无法修改程序文件".to_owned()
-                    }
+                    std::io::ErrorKind::PermissionDenied => "权限不足，无法修改程序文件".to_owned(),
                     _ => "Cloud request failed".to_owned(),
                 },
-                Self::Sqlite(_) | Self::Configuration(_) => {
-                    "Cloud request failed".to_owned()
-                }
+                Self::Sqlite(_) | Self::Configuration(_) => "Cloud request failed".to_owned(),
                 _ => self.to_string(),
             },
         });
