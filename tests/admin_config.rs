@@ -379,6 +379,60 @@ fn shipped_example_matches_current_defaults_and_features_remain_off() {
     }
 }
 
+async fn wait_for_startup_instance(
+    url: &str,
+    mut child_exited: impl FnMut() -> bool,
+) -> Option<Value> {
+    use std::time::Duration;
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_millis(250))
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline {
+        if child_exited() {
+            break;
+        }
+        if let Ok(response) = client.get(url).send().await
+            && response.status().is_success()
+        {
+            return Some(response.json::<Value>().await.unwrap());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    None
+}
+
+#[tokio::test]
+async fn startup_readiness_waits_for_delayed_successful_response() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let ready_at = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    let server = tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/v1/instance",
+            axum::routing::get(move || async move {
+                let status = if std::time::Instant::now() < ready_at {
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    axum::http::StatusCode::OK
+                };
+                (status, axum::Json(json!({"instance_id":"delayed-startup"})))
+            }),
+        );
+        axum::serve(listener, app).await.unwrap();
+    });
+    let found = wait_for_startup_instance(&format!("http://{address}/v1/instance"), || false).await;
+    server.abort();
+    assert_eq!(
+        found.expect("slow startup must become ready")["instance_id"],
+        "delayed-startup"
+    );
+}
+
 #[tokio::test]
 async fn normal_binary_startup_uses_json_config_and_structured_logs() {
     use std::process::Stdio;
@@ -413,21 +467,11 @@ async fn normal_binary_startup_uses_json_config_and_structured_logs() {
         .spawn()
         .unwrap();
     let mut guard = ChildGuard(Some(child));
-    let client = reqwest::Client::new();
     let url = format!("http://127.0.0.1:{port}/v1/instance");
-    let mut found = None;
-    for _ in 0..100 {
-        if let Ok(response) = client.get(&url).send().await
-            && response.status().is_success()
-        {
-            found = Some(response.json::<Value>().await.unwrap());
-            break;
-        }
-        if guard.0.as_mut().unwrap().try_wait().unwrap().is_some() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    let found = wait_for_startup_instance(&url, || {
+        guard.0.as_mut().unwrap().try_wait().unwrap().is_some()
+    })
+    .await;
     let child = guard.0.as_mut().unwrap();
     let _ = child.kill();
     let output = guard.0.take().unwrap().wait_with_output().unwrap();
