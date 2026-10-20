@@ -10,7 +10,7 @@ pub fn snapshot(config: &CloudConfig) -> Value {
         "storage":{"backend":config.database_backend,"data_dir":null,"database_path":config.database_path,"object_dir":config.object_dir,"mysql_url_file":null},
         "auth":{"allow_self_registration":config.allow_self_registration,"bootstrap_account_id":config.bootstrap_account_id,"bootstrap_access_token_file":null,"bootstrap_password_hash_file":null,"identity_providers":null},
         "limits":config.visual.limits,"features":config.visual.features,"retention":config.visual.retention,
-        "web_ui":config.web_ui,"moderation":config.moderation,"performance":config.performance,"updates":config.updates,"cache":config.cache,
+        "web_ui":config.web_ui,"moderation":config.moderation,"performance":config.performance,"updates":config.updates,"cache":config.cache,"offline_identity":config.offline_identity,
         "logging":{"level":null,"format":null,"filter":null}
     });
     value["limits"]["max_asset_bytes"] = json!(config.max_asset_bytes);
@@ -151,6 +151,7 @@ pub fn apply(
     next.performance.resolved()?;
     next.cache.validate()?;
     next.updates.validate()?;
+    next.offline_identity.validate()?;
     let old_file = publication
         .map(|(path, _)| std::fs::read(path))
         .transpose()?;
@@ -160,6 +161,7 @@ pub fn apply(
         .lock()
         .map_err(|_| CloudError::configuration("database lock poisoned"))?;
     let tx = conn.transaction()?;
+    crate::offline_identity::configure(&tx, &next.offline_identity)?;
     crate::admin_settings::reconcile_providers(&tx, &loaded.providers)?;
     tx.execute(
         "UPDATE moderation_policy SET block_r18=?1,block_unclassified=?2 WHERE id=1",
@@ -195,6 +197,7 @@ pub fn apply(
         "performance",
         "updates",
         "cache",
+        "offline_identity",
         "web_ui",
     ] {
         active[group] = saved[group].clone();

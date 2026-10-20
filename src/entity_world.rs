@@ -57,6 +57,7 @@ mod tests {
             performance: Default::default(),
             updates: Default::default(),
             cache: Default::default(),
+            offline_identity: Default::default(),
             database_backend: "sqlite".into(),
             mysql_url: None,
             microsoft_client_secret: None,

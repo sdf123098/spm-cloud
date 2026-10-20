@@ -79,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/admin/app.js", get(script))
         .route("/admin/settings.js", get(settings_script))
+        .route("/admin/offline-identity.js", get(offline_identity_script))
         .route("/admin/style.css", get(style))
         .route("/admin/fonts.css", get(font_styles))
         .route("/admin/fonts/{file}", get(font))
@@ -101,6 +102,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/admin/api/config/check-connection",
             post(crate::admin_settings::check_connection),
+        )
+        .route(
+            "/admin/api/offline-authorizations",
+            get(crate::offline_authorization::admin_list),
+        )
+        .route(
+            "/admin/api/offline-authorizations/{account}",
+            put(crate::offline_authorization::admin_update),
         )
         .route("/admin/api/accounts", get(accounts).post(create_account))
         .route("/admin/api/accounts/{account}", put(update_account))
@@ -194,6 +203,12 @@ async fn settings_script() -> impl IntoResponse {
     (
         [("content-type", "text/javascript; charset=utf-8")],
         include_str!("../web/settings.js"),
+    )
+}
+async fn offline_identity_script() -> impl IntoResponse {
+    (
+        [("content-type", "text/javascript; charset=utf-8")],
+        include_str!("../web/offline-identity.js"),
     )
 }
 async fn style() -> impl IntoResponse {

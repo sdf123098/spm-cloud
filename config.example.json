@@ -81,5 +81,12 @@
     "ttl_seconds": 30,
     "max_pages": 256,
     "timeout_ms": 300
+  },
+  "offline_identity": {
+    "authorization_mode": "automatic",
+    "max_identities_per_account": 3,
+    "session_ttl_seconds": 60,
+    "activation_requests_per_minute": 10,
+    "issuance_requests_per_hour": 5
   }
 }

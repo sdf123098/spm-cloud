@@ -1,13 +1,14 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 const accountPortal=location.pathname.startsWith('/account/');
+const offlinePanel=SPMOfflineIdentity.create(request,renderOfflineIdentities);
 let session = null, configResponse = null, formConfig = null, nextCursor = null, nextAccountCursor = null, noticeTimer;
 let models = [], modelView = 'grid', selectedModels = new Set(), bulkRunning = false;
 let uploadQueue = [], uploadRunning = false;
 try { if (localStorage.getItem('spm-cloud-model-view') === 'cards') modelView = 'cards'; } catch {}
 const roleNames = { owner: '服主', admin: '管理员', member: '普通账号' };
 const statusNames = { R18: 'R18', CLEAN: '未检出', UNKNOWN: '未识别', DISABLED: '识别关闭' };
-const tabs = { overview: '概览', models: '模型库', settings: '服务器配置', accounts: '账号与权限', profile:'我的账号与绑定' };
+const tabs = { overview: '概览', models: '模型库', settings: '服务器配置', accounts: '账号与权限', offline:'离线同步授权', profile:'我的账号与绑定' };
 function notice(message,error=false){ $('notice').textContent=message;$('notice').className=error?'error':'';$('notice').hidden=false;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>{$('notice').hidden=true;},error?12000:7000); }
 async function request(path,options={},retry=true){
   const headers=new Headers(options.headers||{}),accessToken=session?.access_token;if(accessToken)headers.set('Authorization',`Bearer ${accessToken}`);
@@ -19,8 +20,8 @@ async function request(path,options={},retry=true){
     if(refreshed.ok){session={...session,...await refreshed.json()};return request(path,options,false);}
   }
   if(!response.ok){let detail;try{detail=await response.json();}catch{detail={message:`HTTP ${response.status}`};}
-    if(response.status===401&&!credentialProof&&session&&session.access_token===accessToken&&!settingsUI?.saving){settingsUI?.clear();session=null;$('console').hidden=true;$('login').hidden=false;}
-    const messages={R18_MODEL_BLOCKED:'该模型被识别或标记为 R18，已按内容策略阻止上传。',MODEL_UNCLASSIFIED:'该模型未能完成内容识别，已按“拒绝未能完成识别的模型”策略阻止上传。',ASSET_TOO_LARGE:'文件超过服务器允许的模型大小，请调整大小上限或选择较小文件。',IDENTITY_NOT_LINKED:'该游戏身份尚未绑定 Cloud 账号，请先用 Cloud 账号登录并完成绑定。',IDENTITY_ALREADY_LINKED:'该身份或账号已有不同的关联，请检查当前绑定，不能覆盖他人的关联。',IDENTITY_PROFILE_MISMATCH:'身份验证失败，请检查账号、令牌或微软应用授权。',IDENTITY_PROVIDER_UNAVAILABLE:'身份服务暂时无法访问，请稍后重试。',IDENTITY_PROVIDER_UNTRUSTED:'该身份服务尚未启用，或服务地址不符合要求。',ASSET_ACCESS_DENIED:'当前账号没有执行此操作的权限。',UNAUTHENTICATED:'账号或密码不正确，或当前登录已失效。',IDENTITY_CHALLENGE_EXPIRED:'验证已过期，请重新开始。',RATE_LIMITED:'操作过于频繁，请稍后再试。'};
+    if(response.status===401&&!credentialProof&&session&&session.access_token===accessToken&&!settingsUI?.saving){settingsUI?.clear();offlinePanel.clear();session=null;$('console').hidden=true;$('login').hidden=false;}
+    const messages={OFFLINE_IDENTITY_DISABLED:'实例尚未启用实验性离线身份。',OFFLINE_KEY_INVALID:'离线 key 不属于当前 Cloud 账号或实例。',OFFLINE_KEY_REVOKED:'离线 key 已撤销。',OFFLINE_BINDING_STALE:'绑定已更新，请刷新后重试。',OFFLINE_IDENTITY_QUOTA:'该账号已达到离线身份上限，可轮换已有身份。',OFFLINE_SESSION_EXPIRED:'离线发布会话已过期。',R18_MODEL_BLOCKED:'该模型被识别或标记为 R18，已按内容策略阻止上传。',MODEL_UNCLASSIFIED:'该模型未能完成内容识别，已按“拒绝未能完成识别的模型”策略阻止上传。',ASSET_TOO_LARGE:'文件超过服务器允许的模型大小，请调整大小上限或选择较小文件。',IDENTITY_NOT_LINKED:'该游戏身份尚未绑定 Cloud 账号，请先用 Cloud 账号登录并完成绑定。',IDENTITY_ALREADY_LINKED:'该身份或账号已有不同的关联，请检查当前绑定，不能覆盖他人的关联。',IDENTITY_PROFILE_MISMATCH:'身份验证失败，请检查账号、令牌或微软应用授权。',IDENTITY_PROVIDER_UNAVAILABLE:'身份服务暂时无法访问，请稍后重试。',IDENTITY_PROVIDER_UNTRUSTED:'该身份服务尚未启用，或服务地址不符合要求。',ASSET_ACCESS_DENIED:'当前账号没有执行此操作的权限。',UNAUTHENTICATED:'账号或密码不正确，或当前登录已失效。',IDENTITY_CHALLENGE_EXPIRED:'验证已过期，请重新开始。',RATE_LIMITED:'操作过于频繁，请稍后再试。'};
     const error=new Error(messages[detail.code]||detail.message||detail.code||`HTTP ${response.status}`);error.status=response.status;error.code=detail.code;error.errors=detail.errors;throw error;
   }
   if(response.status===204)return null;return response.json();
@@ -39,10 +40,10 @@ async function show(tab,settingsTab){if(tab==='maintenance'||tab==='audit'){sett
   for(const button of document.querySelectorAll('[data-tab]'))button.classList.toggle('active',button.dataset.tab===tab);
   $('breadcrumb').textContent=tabs[tab];
   document.querySelector('.content').scrollTop=0;
-  try{if(tab==='overview')await loadOverview();if(tab==='models'){await loadModels();await loadOwners();}if(tab==='settings')await loadSettings(settingsTab);if(tab==='accounts')await loadAccounts();if(tab==='profile')await loadProfile();}catch(e){notice(e.message,true);}
+  try{if(tab==='overview')await loadOverview();if(tab==='models'){await loadModels();await loadOwners();}if(tab==='settings')await loadSettings(settingsTab);if(tab==='offline')await loadOfflineAuthorizations();if(tab==='accounts')await loadAccounts();if(tab==='profile')await loadProfile();}catch(e){notice(e.message,true);}
 }
 async function loadOverview(){const result=await request('/admin/api/config');const effective=result.effective?.effective||result.effective;const moderation=effective.moderation||{};for(const [id,key]of [['detection','detection_enabled'],['block','block_r18'],['texture','texture_detection_enabled']])$(`overview-${id}`).textContent=moderation[key]===true?'已开启':moderation[key]===false?'已关闭':'未配置';$('overview-instance').textContent=effective.instance?.instance_id||'—';$('overview-origin').textContent=effective.instance?.origin||location.origin;$('overview-role').textContent=roleNames[session.role];}
-async function enter(result){session=result;const me=await request('/account/api/profile');session={...session,...me};
+async function enter(result){offlinePanel.clear();session=result;const me=await request('/account/api/profile');session={...session,...me};
   $('login').hidden=true;$('console').hidden=false;$('identity').textContent=me.account_id;$('role-badge').textContent=roleNames[me.role];
   document.querySelectorAll('[data-owner]').forEach(el=>el.hidden=accountPortal||me.role!=='owner');
   document.querySelectorAll('.sidebar [data-tab]').forEach(el=>{if(accountPortal)el.hidden=el.dataset.tab!=='profile';});
@@ -50,7 +51,7 @@ async function enter(result){session=result;const me=await request('/account/api
   await show(accountPortal?'profile':'overview');
 }
 for(const id of ['login-form','token-form'])$(id).addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,async()=>{const data=Object.fromEntries(new FormData(e.target));const result=await request(accountPortal&&id==='login-form'?'/account/api/login':'/admin/api/login',{method:'POST',json:data});e.target.reset();await enter(result);});});
-$('logout').addEventListener('click',()=>{if(settingsUI.saving)return;return busy($('logout'),async()=>{if(session?.refresh_token)try{await request('/v1/sessions/current',{method:'DELETE'});}catch{}settingsUI.clear();session=null;configResponse=null;formConfig=null;models=[];SPMPreview.clear();selectedModels.clear();uploadQueue=[];$('upload-form').reset();for(const form of document.querySelectorAll('.game-form,.game-token-form,#self-cloud-form'))form.reset();renderUploads();$('upload-status').textContent='';$('model-cards').replaceChildren();syncSelection();$('model-detail').close();$('raw-config').value='';$('console').hidden=true;$('login').hidden=false;});});
+$('logout').addEventListener('click',()=>{if(settingsUI.saving)return;return busy($('logout'),async()=>{if(session?.refresh_token)try{await request('/v1/sessions/current',{method:'DELETE'});}catch{}settingsUI.clear();offlinePanel.clear();session=null;configResponse=null;formConfig=null;models=[];SPMPreview.clear();selectedModels.clear();uploadQueue=[];$('upload-form').reset();for(const form of document.querySelectorAll('.game-form,.game-token-form,#self-cloud-form'))form.reset();renderUploads();$('upload-status').textContent='';$('model-cards').replaceChildren();syncSelection();$('model-detail').close();$('raw-config').value='';$('console').hidden=true;$('login').hidden=false;});});
 document.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.tab)));
 document.querySelectorAll('[data-go]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.go,b.dataset.settingsTarget)));
 $('show-upload').addEventListener('click',()=>{$('upload-form').hidden=false;});
@@ -261,14 +262,14 @@ async function loadOwners(q=''){
 }
 for(const input of [$('upload-owner'),$('bulk-owner')])input.addEventListener('input',()=>{clearTimeout(ownerSearchTimer);ownerSearchTimer=setTimeout(()=>loadOwners(input.value).catch(e=>notice(e.message,true)),300);});
 async function loadProfile(){
-  const profile=await request('/account/api/profile');session={...session,...profile};
+  const profile=await request('/account/api/profile');if(offlinePanel.state.accountId&&offlinePanel.state.accountId!==profile.cloud_account_id)offlinePanel.clear();session={...session,...profile};
   $('profile-web-account').textContent=profile.account_id;$('profile-cloud-account').textContent=profile.cloud_account_id;$('profile-link-status').textContent=profile.linked?'已关联两个账号':'共用同一个 Cloud 账号';
   $('upload-owner').value=profile.cloud_account_id;
   const root=$('bound-game-identities');root.replaceChildren();const entries=Array.isArray(profile.identities)?profile.identities:profile.identities.entries||[];
   const verified=entries.filter(identity=>identity.verification_status==='VERIFIED');
   if(!verified.length)root.append(node('p','尚未绑定已验证的游戏身份。','small muted'));
   for(const identity of verified){const row=node('div',undefined,'bound-identity');row.append(icon('shield-check'),node('strong',identity.display_name),node('span',identity.identity,'small muted'));root.append(row);}
-  filterIdentities();await loadAuthProviders();
+  filterIdentities();await loadAuthProviders();await offlinePanel.load();
 }
 $('refresh-profile').addEventListener('click',()=>busy($('refresh-profile'),()=>loadProfile()));
 $('self-cloud-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,async()=>{await request('/account/api/link-cloud',{method:'POST',json:Object.fromEntries(new FormData(e.target))});e.target.reset();await loadProfile();notice('已验证并关联你自己的 Cloud 账号，管理权限保持原样。');});});
@@ -320,9 +321,35 @@ document.querySelectorAll('[data-export]').forEach(button=>button.addEventListen
 const settingsUI=SPMSettings.mount({request,notice,getSession:()=>session,loadMaintenance,loadAudit,
  onSavingChange:value=>{$('logout').disabled=value||uploadRunning||bulkRunning;},
  downloadBackup:()=>download('/admin/api/exports/backup'),
- onBootstrapChanged:async value=>{if(session?.refresh_token)return true;if(value){const result=await request('/admin/api/login',{method:'POST',json:{bootstrap_token:value}});session=result;session={...session,...await request('/account/api/profile')};return true;}settingsUI.clear();session=null;$('console').hidden=true;$('login').hidden=false;notice('配置已保存，初始令牌已清除。请使用账号密码重新登录。');return false;},
+ onBootstrapChanged:async value=>{if(session?.refresh_token)return true;if(value){const result=await request('/admin/api/login',{method:'POST',json:{bootstrap_token:value}});session=result;session={...session,...await request('/account/api/profile')};return true;}settingsUI.clear();offlinePanel.clear();session=null;$('console').hidden=true;$('login').hidden=false;notice('配置已保存，初始令牌已清除。请使用账号密码重新登录。');return false;},
  onDisabled:command=>{session=null;$('console').hidden=true;$('login').hidden=false;for(const section of $('login').children)section.hidden=true;const info=node('section',undefined,'webui-disabled panel');info.append(node('h2','管理网页已关闭'),node('p','在服务器执行以下命令恢复，然后刷新本页。'),node('pre',command));$('login').append(info);},
- onPasswordChanged:()=>{settingsUI.clear();session=null;$('console').hidden=true;$('login').hidden=false;}
+ onPasswordChanged:()=>{settingsUI.clear();offlinePanel.clear();session=null;$('console').hidden=true;$('login').hidden=false;}
 });
 
 loadAuthProviders().then(()=>finishOAuth()).catch(e=>notice(e.message,true));
+
+function renderOfflineIdentities(state){
+  const names={NONE:'尚未申请',PENDING:'等待管理员批准',APPROVED:'已授权',REVOKED:'已撤销'};
+  $('offline-status').textContent=state.accountId?`归属 Cloud 账号：${state.accountId} · ${state.enabled?(names[state.authorizationStatus]||'尚未申请'):'实例已关闭授权'}`:'请登录后查看离线同步状态。';
+  const list=$('offline-identities');list.replaceChildren();
+  for(const identity of state.identities){
+    const row=node('div',undefined,'offline-identity-row');
+    row.append(node('strong',identity.label),node('p',identity.entity_uuid?`当前角色：${identity.profile_name}（${identity.entity_uuid}）`:'当前没有活动角色','small muted'));
+    const revoke=action('撤销此设备',()=>offlinePanel.revoke(identity));revoke.disabled=state.pending||identity.key_status==='REVOKED';row.append(revoke);list.append(row);
+  }
+}
+async function loadOfflineAuthorizations(){
+  if(!session||accountPortal||!['owner','admin'].includes(session.role))return;
+  const current=session;const result=await request('/admin/api/offline-authorizations');if(current!==session)return;
+  const root=$('offline-authorization-rows');root.replaceChildren();
+  const names={PENDING:'等待批准',APPROVED:'已授权',REVOKED:'已撤销'};
+  for(const row of result.entries){
+    const item=node('div',undefined,'offline-identity-row');item.append(node('strong',row.account_id),node('p',names[row.status]||row.status));
+    for(const [status,label] of [['APPROVED','批准'],['REVOKED','撤销']]){
+      const button=action(label,async()=>{await request(`/admin/api/offline-authorizations/${encodeURIComponent(row.account_id)}`,{method:'PUT',json:{status}});await loadOfflineAuthorizations();});button.disabled=row.status===status;item.append(button);
+    }
+    root.append(item);
+  }
+  if(!result.entries.length)root.append(node('p','暂无客户端申请。','small muted'));
+}
+$('refresh-offline-authorizations').addEventListener('click',()=>busy($('refresh-offline-authorizations'),loadOfflineAuthorizations));

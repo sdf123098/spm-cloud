@@ -8,6 +8,22 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CloudError {
+    #[error("offline synchronization authorization is awaiting administrator approval")]
+    OfflineAuthorizationPending,
+    #[error("offline synchronization authorization was revoked")]
+    OfflineAuthorizationDenied,
+    #[error("experimental offline identities are disabled")]
+    OfflineIdentityDisabled,
+    #[error("offline key is invalid for this account or instance")]
+    OfflineKeyInvalid,
+    #[error("offline key has been revoked")]
+    OfflineKeyRevoked,
+    #[error("offline publication session expired")]
+    OfflineSessionExpired,
+    #[error("offline binding was replaced; activate again explicitly")]
+    OfflineBindingStale,
+    #[error("offline identity quota exceeded")]
+    OfflineIdentityQuota,
     #[error("configuration validation failed")]
     SettingsValidation(Vec<serde_json::Value>),
     #[error("configuration error: {0}")]
@@ -85,6 +101,14 @@ impl CloudError {
     }
     pub fn code(&self) -> &'static str {
         match self {
+            Self::OfflineAuthorizationPending => "OFFLINE_AUTHORIZATION_PENDING",
+            Self::OfflineAuthorizationDenied => "OFFLINE_AUTHORIZATION_DENIED",
+            Self::OfflineIdentityDisabled => "OFFLINE_IDENTITY_DISABLED",
+            Self::OfflineKeyInvalid => "OFFLINE_KEY_INVALID",
+            Self::OfflineKeyRevoked => "OFFLINE_KEY_REVOKED",
+            Self::OfflineSessionExpired => "OFFLINE_SESSION_EXPIRED",
+            Self::OfflineBindingStale => "OFFLINE_BINDING_STALE",
+            Self::OfflineIdentityQuota => "OFFLINE_IDENTITY_QUOTA",
             Self::SettingsValidation(_) => "INVALID_METADATA",
             Self::Configuration(_) => "INTERNAL",
             Self::Unauthenticated => "UNAUTHENTICATED",
@@ -120,6 +144,14 @@ impl CloudError {
     }
     pub fn status(&self) -> StatusCode {
         match self {
+            Self::OfflineAuthorizationPending
+            | Self::OfflineAuthorizationDenied
+            | Self::OfflineIdentityDisabled
+            | Self::OfflineKeyInvalid
+            | Self::OfflineKeyRevoked
+            | Self::OfflineSessionExpired => StatusCode::FORBIDDEN,
+            Self::OfflineBindingStale => StatusCode::CONFLICT,
+            Self::OfflineIdentityQuota => StatusCode::TOO_MANY_REQUESTS,
             Self::SettingsValidation(_) => StatusCode::BAD_REQUEST,
             Self::Unauthenticated => StatusCode::UNAUTHORIZED,
             Self::IdentityProviderUnavailable => StatusCode::BAD_GATEWAY,

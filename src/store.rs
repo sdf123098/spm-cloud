@@ -123,6 +123,16 @@ impl CloudStore {
             config.bootstrap_password_hash.as_deref(),
         )?;
         store.set_moderation_policy(&config.moderation)?;
+        {
+            let mut conn = store
+                .connection
+                .lock()
+                .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+            let tx = conn.transaction()?;
+            crate::offline_identity::invalidate_sessions(&tx)?;
+            crate::offline_identity::configure(&tx, &config.offline_identity)?;
+            tx.commit()?;
+        }
         Ok(store)
     }
 
@@ -401,6 +411,7 @@ impl CloudStore {
         crate::entity_motion::migrate(connection)?;
         crate::admin::migrate(connection)?;
         crate::moderation::migrate(connection)?;
+        crate::offline_identity::migrate(connection)?;
         Ok(())
     }
 
@@ -2926,6 +2937,7 @@ mod tests {
             performance: Default::default(),
             updates: Default::default(),
             cache: Default::default(),
+            offline_identity: Default::default(),
             database_backend: "sqlite".into(),
             mysql_url: None,
             microsoft_client_secret: None,
@@ -3366,6 +3378,7 @@ mod tests {
             performance: Default::default(),
             updates: Default::default(),
             cache: Default::default(),
+            offline_identity: Default::default(),
             database_backend: "sqlite".into(),
             mysql_url: None,
             microsoft_client_secret: None,

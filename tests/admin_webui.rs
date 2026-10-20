@@ -557,6 +557,9 @@ async fn settings_script_is_served_as_javascript_before_the_application() {
         .await
         .unwrap();
     assert!(page.find("/admin/settings.js").unwrap() < page.find("/admin/app.js").unwrap());
+    // Offline approval must have its own administrator-visible entry: account management is owner-only.
+    assert!(page.contains("<button data-tab=\"offline\">"));
+    assert!(page.contains("<section id=\"tab-offline\" hidden>"));
     let script = client
         .get(format!("{}/admin/settings.js", s.url))
         .send()

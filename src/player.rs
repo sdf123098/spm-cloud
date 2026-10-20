@@ -31,22 +31,30 @@ pub struct PlayerAppearanceUpdate {
 #[derive(Deserialize)]
 pub struct PlayerQuery {
     pub entity_uuids: Vec<uuid::Uuid>,
+    #[serde(default)]
+    pub include_offline: bool,
 }
 #[derive(Serialize)]
 pub struct PlayerSelection {
-    asset_id: String,
-    asset_revision: u64,
-    raw_sha256: String,
-    format: String,
-    texture_id: String,
-    motion: Option<serde_json::Value>,
-    display_state: Option<serde_json::Value>,
+    pub(crate) asset_id: String,
+    pub(crate) asset_revision: u64,
+    pub(crate) raw_sha256: String,
+    pub(crate) format: String,
+    pub(crate) texture_id: String,
+    pub(crate) motion: Option<serde_json::Value>,
+    pub(crate) display_state: Option<serde_json::Value>,
 }
 #[derive(Serialize)]
 pub struct PlayerAppearance {
-    entity_uuid: uuid::Uuid,
-    revision: u64,
-    selection: Option<PlayerSelection>,
+    pub(crate) entity_uuid: uuid::Uuid,
+    pub(crate) revision: u64,
+    pub(crate) selection: Option<PlayerSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) publisher_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) identity_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) discovery_status: Option<String>,
 }
 
 pub async fn get(
@@ -107,7 +115,7 @@ pub async fn query(
 ) -> Result<Json<serde_json::Value>, CloudError> {
     let account = authenticate(&state, &headers)?;
     Ok(Json(
-        serde_json::json!({"entries": state.store.query_players(&account, &body.entity_uuids)?}),
+        serde_json::json!({"entries": if body.include_offline { state.store.query_offline_players(&account, &body.entity_uuids)? } else { state.store.query_players(&account, &body.entity_uuids)? }}),
     ))
 }
 
@@ -151,7 +159,7 @@ fn motion_numbers(value: &serde_json::Value, key_limit: usize) -> bool {
     })
 }
 
-fn validate_motion(value: &serde_json::Value) -> Result<(), CloudError> {
+pub(crate) fn validate_motion(value: &serde_json::Value) -> Result<(), CloudError> {
     let invalid = || CloudError::invalid_metadata("invalid player motion");
     if serde_json::to_vec(value).map_err(|_| invalid())?.len() > 65_536 {
         return Err(invalid());
@@ -280,29 +288,14 @@ impl CloudStore {
             )?;
             crate::visual::rate(&tx, account, &self.visual_settings(), now() * 1000)?;
         }
-        if let Some(id) = &input.asset_id {
-            let allowed: Option<(String, String)>=tx.query_row("SELECT r.raw_sha256,r.format FROM available_asset_revisions r JOIN assets a ON a.asset_id=r.asset_id
-                LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?1
-                WHERE r.asset_id=?2 AND r.revision=?3 AND (a.visibility='PUBLIC' OR a.owner_account_id=?1 OR acl.permission IN ('manage','use','render_read'))",
-                params![account,id,input.asset_revision.map(|v| v as i64)],|row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-            let (sha, format) = allowed.ok_or(CloudError::AccessDenied)?;
-            if input.raw_sha256.as_ref() != Some(&sha) {
-                return Err(CloudError::AccessDenied);
-            }
-            if !matches!(
-                format.to_ascii_lowercase().as_str(),
-                "ysm" | "zip" | "bbmodel" | "gltf" | "glb"
-            ) {
-                return Err(CloudError::invalid_metadata(
-                    "appearance asset format is unsupported",
-                ));
-            }
-            if input.texture_id.as_ref().is_none_or(|s| {
-                s.is_empty() || s.chars().count() > 256 || s.chars().any(char::is_control)
-            }) {
-                return Err(CloudError::invalid_metadata("invalid texture"));
-            }
-        }
+        validate_asset(
+            &tx,
+            account,
+            input.asset_id.as_deref(),
+            input.asset_revision,
+            input.raw_sha256.as_deref(),
+            input.texture_id.as_deref(),
+        )?;
         let revision = tx
             .query_row(
                 "SELECT revision FROM player_appearances WHERE identity_id=?1",
@@ -378,7 +371,7 @@ impl CloudStore {
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let mut statement=conn.prepare("SELECT p.revision,p.asset_id,p.asset_revision,p.raw_sha256,p.texture_id,r.format,a.visibility,a.owner_account_id,m.motion_json,d.display_json,p.updated_at,i.account_id
+        let mut statement=conn.prepare("SELECT p.revision,p.asset_id,p.asset_revision,p.raw_sha256,p.texture_id,r.format,a.visibility,a.owner_account_id,m.motion_json,d.display_json,p.updated_at,i.account_id,i.identity_id
             FROM player_appearances p JOIN identities i ON i.identity_id=p.identity_id AND i.verified=1
             JOIN identity_providers provider ON provider.provider_id=COALESCE(i.provider_id,'official') AND provider.enabled=1
             LEFT JOIN assets a ON a.asset_id=p.asset_id LEFT JOIN available_asset_revisions r ON r.asset_id=p.asset_id AND r.revision=p.asset_revision AND r.raw_sha256=p.raw_sha256
@@ -438,18 +431,39 @@ impl CloudStore {
                     } else {
                         None
                     };
-                    Ok((row.get::<_, i64>(0)? as u64, selection))
+                    Ok((
+                        row.get::<_, i64>(0)? as u64,
+                        selection,
+                        Some(format!("verified:{}", row.get::<_, String>(12)?)),
+                    ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
-            let (revision, selection) = if rows.len() == 1 {
+            let count = rows.len();
+            let (revision, selection, publisher) = if count == 1 {
                 rows.into_iter().next().unwrap()
             } else {
-                (0, None)
+                (0, None, None)
             };
             result.push(PlayerAppearance {
                 entity_uuid: *id,
                 revision,
                 selection,
+                publisher_id: publisher,
+                identity_kind: if count == 1 {
+                    Some("VERIFIED".into())
+                } else {
+                    None
+                },
+                discovery_status: Some(
+                    if count > 1 {
+                        "AMBIGUOUS"
+                    } else if count == 1 {
+                        "ACTIVE"
+                    } else {
+                        "NONE"
+                    }
+                    .into(),
+                ),
             });
         }
         Ok(result)
@@ -500,6 +514,43 @@ pub fn offline_uuid(name: &str) -> uuid::Uuid {
     out[6] = (out[6] & 15) | 48;
     out[8] = (out[8] & 63) | 128;
     uuid::Uuid::from_bytes(out)
+}
+
+pub(crate) fn validate_asset(
+    conn: &crate::database::Connection,
+    account: &str,
+    asset_id: Option<&str>,
+    revision: Option<u64>,
+    sha: Option<&str>,
+    texture: Option<&str>,
+) -> Result<(), CloudError> {
+    if let Some(id) = asset_id {
+        let revision = revision
+            .filter(|v| *v > 0 && *v <= i64::MAX as u64)
+            .ok_or_else(|| CloudError::invalid_metadata("invalid asset revision"))?;
+        let allowed: Option<(String,String)> = conn.query_row("SELECT r.raw_sha256,r.format FROM available_asset_revisions r JOIN assets a ON a.asset_id=r.asset_id
+            LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?1
+            WHERE r.asset_id=?2 AND r.revision=?3 AND (a.visibility='PUBLIC' OR a.owner_account_id=?1 OR acl.permission IN ('manage','use','render_read'))",
+            params![account,id,revision as i64], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let (expected, format) = allowed.ok_or(CloudError::AccessDenied)?;
+        if sha != Some(expected.as_str()) {
+            return Err(CloudError::AccessDenied);
+        }
+        if !matches!(
+            format.to_ascii_lowercase().as_str(),
+            "ysm" | "zip" | "bbmodel" | "gltf" | "glb"
+        ) {
+            return Err(CloudError::invalid_metadata(
+                "appearance asset format is unsupported",
+            ));
+        }
+        if texture.is_none_or(|s| {
+            s.is_empty() || s.chars().count() > 256 || s.chars().any(char::is_control)
+        }) {
+            return Err(CloudError::invalid_metadata("invalid texture"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -783,6 +834,7 @@ mod tests {
             performance: Default::default(),
             updates: Default::default(),
             cache: Default::default(),
+            offline_identity: Default::default(),
             database_backend: "sqlite".into(),
             mysql_url: None,
             microsoft_client_secret: None,

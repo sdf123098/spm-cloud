@@ -4,6 +4,7 @@ use crate::error::CloudError;
 
 #[derive(Clone)]
 pub struct CloudConfig {
+    pub offline_identity: crate::offline_identity::OfflineIdentitySettings,
     pub performance: crate::performance::Performance,
     pub updates: crate::maintenance::UpdateSettings,
     pub cache: crate::catalog_cache::CacheSettings,

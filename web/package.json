@@ -2,7 +2,7 @@
   "name": "spm-cloud-admin-preview",
   "private": true,
   "scripts": {
-    "test": "node --test preview.test.cjs settings.test.cjs",
+    "test": "node --test preview.test.cjs settings.test.cjs offline-identity.test.cjs",
     "build": "esbuild preview.js --bundle --format=iife --global-name=SPMPreview --minify --legal-comments=linked --outfile=preview.bundle.js"
   },
   "dependencies": {

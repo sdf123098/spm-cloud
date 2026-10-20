@@ -18,6 +18,7 @@ pub type Environment = BTreeMap<String, String>;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
+    pub offline_identity: crate::offline_identity::OfflineIdentitySettings,
     pub performance: crate::performance::Performance,
     pub updates: crate::maintenance::UpdateSettings,
     pub cache: crate::catalog_cache::CacheSettings,
@@ -35,6 +36,7 @@ pub struct FileConfig {
 impl Default for FileConfig {
     fn default() -> Self {
         Self {
+            offline_identity: Default::default(),
             performance: Default::default(),
             updates: Default::default(),
             cache: Default::default(),
@@ -568,6 +570,7 @@ impl LoadedConfig {
             }
         }
         let cloud = CloudConfig {
+            offline_identity: input.offline_identity.clone(),
             database_backend: input.storage.backend.clone(),
             mysql_url,
             microsoft_client_secret,
@@ -809,6 +812,7 @@ fn validate_token(value: &str) -> Result<(), CloudError> {
     Ok(())
 }
 fn validate(input: &FileConfig, file_mode: bool) -> Result<(), CloudError> {
+    input.offline_identity.validate()?;
     let limits = &input.limits;
     for (field, value, min, max) in [
         ("max_asset_bytes", limits.max_asset_bytes, 1, 4294967296),

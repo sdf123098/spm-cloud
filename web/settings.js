@@ -2,6 +2,12 @@
 'use strict';
 const tabs=[{id:'general',title:'基础与网络'},{id:'auth',title:'账号与认证'},{id:'models',title:'模型与内容安全'},{id:'performance',title:'性能与缓存'},{id:'storage',title:'存储与数据库'},{id:'client',title:'客户端功能'},{id:'logging',title:'日志'},{id:'updates',title:'更新与备份'},{id:'audit',title:'操作记录'}];
 const registry={};
+register('client','offline_identity',[
+ ['authorization_mode','离线同步授权','客户端登录后自动申请。关闭授权会使已有发布会话失效；手动授权等待管理员批准；默认自动授权。','select',1,'',[['disabled','关闭授权'],['manual','手动授权'],['automatic','自动授权']]],
+ ['max_identities_per_account','每账号离线身份上限','同一 Cloud 账号可以创建的独立离线身份数量。','number'],
+ ['session_ttl_seconds','离线发布会话有效期','有效发布会续期；到期后停止向观察者提供外观。','number',1,'秒'],
+ ['activation_requests_per_minute','每分钟离线激活上限','限制同一账号创建离线发布会话的次数。','number'],
+ ['issuance_requests_per_hour','每小时设备注册上限','同一账号注册离线设备的次数限制。','number']]);
 function register(tab,group,entries){for(const [key,title,help,control='text',scale=1,unit='',choices]of entries)registry[`${group}.${key}`]={tab,title,help,control,scale,unit,choices};}
 register('general','instance',[
  ['instance_id','实例标识','用于区分 Cloud 实例。修改后重启服务生效。'],

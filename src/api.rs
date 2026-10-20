@@ -41,6 +41,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) offline_requests: Arc<crate::offline_identity::OfflineRequestLimiter>,
     pub(crate) upload_slots: Arc<crate::performance::Limiter>,
     pub(crate) processing_slots: Arc<crate::performance::Limiter>,
     pub(crate) maintenance_lock: Arc<tokio::sync::Mutex<()>>,
@@ -88,6 +89,7 @@ impl AppState {
             .resolved()
             .expect("validated performance");
         Self {
+            offline_requests: Default::default(),
             upload_slots: crate::performance::Limiter::new(uploads),
             processing_slots: crate::performance::Limiter::new(processing),
             maintenance_lock: Default::default(),
@@ -117,6 +119,17 @@ impl AppState {
         config.performance.resolved()?;
         config.updates.validate()?;
         config.cache.validate()?;
+        config.offline_identity.validate()?;
+        {
+            let mut conn = self
+                .store
+                .connection
+                .lock()
+                .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+            let tx = conn.transaction()?;
+            crate::offline_identity::configure(&tx, &config.offline_identity)?;
+            tx.commit()?;
+        }
         self.store.set_moderation_policy(&config.moderation)?;
         self.install_runtime_config(config);
         Ok(())
@@ -305,6 +318,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/targets/{target_id}/acl", get(list_acl).put(set_acl))
         .with_state(state.clone())
         .merge(crate::admin::router(state.clone()))
+        .merge(crate::offline_identity::router(state.clone()))
+        .merge(crate::offline_player::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state,
             dynamic_body_limit,
@@ -356,7 +371,7 @@ async fn api_headers(request: axum::extract::Request, next: axum::middleware::Ne
         "access-control-allow-methods",
         HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
     );
-    headers.insert("access-control-allow-headers", HeaderValue::from_static("Authorization, Content-Type, Idempotency-Key, Range, If-None-Match, X-Asset-Id, X-Asset-Name, X-Asset-Format, X-Asset-Sha256, X-Asset-Visibility, X-Asset-Metadata-Encoding"));
+    headers.insert("access-control-allow-headers", HeaderValue::from_static("Authorization, Content-Type, X-SPM-Offline-Session, Idempotency-Key, Range, If-None-Match, X-Asset-Id, X-Asset-Name, X-Asset-Format, X-Asset-Sha256, X-Asset-Visibility, X-Asset-Metadata-Encoding"));
     response
 }
 
@@ -386,6 +401,9 @@ async fn instance(State(state): State<AppState>) -> Json<InstanceResponse> {
                 PLAYER_MOTION_CAPABILITY.to_owned(),
                 GAME_IDENTITY_AUTH_CAPABILITY.to_owned(),
             ];
+            if runtime.offline_identity.is_enabled() {
+                capabilities.push(crate::protocol::CLOUD_OFFLINE_IDENTITY_CAPABILITY.to_owned());
+            }
             if runtime.visual.features.player_display_state {
                 capabilities.push("player_display_state_v1".to_owned());
             }
@@ -1381,6 +1399,7 @@ pub(crate) mod tests {
             performance: Default::default(),
             updates: Default::default(),
             cache: Default::default(),
+            offline_identity: Default::default(),
             database_backend: "sqlite".into(),
             mysql_url: None,
             microsoft_client_secret: None,
@@ -1394,6 +1413,7 @@ pub(crate) mod tests {
         let (events, _) = broadcast::channel(8);
         (
             AppState {
+                offline_requests: Default::default(),
                 upload_slots: crate::performance::Limiter::new(4),
                 processing_slots: crate::performance::Limiter::new(2),
                 maintenance_lock: Default::default(),
