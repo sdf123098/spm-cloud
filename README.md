@@ -359,20 +359,20 @@ Both the server and the installed client must support a feature. Enabling a swit
 | 实体显示动作 / `features.entity_motion` | Off | Display-action timelines for supported bound maids/fake players |
 | 玩家显示状态 / `features.player_display_state` | Off | Supported player display state/variables |
 | 载具模型绑定 / `features.vehicle_bindings` | Off | Display data for bound vehicles |
-| 弹射物快照 / `features.projectile_snapshots` | Off; unavailable | Not implemented; setting true in JSON is rejected |
+| 弹射物快照 / `features.projectile_snapshots` | Off | Shared in-flight projectile appearance snapshots for supported clients |
 | 单条协议消息上限 / `limits.max_message_bytes` | 64 KiB; 1–1024 KiB | Ordinary protocol messages, not uploaded model files |
 | 单次实体查询数量 / `limits.max_entity_query_count` | 64; 1–256 | Entity count in one query |
 | 显示状态大小上限 / `limits.max_visual_state_bytes` | 8 KiB; 1–64 KiB | Cannot exceed max_message_bytes |
 | 显示变量数量上限 / `limits.max_visual_variables` | 32; 0–128 | 0 permits no variables; it does not mean unlimited |
 | 显示状态持续发布频率 / `limits.visual_publish_requests_per_second` | 20/sec; 1–1000 | Sustained publication rate |
 | 显示状态突发预算 / `limits.visual_publish_burst` | 40; 1–2000 | At least the sustained rate |
-| 每个发布者的弹射物预算 / `limits.max_projectile_snapshots_per_publisher` | 256; reserved 1–4096 | Read-only/unavailable; cannot exceed world budget |
-| 每个世界的弹射物预算 / `limits.max_projectile_snapshots_per_world` | 4096; reserved 1–65536 | Read-only/unavailable |
-| 弹射物闲置保留时间 / `retention.projectile_idle_ttl_seconds` | 600 seconds; reserved 30–86400 | Read-only; cannot exceed maximum lifetime |
-| 弹射物最长保留时间 / `retention.projectile_max_lifetime_seconds` | 86400 seconds; reserved 60–604800 | Read-only/unavailable |
+| 每个发布者的弹射物预算 / `limits.max_projectile_snapshots_per_publisher` | 256; 1–4096 | Live; cannot exceed world budget |
+| 每个世界的弹射物预算 / `limits.max_projectile_snapshots_per_world` | 4096; 1–65536 | Live |
+| 弹射物闲置保留时间 / `retention.projectile_idle_ttl_seconds` | 600 seconds; 30–86400 | Live; cannot exceed maximum lifetime |
+| 弹射物最长保留时间 / `retention.projectile_max_lifetime_seconds` | 86400 seconds; 60–604800 | Live; absolute cap from publication |
 | 临时显示数据清理间隔 / `retention.cleanup_interval_seconds` | 60 seconds; 1–3600 | Clears expired temporary display data, not models; cannot exceed idle TTL |
 
-Available settings apply live. Reserved ranges exist for protocol/validation compatibility, not as an indication that a feature is implemented. Do not generalize “0 means unlimited” from concurrency to unrelated fields.
+Available settings apply live. Projectile snapshots also require a supporting client; verify `projectile_snapshot_v1` appears in `/v1/instance`. Do not generalize “0 means unlimited” from concurrency to unrelated fields.
 
 ## A11. Tab 7: Logging — 日志
 

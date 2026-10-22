@@ -66,11 +66,6 @@ pub fn application(path: &str) -> &'static str {
         )
     {
         "restart"
-    } else if path == "features.projectile_snapshots"
-        || path.starts_with("retention.projectile_")
-        || path.starts_with("limits.max_projectile_")
-    {
-        "unavailable"
     } else {
         "live"
     }

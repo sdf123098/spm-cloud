@@ -620,7 +620,7 @@ impl LoadedConfig {
             });
         effective["auth"]["identity_providers"] = Value::Array(providers.iter().map(|p| json!({"provider_id":p.provider_id,"display_name":p.display_name,"base_url":p.base_url,"enabled":p.enabled,"session_path":p.session_path,"has_joined_url":p.has_joined_url,"authenticate_path":p.authenticate_path})).collect());
         effective["logging"]["filter"] = json!(log_filter);
-        let report = json!({"config_file":file,"effective":effective,"sources":sources,"notes":["Configured providers use stable IDs; removal soft-disables only previously configuration-managed providers. Legacy database entries and historical bindings are retained.","player_display_state, vehicle_bindings and entity_motion are implemented and opt-in; projectile_snapshots remain unavailable. Visual limits apply to enabled visual inputs, not legacy player motion or uploads."]});
+        let report = json!({"config_file":file,"effective":effective,"sources":sources,"notes":["Configured providers use stable IDs; removal soft-disables only previously configuration-managed providers. Legacy database entries and historical bindings are retained.","player_display_state, vehicle_bindings, entity_motion and projectile_snapshots are implemented and opt-in. Visual limits apply to enabled visual inputs, not legacy player motion or uploads."]});
         Ok(Self {
             cloud,
             providers,
@@ -935,12 +935,6 @@ fn validate(input: &FileConfig, file_mode: bool) -> Result<(), CloudError> {
         return Err(invalid(
             "retention.cleanup_interval_seconds",
             "must not exceed idle TTL",
-        ));
-    }
-    if input.features.projectile_snapshots {
-        return Err(invalid(
-            "features.projectile_snapshots",
-            "capability is not implemented in this build; set false",
         ));
     }
     if !["text", "json"].contains(&input.logging.format.as_str()) {

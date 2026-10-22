@@ -141,20 +141,36 @@ fn strict_json_rejects_unknown_duplicate_wrong_types_versions_and_trailing_data(
 }
 
 #[test]
-fn semantic_limits_and_unimplemented_capabilities_are_rejected() {
+fn semantic_limits_are_rejected() {
     for value in [
         json!({"limits":{"max_entity_query_count":257}}),
         json!({"limits":{"max_visual_variables":129}}),
         json!({"limits":{"max_message_bytes":1024}}),
         json!({"limits":{"max_projectile_snapshots_per_publisher":500,"max_projectile_snapshots_per_world":400}}),
+        json!({"limits":{"max_projectile_snapshots_per_publisher":0}}),
         json!({"limits":{"visual_publish_burst":10}}),
         json!({"retention":{"projectile_idle_ttl_seconds":100,"projectile_max_lifetime_seconds":60}}),
         json!({"retention":{"cleanup_interval_seconds":601}}),
-        json!({"features":{"projectile_snapshots":true}}),
         json!({"logging":{"format":"xml"}}),
         json!({"logging":{"level":"spm_cloud=verbose"}}),
     ] {
         assert!(load(value, Environment::new()).1.is_err());
+    }
+    let loaded = load(
+        json!({"features":{"projectile_snapshots":true}}),
+        Environment::new(),
+    )
+    .1
+    .unwrap();
+    assert!(loaded.cloud.visual.features.projectile_snapshots);
+    for path in [
+        "features.projectile_snapshots",
+        "limits.max_projectile_snapshots_per_publisher",
+        "limits.max_projectile_snapshots_per_world",
+        "retention.projectile_idle_ttl_seconds",
+        "retention.projectile_max_lifetime_seconds",
+    ] {
+        assert_eq!(spm_cloud::config_apply::application(path), "live", "{path}");
     }
     let mut env = Environment::new();
     env.insert("SPM_CLOUD_MAX_ASSET_BYTES".into(), "invalid".into());
@@ -584,7 +600,7 @@ fn web_ui_recovery_rejects_conflicts_invalid_and_readonly_files() {
     }
     fs::write(
         &path,
-        r#"{"web_ui":{"enabled":false},"features":{"projectile_snapshots":true}}"#,
+        r#"{"web_ui":{"enabled":false},"logging":{"format":"xml"}}"#,
     )
     .unwrap();
     let original = fs::read(&path).unwrap();
@@ -787,7 +803,7 @@ async fn web_ui_recovery_reenables_running_service_and_watcher_keeps_logging_pen
 }
 
 #[tokio::test]
-async fn configured_query_limit_is_enforced_and_discovery_does_not_advertise_reserved_features() {
+async fn configured_query_limit_is_enforced_and_discovery_does_not_advertise_disabled_features() {
     let (_dir, loaded) = load(
         json!({"limits":{"max_entity_query_count":1}}),
         Environment::from([("SPM_CLOUD_ACCESS_TOKEN".into(), "test-query-secret".into())]),
@@ -846,7 +862,7 @@ async fn configured_query_limit_is_enforced_and_discovery_does_not_advertise_res
 #[tokio::test]
 async fn enabled_display_discovery_reports_executed_budgets() {
     let (_dir, loaded) = load(
-        json!({"features":{"player_display_state":true,"vehicle_bindings":true,"entity_motion":true},"limits":{"max_visual_state_bytes":1024,"max_visual_variables":2}}),
+        json!({"features":{"player_display_state":true,"vehicle_bindings":true,"entity_motion":true,"projectile_snapshots":true},"limits":{"max_visual_state_bytes":1024,"max_visual_variables":2}}),
         Environment::from([("SPM_CLOUD_ACCESS_TOKEN".into(), "display-secret".into())]),
     );
     let loaded = loaded.unwrap();
@@ -890,7 +906,7 @@ async fn enabled_display_discovery_reports_executed_budgets() {
             .any(|value| value == "player_display_state_v1")
     );
     assert!(
-        !response["capabilities"]
+        response["capabilities"]
             .as_array()
             .unwrap()
             .iter()

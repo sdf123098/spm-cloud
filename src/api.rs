@@ -413,6 +413,9 @@ async fn instance(State(state): State<AppState>) -> Json<InstanceResponse> {
             if runtime.visual.features.entity_motion {
                 capabilities.push("entity_motion_v1".to_owned());
             }
+            if runtime.visual.features.projectile_snapshots {
+                capabilities.push("projectile_snapshot_v1".to_owned());
+            }
             capabilities
         },
         auth: crate::models::InstanceAuth {

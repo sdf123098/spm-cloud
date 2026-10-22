@@ -560,8 +560,7 @@ pub async fn get(
         let editable = role == "owner"
             && runtime.config_path.is_some()
             && path != "auth.bootstrap_account_id"
-            && path != "logging.filter"
-            && apply != "unavailable";
+            && path != "logging.filter";
         let reason = if runtime.config_path.is_none() {
             Some("environment_mode")
         } else if role != "owner" {
@@ -570,14 +569,12 @@ pub async fn get(
             Some("fixed_owner")
         } else if path == "logging.filter" {
             Some("derived_value")
-        } else if apply == "unavailable" {
-            Some("not_implemented")
         } else {
             None
         };
         statuses.insert(
             path.clone(),
-            json!({"editable":editable,"apply":apply,"reason":reason,"active_state":if matches!(apply,"unavailable"|"bootstrap_only"){"not_applicable"}else if matches!(path.as_str(),"logging.level"|"logging.format"|"logging.filter"|"storage.data_dir") && field(&active,path).is_null(){"unknown"}else{"known"}}),
+            json!({"editable":editable,"apply":apply,"reason":reason,"active_state":if matches!(apply,"bootstrap_only"){"not_applicable"}else if matches!(path.as_str(),"logging.level"|"logging.format"|"logging.filter"|"storage.data_dir") && field(&active,path).is_null(){"unknown"}else{"known"}}),
         );
     }
     let recovery = runtime.config_path.as_ref().map(|path| {

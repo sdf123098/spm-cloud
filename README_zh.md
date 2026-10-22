@@ -362,20 +362,20 @@ MySQL 模式的 WebUI 完整备份会输出可恢复的 SQLite 快照。恢复�
 | 实体显示动作（`features.entity_motion`） | 关 | 已绑定女仆/假玩家等受支持目标的动作时间线 |
 | 玩家显示状态（`features.player_display_state`） | 关 | 受支持客户端的玩家显示状态与变量 |
 | 载具模型绑定（`features.vehicle_bindings`） | 关 | 已绑定载具的显示信息 |
-| 弹射物快照（`features.projectile_snapshots`） | 关且不可启用 | 当前未实现；即使手改 JSON 为 true 也会校验失败 |
+| 弹射物快照（`features.projectile_snapshots`） | 关 | 允许支持的客户端同步飞行中投掷物的外观快照；需要客户端同时支持 |
 | 单条协议消息上限（`limits.max_message_bytes`） | 64 KiB；1～1024 KiB | 普通协议消息预算，不是模型上传限制 |
 | 单次实体查询数量（`limits.max_entity_query_count`） | 64；1～256 | 一次查询最多带多少实体 |
 | 显示状态大小上限（`limits.max_visual_state_bytes`） | 8 KiB；1～64 KiB | 不能超过单条协议消息上限 |
 | 显示变量数量上限（`limits.max_visual_variables`） | 32；0～128 | 0 表示不允许携带变量，不是不限制 |
 | 显示状态持续发布频率（`limits.visual_publish_requests_per_second`） | 20 次/秒；1～1000 | 控制持续请求频率 |
 | 显示状态突发预算（`limits.visual_publish_burst`） | 40；1～2000 | 至少等于持续发布频率 |
-| 每个发布者的弹射物预算（`limits.max_projectile_snapshots_per_publisher`） | 256；预留 1～4096 | 当前只读、不启用；不能超过世界预算 |
-| 每个世界的弹射物预算（`limits.max_projectile_snapshots_per_world`） | 4096；预留 1～65536 | 当前只读、不启用 |
-| 弹射物闲置保留时间（`retention.projectile_idle_ttl_seconds`） | 600 秒；预留 30～86400 | 当前只读；不能超过最长保留时间 |
-| 弹射物最长保留时间（`retention.projectile_max_lifetime_seconds`） | 86400 秒；预留 60～604800 | 当前只读 |
+| 每个发布者的弹射物预算（`limits.max_projectile_snapshots_per_publisher`） | 256；1～4096 | 同一发布者同时保留的快照上限；不能超过世界预算 |
+| 每个世界的弹射物预算（`limits.max_projectile_snapshots_per_world`） | 4096；1～65536 | 同一世界同时保留的快照上限 |
+| 弹射物闲置保留时间（`retention.projectile_idle_ttl_seconds`） | 600 秒；30～86400 | 停止续租后保留时间；不能超过最长保留时间 |
+| 弹射物最长保留时间（`retention.projectile_max_lifetime_seconds`） | 86400 秒；60～604800 | 从发布起的绝对保留上限，不因续租延长 |
 | 临时显示数据清理间隔（`retention.cleanup_interval_seconds`） | 60 秒；1～3600 | 清理过期临时显示状态，不删除模型；不能超过闲置保留时间 |
 
-可用项保存后即时应用。预留项有默认值和范围，仅为协议/校验兼容，不表示功能已开放。不要把其他设置里的“0 不限制”套用到这里。
+可用项保存后即时应用；弹射物快照还需客户端支持并在 `/v1/instance` 看到 `projectile_snapshot_v1`。不要把其他设置里的“0 不限制”套用到这里。
 
 ## A11. 标签七：日志
 

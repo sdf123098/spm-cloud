@@ -57,19 +57,19 @@ register('client','features',[
  ['entity_motion','实体显示动作','允许支持的客户端同步已绑定女仆与假玩家的显示动作。','boolean'],
  ['player_display_state','玩家显示状态','允许支持的客户端同步玩家的显示状态和变量。','boolean'],
  ['vehicle_bindings','载具模型绑定','允许支持的客户端同步已绑定载具的显示信息。','boolean'],
- ['projectile_snapshots','弹射物快照','当前版本尚未实现，不能启用。','boolean']]);
+ ['projectile_snapshots','弹射物快照','允许支持的客户端同步飞行中投掷物的外观快照；需要服务端与客户端同时支持。','boolean']]);
 register('client','limits',[
  ['max_message_bytes','单条协议消息上限','限制客户端协议消息大小，应大于显示状态上限。','number',1024,'KiB'],
  ['max_entity_query_count','单次实体查询数量','限制一次查询的实体数量，避免请求过大。','number',1,'个'],
  ['max_visual_state_bytes','显示状态大小上限','单次玩家显示状态的数据预算，不能超过协议消息上限。','number',1024,'KiB'],
  ['max_visual_variables','显示变量数量上限','限制单个显示状态携带的变量数量。','number',1,'项'],
- ['max_projectile_snapshots_per_publisher','每个发布者的弹射物预算','预留参数，当前弹射物功能不可用。','number',1,'个'],
- ['max_projectile_snapshots_per_world','每个世界的弹射物预算','预留参数，当前弹射物功能不可用。','number',1,'个'],
+ ['max_projectile_snapshots_per_publisher','每个发布者的弹射物预算','限制同一发布者同时保留的弹射物快照数量，不能超过世界预算。','number',1,'个'],
+ ['max_projectile_snapshots_per_world','每个世界的弹射物预算','限制同一世界同时保留的弹射物快照数量。','number',1,'个'],
  ['visual_publish_requests_per_second','显示状态持续发布频率','限制客户端持续发布的速率。','number',1,'次/秒'],
  ['visual_publish_burst','显示状态突发预算','允许短时间内突发发布，应不小于持续频率。','number',1,'次']]);
 register('client','retention',[
- ['projectile_idle_ttl_seconds','弹射物闲置保留时间','预留参数，当前弹射物功能不可用。','number',1,'秒'],
- ['projectile_max_lifetime_seconds','弹射物最长保留时间','预留参数，当前弹射物功能不可用。','number',1,'秒'],
+ ['projectile_idle_ttl_seconds','弹射物闲置保留时间','发布者停止续租后，弹射物快照保留的时间；续租会延长。','number',1,'秒'],
+ ['projectile_max_lifetime_seconds','弹射物最长保留时间','弹射物快照从发布起的绝对保留上限，不因续租延长。','number',1,'秒'],
  ['cleanup_interval_seconds','临时显示数据清理间隔','检查并清理过期显示状态，不会删除模型文件。','number',1,'秒']]);
 register('logging','logging',[
  ['level','日志详细程度与模块过滤','可选择常规等级，或逐行设置模块过滤；已有合法表达式未编辑时会完整保留。修改需重启。','logfilter'],
@@ -110,7 +110,7 @@ function mount(bridge){
  let state=null,loading=null,loadedPanels=new Set(),invalidInputs=new Map(),providerChecks=new Map(),activeDialogs=new Set(),secretModes=new Map(),connectionResults=new Map(),saving=false;
  const button=(title,fn,className)=>{const b=el('button',title,className);b.type='button';b.addEventListener('click',async()=>{b.disabled=true;try{await fn();}catch(error){bridge.notice(error.message,true);}finally{if(b.isConnected)b.disabled=false;}});return b;};
  const option=(select,value,title)=>{const o=el('option',title);o.value=value;select.append(o);};
- function readonly(path){return !state.writable||registry[path].control==='readonly'||state.response.field_status?.[path]?.editable===false||path==='features.projectile_snapshots'||path.startsWith('limits.max_projectile_')||path.startsWith('retention.projectile_');}
+ function readonly(path){return !state.writable||registry[path].control==='readonly'||state.response.field_status?.[path]?.editable===false;}
  function condition(path){const d=state.draft;if(path.includes('_concurrency'))return d.performance.preset==='custom';if(path==='cache.timeout_ms')return d.cache.backend==='redis';if(path.startsWith('cache.')&&['ttl_seconds','max_pages'].includes(path.split('.')[1]))return d.cache.backend!=='none';if(path==='updates.check_interval_hours')return d.updates.auto_update;if(path==='moderation.texture_detection_enabled')return d.moderation.detection_enabled;if(['moderation.score_threshold','moderation.timeout_seconds','moderation.max_textures','moderation.max_texture_bytes','moderation.ysm_parser_path'].includes(path))return d.moderation.detection_enabled&&d.moderation.texture_detection_enabled;return true;}
  function updateBar(){bridge.onSavingChange?.(saving);if(!state)return;$('reload-settings').disabled=saving;$('apply-raw').disabled=saving||!state.writable;$('raw-config').readOnly=saving||!state.writable;for(const input of $('owner-password-form').querySelectorAll('input,button'))input.disabled=saving||!state.writable;$('settings-dirty').textContent=invalidInputs.size?`${invalidInputs.size} 项输入需要修正`:(state.dirtyCount?`${state.dirtyCount} 项待保存`:'所有更改已保存');$('save-settings').disabled=saving||!state.writable||!state.dirtyCount||invalidInputs.size>0;$('validate-settings').disabled=saving||!state.writable||invalidInputs.size>0;$('undo-settings').disabled=saving||(!state.dirtyCount&&!invalidInputs.size);$('settings-form').classList.toggle('is-idle',!saving&&!state.dirtyCount&&invalidInputs.size===0);for(const row of doc.querySelectorAll('[data-setting-path]')){const path=row.dataset.settingPath;row.classList.toggle('is-dirty',state.dirtyPaths.has(path)||!!state.secrets[secretNames[path]]);for(const input of row.querySelectorAll('input,select,textarea,button'))input.disabled=saving||readonly(path)||!condition(path);const note=row.querySelector('.condition-note');if(note)note.hidden=condition(path);}}
  function change(path,value){state.set(path,value);invalidInputs.delete(path);updateBar();}
@@ -121,8 +121,8 @@ function mount(bridge){
  function finishField(row,path,meta){
   const field=fieldSchema(state.schema,path),status=state.response.field_status?.[path],footer=el('div',undefined,'setting-field-footer');
   footer.append(el('small',`默认：${humanValue(field.default,meta)}`));
-  const explanations={fixed_owner:'固定服主 · 只读',owner_only:'仅服主可编辑',environment_mode:'环境配置 · 只读',not_implemented:'当前版本不可用',derived_value:'按运行状态计算'};
-  footer.append(el('small',explanations[status?.reason]||({restart:'重启后生效',bootstrap_only:'仅首次初始化时使用',unavailable:'当前版本不可用'}[status?.apply]||'保存后生效')));
+  const explanations={fixed_owner:'固定服主 · 只读',owner_only:'仅服主可编辑',environment_mode:'环境配置 · 只读',derived_value:'按运行状态计算'};
+  footer.append(el('small',explanations[status?.reason]||({restart:'重启后生效',bootstrap_only:'仅首次初始化时使用'}[status?.apply]||'保存后生效')));
   if(!readonly(path))footer.append(button('恢复默认',()=>{if(meta.control==='secret'){state.secret(secretNames[path],{operation:'clear'});secretModes.delete(secretNames[path]);}change(path,clone(field.default));render();}));
   row.append(footer);
   const note=el('p','依赖项尚未开启；此值会保留，满足条件后可编辑。','setting-help condition-note');note.hidden=condition(path);row.append(note);

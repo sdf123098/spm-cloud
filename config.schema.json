@@ -250,8 +250,7 @@
         "projectile_snapshots": {
           "type": "boolean",
           "default": false,
-          "const": false,
-          "description": "Reserved capability. Not implemented in this build; enabling is rejected."
+          "description": "Enable shared in-flight projectile appearance snapshots with publisher/world quotas and renewable leases. Defaults to false."
         }
       }
     },
