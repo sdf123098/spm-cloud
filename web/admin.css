@@ -84,9 +84,12 @@
 .settings-dialog pre{padding:14px;background:#f3f6fb;border-radius:6px;overflow-wrap:anywhere;white-space:pre-wrap;font-size:12px;line-height:1.8}
 .settings-dialog p{font-size:13px;line-height:1.9}
 .dialog-actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;margin-top:24px}
-.settings-save-bar{position:fixed;left:226px;right:26px;bottom:24px;z-index:6;display:flex;align-items:center;justify-content:space-between;gap:16px;background:#fffffff5;backdrop-filter:blur(10px);border:1px solid #c9d7ed;border-radius:8px;padding:13px 17px;box-shadow:0 5px 28px #25345118}
-.settings-save-bar>span{font-size:13px;color:#61718d}
-.settings-save-bar>div{display:flex;gap:8px;flex-wrap:wrap}
+.settings-save-bar{position:fixed;right:26px;bottom:24px;left:auto;z-index:6;display:flex;align-items:center;gap:10px;max-width:calc(100vw - 252px);background:#fffffff5;backdrop-filter:blur(10px);border:1px solid #c9d7ed;border-radius:999px;padding:7px 9px 7px 16px;box-shadow:0 5px 24px #25345118}
+.settings-save-bar>span{font-size:12px;color:#61718d;white-space:nowrap}
+.settings-save-bar>div{display:flex;gap:6px;flex-wrap:nowrap}
+.settings-save-bar button{padding:6px 11px;font-size:12px;border-radius:999px}
+.settings-save-bar.is-idle{padding:8px 15px}
+.settings-save-bar.is-idle>div{display:none}
 .settings-json{margin-top:20px}
 .log-filter-rows{display:grid;gap:10px;margin-top:14px}
 .log-filter-rows>button{justify-self:start}
@@ -103,9 +106,10 @@
  .settings-tablist button{flex:none;padding:9px 11px}
  .setting-field-card{padding:17px}
  .secret-fields{grid-template-columns:1fr}
- .settings-save-bar{left:12px;right:12px;bottom:12px;padding:12px;gap:9px;flex-wrap:wrap}
- .settings-save-bar>div{width:100%;gap:6px}
- .settings-save-bar button{flex:1;padding:8px 10px;font-size:12px}
+ .settings-save-bar{left:auto;right:12px;bottom:12px;max-width:calc(100vw - 24px);padding:8px 10px 8px 14px;gap:8px;border-radius:18px;flex-wrap:wrap;justify-content:flex-end}
+ .settings-save-bar>div{width:auto;gap:6px}
+ .settings-save-bar button{flex:none;padding:6px 9px;font-size:12px}
+ .settings-save-bar.is-idle{padding:8px 13px}
  .settings-dialog{padding:18px}
  .dialog-actions button{white-space:normal;flex:1;min-width:110px}
  .inline-fields>*{max-width:100%}
