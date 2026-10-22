@@ -93,20 +93,19 @@ set -e
 if grep -qiE '^HTTP/[0-9.]+ 304' "$tmp_hdr"; then
   rm -f "$tmp_hdr"
   # 304 只说明"远端没变", 不说明"本地已就绪"。
-  # 若本地版本仍低于上次确认的远端版本(说明上次升级失败), 必须继续流程。
-  synced_file="${STATE_DIR}/.synced-version"
-  synced=""
-  [[ -s "$synced_file" ]] && synced="$(cat "$synced_file" 2>/dev/null || true)"
+  # 用缓存发布的 tag 比较；手动升级/回退不会更新 .synced-version。
+  release_json="$(cat "${STATE_DIR}/.release.json" 2>/dev/null || true)"
+  cached_tag="$(jq -er '.tag_name' <<<"$release_json" 2>/dev/null || true)"
+  cached_version="${cached_tag#v}"
   local_ver="$("$BINARY" --version 2>/dev/null | awk '{print $2}' || true)"
   # 304 只说明远端未变; 本地是否可用必须独立确认 (版本号可能来自损坏的二进制)
-  if [[ -n "$synced" && -n "$local_ver" ]] \
-     && [[ "$(ver_num "$local_ver")" -ge "$(ver_num "$synced")" ]] \
+  if [[ "$cached_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -n "$local_ver" ]] \
+     && [[ "$(ver_num "$local_ver")" -ge "$(ver_num "$cached_version")" ]] \
      && service_healthy; then
     info "远端无变化 (304) 且本地 $local_ver 服务健康，无需处理"; exit 0
   fi
-  warn "远端无变化 (304) 但本地为 ${local_ver:-未知} 且服务未通过健康检查，继续执行修复性升级"
+  warn "远端无变化 (304) 但本地为 ${local_ver:-未知}，版本或服务健康状态仍需处理，继续执行修复性升级"
   # 用缓存的上次响应继续走正常流程
-  release_json="$(cat "${STATE_DIR}/.release.json" 2>/dev/null || true)"
   if [[ -z "$release_json" ]]; then
     warn "无缓存的发布信息，清除 ETag 以便下轮全量查询"
     rm -f "$ETAG_FILE"
