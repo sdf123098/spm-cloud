@@ -929,9 +929,13 @@ pub(crate) async fn upload_asset_as(
     let account = owner.unwrap_or_else(|| actor.clone());
     let request_id = header_string(&headers, "idempotency-key")?
         .ok_or_else(|| CloudError::invalid_metadata("Idempotency-Key is required"))?;
-    let asset_id = asset_metadata_header(&headers, "x-asset-id")?
+    let requested_asset_id = asset_metadata_header(&headers, "x-asset-id")?
         .unwrap_or_else(|| format!("asset_{}", Uuid::new_v4().simple()));
-    let name = asset_metadata_header(&headers, "x-asset-name")?.unwrap_or_else(|| asset_id.clone());
+    let asset_id = state
+        .store
+        .resolve_upload_asset_id(&account, &requested_asset_id)?;
+    let name = asset_metadata_header(&headers, "x-asset-name")?
+        .unwrap_or_else(|| requested_asset_id.clone());
     let format = header_string(&headers, "x-asset-format")?
         .unwrap_or_else(|| "application/octet-stream".to_owned());
     let expected_sha = header_string(&headers, "x-asset-sha256")?;
@@ -1834,6 +1838,345 @@ pub(crate) mod tests {
         assert!(matches!(
             upload_asset(State(state), headers, Body::from(bytes.to_vec())).await,
             Err(CloudError::IdempotencyConflict)
+        ));
+    }
+
+    fn auth_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers
+    }
+
+    fn upload_headers(
+        token: &str,
+        request_id: &str,
+        asset_id: &str,
+        name: Option<&str>,
+        sha: &str,
+    ) -> HeaderMap {
+        let mut headers = auth_headers(token);
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_str(request_id).unwrap(),
+        );
+        headers.insert("x-asset-id", HeaderValue::from_str(asset_id).unwrap());
+        if let Some(name) = name {
+            headers.insert("x-asset-name", HeaderValue::from_str(name).unwrap());
+        }
+        headers.insert("x-asset-sha256", HeaderValue::from_str(sha).unwrap());
+        headers
+    }
+
+    /// 建一个非 bootstrap 账号并返回它的 access token，用于跨账号冲突场景。
+    fn second_account_token(state: &AppState, account_id: &str) -> String {
+        state
+            .store
+            .create_account(account_id, "collision-test-password")
+            .unwrap();
+        state
+            .store
+            .issue_session(&crate::models::LoginRequest {
+                account_id: account_id.into(),
+                password: "collision-test-password".into(),
+            })
+            .unwrap()
+            .access_token
+    }
+
+    async fn upload_json(
+        state: &AppState,
+        headers: HeaderMap,
+        body: &[u8],
+    ) -> Result<serde_json::Value, CloudError> {
+        let response =
+            upload_asset(State(state.clone()), headers, Body::from(body.to_vec())).await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        Ok(serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn cross_account_same_asset_id_gets_unique_suffix() {
+        let (state, _directory) = test_state(false);
+        let first = b"collide-original-bytes";
+        let uploaded = upload_json(
+            &state,
+            upload_headers(
+                "bootstrap-secret",
+                "collide-a",
+                "test_collide",
+                None,
+                &hex::encode(Sha256::digest(first)),
+            ),
+            first,
+        )
+        .await
+        .unwrap();
+        assert_eq!(uploaded["asset_id"], "test_collide");
+
+        let other = b"collide-other-account-bytes";
+        let token = second_account_token(&state, "collide_user");
+        let second = upload_json(
+            &state,
+            upload_headers(
+                &token,
+                "collide-b",
+                "test_collide",
+                None,
+                &hex::encode(Sha256::digest(other)),
+            ),
+            other,
+        )
+        .await
+        .unwrap();
+        let expected = format!(
+            "test_collide@{}",
+            hex::encode(&Sha256::digest(b"collide_user")[..8])
+        );
+        assert_eq!(second["asset_id"], expected.as_str());
+        // 没传 X-Asset-Name 时展示名必须是请求 ID，而不是带后缀的最终 ID。
+        assert_eq!(second["name"], "test_collide");
+        assert_eq!(second["revision"], 1);
+
+        let owner_view = download_asset(
+            State(state.clone()),
+            auth_headers("bootstrap-secret"),
+            Path(("test_collide".to_owned(), 1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(owner_view.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(owner_view.into_body(), 16 * 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            first
+        );
+    }
+
+    #[tokio::test]
+    async fn tombstoned_asset_id_is_not_reassigned_by_suffix() {
+        let (state, _directory) = test_state(false);
+        let blocked = b"blocked-model-bytes";
+        upload_json(
+            &state,
+            upload_headers(
+                "bootstrap-secret",
+                "blocked-a",
+                "blocked_model",
+                None,
+                &hex::encode(Sha256::digest(blocked)),
+            ),
+            blocked,
+        )
+        .await
+        .unwrap();
+        state
+            .store
+            .admin_delete_asset("account_local", "blocked_model", false)
+            .unwrap();
+
+        let token = second_account_token(&state, "blocked_user");
+        let other = b"blocked-model-reupload";
+        assert!(matches!(
+            upload_json(
+                &state,
+                upload_headers(
+                    &token,
+                    "blocked-b",
+                    "blocked_model",
+                    None,
+                    &hex::encode(Sha256::digest(other)),
+                ),
+                other,
+            )
+            .await,
+            Err(CloudError::AccessDenied)
+        ));
+        assert!(
+            state
+                .store
+                .list_assets("blocked_user")
+                .unwrap()
+                .iter()
+                .all(|asset| !asset.asset_id.starts_with("blocked_model"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_account_suffix_keeps_asset_id_within_128_bytes() {
+        let (state, _directory) = test_state(false);
+        let base = "a".repeat(128);
+        let first = b"long-id-original";
+        upload_json(
+            &state,
+            upload_headers(
+                "bootstrap-secret",
+                "long-a",
+                &base,
+                None,
+                &hex::encode(Sha256::digest(first)),
+            ),
+            first,
+        )
+        .await
+        .unwrap();
+
+        let token = second_account_token(&state, "long_id_user");
+        let other = b"long-id-other-account";
+        let second = upload_json(
+            &state,
+            upload_headers(
+                &token,
+                "long-b",
+                &base,
+                None,
+                &hex::encode(Sha256::digest(other)),
+            ),
+            other,
+        )
+        .await
+        .unwrap();
+        let resolved = second["asset_id"].as_str().unwrap();
+        assert_eq!(resolved.len(), 128);
+        assert!(resolved.starts_with(&"a".repeat(111)));
+        assert_eq!(
+            resolved.split_once('@').unwrap().1,
+            hex::encode(&Sha256::digest(b"long_id_user")[..8])
+        );
+    }
+
+    #[tokio::test]
+    async fn same_account_reupload_keeps_asset_id_across_revisions() {
+        let (state, _directory) = test_state(false);
+        for (index, content) in [b"stable-model-v1".as_slice(), b"stable-model-v2"]
+            .iter()
+            .enumerate()
+        {
+            let uploaded = upload_json(
+                &state,
+                upload_headers(
+                    "bootstrap-secret",
+                    &format!("stable-{index}"),
+                    "stable_model",
+                    None,
+                    &hex::encode(Sha256::digest(content)),
+                ),
+                content,
+            )
+            .await
+            .unwrap();
+            assert_eq!(uploaded["asset_id"], "stable_model");
+            assert_eq!(uploaded["revision"], index + 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_account_retry_returns_the_same_suffixed_id() {
+        let (state, _directory) = test_state(false);
+        let first = b"retry-original";
+        upload_json(
+            &state,
+            upload_headers(
+                "bootstrap-secret",
+                "retry-a",
+                "retry_model",
+                None,
+                &hex::encode(Sha256::digest(first)),
+            ),
+            first,
+        )
+        .await
+        .unwrap();
+
+        let token = second_account_token(&state, "retry_user");
+        let body = b"retry-other-account";
+        let headers = upload_headers(
+            &token,
+            "retry-b",
+            "retry_model",
+            None,
+            &hex::encode(Sha256::digest(body)),
+        );
+        let once = upload_json(&state, headers.clone(), body).await.unwrap();
+        let twice = upload_json(&state, headers, body).await.unwrap();
+        assert_eq!(once["asset_id"], twice["asset_id"]);
+        assert_eq!(once["revision"], 1);
+        assert_eq!(twice["revision"], 1);
+        assert_eq!(
+            twice["asset_id"],
+            format!(
+                "retry_model@{}",
+                hex::encode(&Sha256::digest(b"retry_user")[..8])
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn suffixed_asset_id_tombstoned_for_the_same_account_is_rejected() {
+        let (state, _directory) = test_state(false);
+        let original = b"suffix-tombstone-original";
+        upload_json(
+            &state,
+            upload_headers(
+                "bootstrap-secret",
+                "suffix-tomb-a",
+                "suffix_model",
+                None,
+                &hex::encode(Sha256::digest(original)),
+            ),
+            original,
+        )
+        .await
+        .unwrap();
+
+        let token = second_account_token(&state, "suffix_user");
+        let other = b"suffix-tombstone-second";
+        let resolved = upload_json(
+            &state,
+            upload_headers(
+                &token,
+                "suffix-tomb-b",
+                "suffix_model",
+                None,
+                &hex::encode(Sha256::digest(other)),
+            ),
+            other,
+        )
+        .await
+        .unwrap()["asset_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(resolved.contains('@'));
+
+        // 管理员下架这条带后缀的资产后，同一账号再用原 ID 上传必须继续被拒，
+        // 不能因为后缀解析而复活下架内容。
+        state
+            .store
+            .admin_delete_asset("account_local", &resolved, false)
+            .unwrap();
+        let retry = b"suffix-tombstone-third";
+        assert!(matches!(
+            upload_json(
+                &state,
+                upload_headers(
+                    &token,
+                    "suffix-tomb-c",
+                    "suffix_model",
+                    None,
+                    &hex::encode(Sha256::digest(retry)),
+                ),
+                retry,
+            )
+            .await,
+            Err(CloudError::AccessDenied)
         ));
     }
 

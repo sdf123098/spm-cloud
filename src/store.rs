@@ -1984,6 +1984,50 @@ impl CloudStore {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// 决定这次上传最终写入的 asset_id。
+    /// 跨账号同名冲突时改用稳定的账号后缀，而不是直接 403；
+    /// 已被 tombstone 的 ID 仍然拒绝，避免管理员下架被后缀绕过。
+    pub fn resolve_upload_asset_id(
+        &self,
+        account_id: &str,
+        requested: &str,
+    ) -> Result<String, CloudError> {
+        validate_asset_id(requested)?;
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        if conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deleted_assets WHERE asset_id=?1)",
+            [requested],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(CloudError::AccessDenied);
+        }
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT owner_account_id FROM assets WHERE asset_id = ?1",
+                [requested],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if owner.is_none_or(|owner| owner == account_id) {
+            return Ok(requested.to_owned());
+        }
+        let suffix = account_id_suffix(account_id);
+        let base = truncate_utf8_bytes(requested, MAX_ASSET_ID_BYTES - 1 - suffix.len());
+        let resolved = format!("{base}@{suffix}");
+        // 后缀结果本身也可能是被下架的旧资产；提前挡住，避免读完整个 body 才 403。
+        if conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deleted_assets WHERE asset_id=?1)",
+            [&resolved],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(CloudError::AccessDenied);
+        }
+        Ok(resolved)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn register_asset(
         &self,
@@ -2490,11 +2534,31 @@ fn target_role(
     .map_err(CloudError::from)
 }
 
+const MAX_ASSET_ID_BYTES: usize = 128;
+
 fn validate_asset_id(value: &str) -> Result<(), CloudError> {
-    if value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+    if value.trim().is_empty()
+        || value.len() > MAX_ASSET_ID_BYTES
+        || value.chars().any(char::is_control)
+    {
         return Err(CloudError::invalid_metadata("invalid asset_id"));
     }
     Ok(())
+}
+
+fn account_id_suffix(account_id: &str) -> String {
+    hex::encode(&sha2::Sha256::digest(account_id.as_bytes())[..8])
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 fn normalize_profile_uuid(value: &str) -> Result<String, CloudError> {
@@ -2620,6 +2684,22 @@ fn issue_session_on_connection(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn truncate_utf8_bytes_stays_on_char_boundaries() {
+        assert_eq!(super::truncate_utf8_bytes("abcdef", 4), "abcd");
+        assert_eq!(super::truncate_utf8_bytes("abc", 4), "abc");
+        // "模" 是 3 字节，111 字节正好落在 37 个字之后（111 = 3 × 37），
+        // 下界测试用 110 才会退到 36 个字。
+        assert_eq!(
+            super::truncate_utf8_bytes(&"模".repeat(42), 111),
+            "模".repeat(37)
+        );
+        assert_eq!(
+            super::truncate_utf8_bytes(&"模".repeat(42), 110),
+            "模".repeat(36)
+        );
+    }
+
     #[test]
     fn credential_insertion_failure_rolls_back_account_creation() {
         let (state, _dir) = crate::api::tests::test_state(true);
