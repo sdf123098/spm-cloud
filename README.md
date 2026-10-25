@@ -126,6 +126,8 @@ Changing an owner password, managing an account, and editing a model are **immed
 
 The default limit is 128 MiB **per file**. HTTP 413 may come from a reverse proxy before Cloud receives the request; see B4.
 
+Model IDs are chosen by the caller, but a name is never stolen: if account A already owns `foo`, account B uploading `foo` receives `foo@<16 hex digits>` (derived from the first 8 bytes of the SHA-256 of B's account ID, stable for that account), and A's asset, bytes and revision counter are untouched. Always use the `asset_id` from the response body for later downloads, visibility changes and ACL grants. An ID deleted (taken down) by an administrator still refuses re-upload under any account, including its suffixed form, so takedowns cannot be revived by switching accounts.
+
 | Operation | How it works |
 |---|---|
 | Find a model | Search name, model ID, owning account, or format; the server returns one page at a time |
