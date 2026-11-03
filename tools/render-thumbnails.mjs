@@ -9,8 +9,9 @@
 //   node tools/render-thumbnails.mjs --site https://api.micaftic.top \
 //     --token "$TOKEN" --concurrency 4 --limit 200
 //
-// Needs a source checkout (it serves web/preview.bundle.js to the browser), not
-// the release tarball, where the preview bundle only exists as compiled bytes.
+// Works from either layout: a release tarball (flat, where preview.bundle.js and
+// thumbnail.html sit next to this script) or a source checkout (web/ and tools/).
+// resolveAsset() picks whichever exists.
 //
 // Exit codes: 0 = every queued item settled (rendered or marked failed),
 //             1 = at least one item errored in a way worth retrying next run,
@@ -18,12 +19,27 @@
 
 import {chromium} from 'playwright';
 import {createServer} from 'node:http';
-import {createReadStream} from 'node:fs';
+import {createReadStream, existsSync} from 'node:fs';
 import {stat} from 'node:fs/promises';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import path from 'node:path';
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Locate a file that ships beside this script in a release tarball (flat) but
+ * lives one directory up in a source checkout. Candidates are relative to HERE.
+ */
+function resolveAsset(candidates) {
+  for (const candidate of candidates) {
+    const full = path.resolve(HERE, candidate);
+    if (existsSync(full)) return full;
+  }
+  throw new Error(`missing ${candidates.join(' or ')} next to ${HERE}`);
+}
+
+const PREVIEW_BUNDLE = resolveAsset(['preview.bundle.js', '../web/preview.bundle.js']);
+const THUMBNAIL_PAGE = resolveAsset(['thumbnail.html', '../tools/thumbnail.html']);
 
 function parseArgs(argv) {
   const args = {site: '', token: '', concurrency: 2, limit: 200, size: 512, model: '', dryRun: false};
@@ -71,8 +87,8 @@ export async function openRenderer({concurrency = 2, size = 512} = {}) {
   let payloadId = 0;
   const server = createServer((request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1');
-    if (url.pathname === '/preview.bundle.js') return sendFile(response, path.join(ROOT, 'web/preview.bundle.js'), 'text/javascript');
-    if (url.pathname === '/thumbnail.html') return sendFile(response, path.join(ROOT, 'tools/thumbnail.html'), 'text/html');
+    if (url.pathname === '/preview.bundle.js') return sendFile(response, PREVIEW_BUNDLE, 'text/javascript');
+    if (url.pathname === '/thumbnail.html') return sendFile(response, THUMBNAIL_PAGE, 'text/html');
     if (url.pathname.startsWith('/payload/')) {
       const payload = payloads.get(url.pathname.slice('/payload/'.length));
       if (!payload) { response.writeHead(404).end(); return; }
