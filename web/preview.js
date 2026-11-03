@@ -11,9 +11,31 @@ manager.setURLModifier(url => {
   throw new Error('模型引用了外部资源，请上传包含内嵌贴图和缓冲区的模型');
 });
 const textureLoader = new THREE.TextureLoader(manager);
+// UV normalisation needs the atlas's real pixel size, which only exists after
+// the image decodes. buildModel() therefore awaits these dimensions; a pack
+// that declares 512 UVs but ships a 1024 skin otherwise samples the wrong
+// quadrant and renders fully transparent.
+const textureSizes = new Map();
 function texture(source) {
   if (!source || !/^data:image\/(png|jpeg|webp|gif);base64,/i.test(source)) return null;
-  const map = textureLoader.load(source, () => { for (const paint of paints) paint(); }); map.colorSpace = THREE.SRGBColorSpace; map.magFilter = THREE.NearestFilter; map.minFilter = THREE.NearestFilter; return map;
+  const map = textureLoader.load(source, () => { for (const paint of paints) paint(); }); map.colorSpace = THREE.SRGBColorSpace; map.magFilter = THREE.NearestFilter; map.minFilter = THREE.NearestFilter;
+  textureSizes.set(map, dimensions(source));
+  return map;
+}
+/** Decode a data URL's intrinsic size without touching the GPU. */
+function dimensions(source) {
+  const match = /^data:image\/[a-z+]+;base64,(.*)$/i.exec(source);
+  if (!match) return null;
+  const bytes = atob(match[1].slice(0, 32));
+  const code = c => c.charCodeAt(0);
+  // PNG: IHDR width/height are the first two big-endian u32 after the magic.
+  if (code(bytes[0]) === 0x89 && bytes.slice(1, 4) === 'PNG') {
+    return {
+      width: ((code(bytes[16]) << 24) | (code(bytes[17]) << 16) | (code(bytes[18]) << 8) | code(bytes[19])) >>> 0,
+      height: ((code(bytes[20]) << 24) | (code(bytes[21]) << 16) | (code(bytes[22]) << 8) | code(bytes[23])) >>> 0,
+    };
+  }
+  return null;
 }
 function vec(v, fallback = [0,0,0]) { return Array.isArray(v) && v.length >= 3 ? v.slice(0,3).map(n => Number.isFinite(Number(n)) ? Number(n) : 0) : fallback; }
 function rotate(object, value) { const [x,y,z] = vec(value); object.rotation.set(x*Math.PI/180,y*Math.PI/180,z*Math.PI/180,'ZYX'); }
@@ -30,7 +52,12 @@ function cube(data, maps, resolution, bedrock = false) {
     let rect;
     if(face?.uv){rect=bedrock?[...face.uv,...(face.uv_size||[w,h])]:[face.uv[0],face.uv[1],face.uv[2]-face.uv[0],face.uv[3]-face.uv[1]];}
     else if(bedrock && Array.isArray(data.uv)){const n=net[name];rect=[n[0]+data.uv[0],n[1]+data.uv[1],n[2],n[3]];}
-    if(rect){let [u,v,du,dv]=rect;const width=resolution[0]||64,height=resolution[1]||64;
+    if(rect){let [u,v,du,dv]=rect;
+      // Normalise against the atlas we actually loaded, not the geometry's
+      // declared size. Packs routinely ship UVs in a 512 grid alongside a
+      // 1024-wide skin; dividing by the declaration then samples the top-left
+      // quadrant, which is transparent for most characters.
+      const image=map?.image,known=textureSizes.get(map),width=image?.width||known?.width||resolution[0]||64,height=image?.height||known?.height||resolution[1]||64;
       const points=[[u,v],[u+du,v],[u,v+dv],[u+du,v+dv]];
       const turns=((face?.rotation||0)/90)%4;
       for(let j=0;j<4;j++){const p=points[turns? [0,1,3,2][([0,1,3,2].indexOf(j)+turns)%4]:j];uv.setXY(index*4+j,p[0]/width,1-p[1]/height);}
@@ -57,10 +84,36 @@ function bbmodel(value, images) {
   function add(items,parent,pivot=[0,0,0],depth=0){if(depth>128)throw new Error('骨骼层级过深');for(const item of items||[]){if(typeof item==='string'){const mesh=elements.get(item);if(mesh&&!used.has(item)){mesh.position.sub(new THREE.Vector3(...pivot));parent.add(mesh);used.add(item);}}else{const bone=new THREE.Group();const origin=vec(item.origin);bone.position.set(...origin.map((n,i)=>n-pivot[i]));rotate(bone,item.rotation);parent.add(bone);add(item.children,bone,origin,depth+1);}}}
   add(value.outliner,group);for(const [id,mesh]of elements)if(!used.has(id))group.add(mesh);return group;
 }
+// Pick the Bedrock skin, not merely the first image whose path looks textual.
+//
+// The old `/texture|skin|player/i` test matched a path *segment*: a pack with
+// `model/textures/arrow.png` and `model/textures/texture.png` always selected
+// whichever sorted first, and rendering a 512-UV body against a 32 px arrow
+// atlas samples outside the image — a fully transparent model that still
+// encodes as a valid PNG. Prefer a basename that *is* a texture name, then the
+// atlas by name and demote obvious body parts.
+function primaryTexture(images) {
+  if (!images.length) return null;
+  // Match the basename, not the full path: `model/textures/arrow.png` used to
+  // satisfy /texture/ because the *directory* is called textures.
+  const named = /^(texture|skin|player|main)\.(png|jpg|jpeg|webp)$/i;
+  const scored = images.map((image, index) => {
+    const base = (image.path.split('/').pop() || '').toLowerCase();
+    let score = 0;
+    if (named.test(base)) score += 100;
+    if (base.startsWith('texture')) score += 40;
+    if (/\.(png|jpg|jpeg|webp)$/i.test(base)) score += 5;
+    // Body parts and UI art, never the skin atlas.
+    if (/arrow|avatar|item|icon|effect|cape|elytra/i.test(base)) score -= 50;
+    return {image, score, index};
+  });
+  scored.sort((a, b) => b.score - a.score || a.index - b.index);
+  return scored[0].image.data;
+}
 function bedrock(value, images) {
   const geometry=value['minecraft:geometry']?.[0]||value;const bones=geometry.bones||[];
   const description=geometry.description||{};const resolution=[description.texture_width||geometry.texturewidth||64,description.texture_height||geometry.textureheight||64];
-  const map=texture(images.find(i=>/texture|skin|player/i.test(i.path))?.data || images[0]?.data);
+  const map=texture(primaryTexture(images));
   const root=new THREE.Group(), groups=new Map();let count=0;
   for(const bone of bones){const group=new THREE.Group();group.position.set(...vec(bone.pivot));rotate(group,bone.rotation);groups.set(bone.name,{group,bone});}
   for(const {group,bone} of groups.values()){
@@ -98,7 +151,7 @@ export async function renderThumbnail(payload, size = 512) {
     // 51 identical 7 KB thumbnails. Wait for the manager's queue to drain and
     // the images to decode before measuring or drawing.
     await texturesReady(model);
-    const bounds = new THREE.Box3().setFromObject(model);
+    const {bounds} = isolateBody(model);
     if (bounds.isEmpty()) throw new Error('模型几何数据为空');
     const center = bounds.getCenter(new THREE.Vector3()), extent = bounds.getSize(new THREE.Vector3());
     model.position.sub(center);
@@ -159,6 +212,48 @@ function isBlank(canvas) {
   for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 8) return false;
   return true;
 }
+/**
+ * Hide meshes parked far outside the body, and return {bounds, hidden}.
+ *
+ * Two distinct causes produce the same symptom: a genuine helper cube placed
+ * far away, and a broken export whose cube origins were written in the wrong
+ * space (one pack has 47 cubes at y=-8450 next to a skeleton at y=25). Either
+ * way a single stray mesh inflates Box3.setFromObject() to thousands of units
+ * and the camera backs off until the character is a sub-pixel dot. Measuring
+ * per-mesh and dropping the far tail keeps the model that IS drawable.
+ */
+function isolateBody(root) {
+  const THREE_Box3 = THREE.Box3;
+  const boxes = [];
+  root.updateMatrixWorld(true);
+  root.traverse(item => {
+    if (!item.isMesh || !item.geometry?.attributes?.position) return;
+    item.geometry.computeBoundingBox();
+    const box = item.geometry.boundingBox.clone().applyMatrix4(item.matrixWorld);
+    if (!Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) return;
+    boxes.push({mesh: item, box, center: box.getCenter(new THREE.Vector3())});
+  });
+  const bounds = new THREE_Box3();
+  if (!boxes.length) return {bounds, hidden: 0};
+
+  const median = axis => {
+    const values = boxes.map(b => b.center.getComponent(axis)).sort((a, b) => a - b);
+    return values[Math.floor(values.length / 2)];
+  };
+  const mid = [median(0), median(1), median(2)];
+  const distances = boxes.map(b => Math.hypot(b.center.x - mid[0], b.center.y - mid[1], b.center.z - mid[2]));
+  const sorted = [...distances].sort((a, b) => a - b);
+  const spread = sorted[Math.floor(sorted.length / 2)] || 1;
+  // Generous: covers a limb swung far out, excludes a cube thousands of units off.
+  const limit = Math.max(spread * 8, 2);
+
+  let hidden = 0;
+  boxes.forEach((entry, index) => {
+    if (distances[index] > limit) { entry.mesh.visible = false; hidden++; }
+    else bounds.union(entry.box);
+  });
+  return {bounds, hidden};
+}
 export function clear(){generation++;observer?.disconnect();paints.clear();for(const scene of scenes)dispose(scene);scenes.clear();}
 export function mount(items, request) {
   clear();const current=generation, queue=[];let active=0;
@@ -166,7 +261,7 @@ export function mount(items, request) {
     try{
       const payload=await request(`/admin/api/assets/${encodeURIComponent(item.model.asset_id)}/preview`);if(current!==generation)return;
       const model=await buildModel(payload);if(current!==generation){dispose(model);return;}
-      scenes.add(model);const bounds=new THREE.Box3().setFromObject(model);if(bounds.isEmpty())throw new Error('模型几何数据为空');
+      scenes.add(model);const bounds=isolateBody(model).bounds;if(bounds.isEmpty())throw new Error('模型几何数据为空');
       const center=bounds.getCenter(new THREE.Vector3()),size=bounds.getSize(new THREE.Vector3());model.position.sub(center);
       const scene=new THREE.Scene();scene.add(model,new THREE.AmbientLight(0xffffff,2));const light=new THREE.DirectionalLight(0xffffff,3);light.position.set(4,8,6);scene.add(light);
       const width=Math.max(item.visual.clientWidth,160),height=150;
