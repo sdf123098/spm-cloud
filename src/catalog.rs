@@ -92,7 +92,7 @@ fn load_page(
         .connection
         .lock()
         .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-    let mut statement=conn.prepare("SELECT a.asset_id,r.revision,r.name,r.format,r.raw_sha256,r.byte_length,a.visibility,a.owner_account_id
+    let mut statement=conn.prepare("SELECT a.asset_id,r.revision,r.name,r.format,r.raw_sha256,r.byte_length,a.visibility,a.owner_account_id,r.thumbnail_sha256,r.thumbnail_status
         FROM assets a JOIN available_asset_revisions r ON r.asset_id=a.asset_id AND r.revision=a.current_revision
         LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?1
         WHERE ((?2='mine' AND a.owner_account_id=?1)
@@ -106,15 +106,20 @@ fn load_page(
             params![account, scope, query, needle, after, limit + 1],
             |r| {
                 let owner: String = r.get(7)?;
-                let mut entry = serde_json::to_value(AssetSummary {
-                    asset_id: r.get(0)?,
-                    revision: r.get::<_, i64>(1)? as u64,
-                    name: r.get(2)?,
-                    format: r.get(3)?,
-                    raw_sha256: r.get(4)?,
-                    byte_length: r.get::<_, i64>(5)? as u64,
-                    visibility: r.get(6)?,
-                })
+                let mut entry = serde_json::to_value(
+                    AssetSummary {
+                        asset_id: r.get(0)?,
+                        revision: r.get::<_, i64>(1)? as u64,
+                        name: r.get(2)?,
+                        format: r.get(3)?,
+                        raw_sha256: r.get(4)?,
+                        byte_length: r.get::<_, i64>(5)? as u64,
+                        visibility: r.get(6)?,
+                        thumbnail: None,
+                        thumbnail_status: None,
+                    }
+                    .with_thumbnail(r.get(8)?, r.get(9)?),
+                )
                 .expect("asset summary serializes");
                 entry["owned"] = json!(owner == account);
                 entry["owner_account_id"] = json!(owner);
@@ -165,7 +170,7 @@ fn cached_page_is_current(
         .map(|n| format!("?{n}"))
         .collect::<Vec<_>>()
         .join(",");
-    let sql = format!("SELECT a.asset_id,r.revision,r.name,r.format,r.raw_sha256,r.byte_length,a.visibility,a.owner_account_id
+    let sql = format!("SELECT a.asset_id,r.revision,r.name,r.format,r.raw_sha256,r.byte_length,a.visibility,a.owner_account_id,r.thumbnail_sha256,r.thumbnail_status
         FROM assets a JOIN available_asset_revisions r ON r.asset_id=a.asset_id AND r.revision=a.current_revision
         LEFT JOIN asset_acl acl ON acl.asset_id=a.asset_id AND acl.account_id=?1
         WHERE a.asset_id IN ({placeholders}) AND ((?2='mine' AND a.owner_account_id=?1)
@@ -177,13 +182,39 @@ fn cached_page_is_current(
         .connection
         .lock()
         .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-    let rows = conn.prepare(&sql)?.query_map(parameters, |r| {
-        let id: String=r.get(0)?;
-        let matches=entries.iter().find(|entry|entry["asset_id"].as_str()==Some(id.as_str())).is_some_and(|entry| {
-            let actual: rusqlite::Result<Value> = (|| Ok(json!({"asset_id":id,"revision":r.get::<_,i64>(1)?,"name":r.get::<_,String>(2)?,"format":r.get::<_,String>(3)?,"raw_sha256":r.get::<_,String>(4)?,"byte_length":r.get::<_,i64>(5)?,"visibility":r.get::<_,String>(6)?,"owner_account_id":r.get::<_,String>(7)?,"owned":r.get::<_,String>(7)?==account})))();
-            actual.as_ref().is_ok_and(|actual|actual==entry)
-        });
-        Ok(matches)
-    })?.collect::<Result<Vec<_>,_>>()?;
+    let rows = conn
+        .prepare(&sql)?
+        .query_map(parameters, |r| {
+            let id: String = r.get(0)?;
+            let owner: String = r.get(7)?;
+            let matches = entries
+                .iter()
+                .find(|entry| entry["asset_id"].as_str() == Some(id.as_str()))
+                .is_some_and(|entry| {
+                    let built: rusqlite::Result<Value> = (|| {
+                        let mut actual = serde_json::to_value(
+                            AssetSummary {
+                                asset_id: id,
+                                revision: r.get::<_, i64>(1)? as u64,
+                                name: r.get(2)?,
+                                format: r.get(3)?,
+                                raw_sha256: r.get(4)?,
+                                byte_length: r.get::<_, i64>(5)? as u64,
+                                visibility: r.get(6)?,
+                                thumbnail: None,
+                                thumbnail_status: None,
+                            }
+                            .with_thumbnail(r.get(8)?, r.get(9)?),
+                        )
+                        .expect("asset summary serializes");
+                        actual["owned"] = json!(owner == account);
+                        actual["owner_account_id"] = json!(owner);
+                        Ok(actual)
+                    })();
+                    built.as_ref().is_ok_and(|actual| actual == entry)
+                });
+            Ok(matches)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows.len() == entries.len() && rows.iter().all(|v| *v))
 }

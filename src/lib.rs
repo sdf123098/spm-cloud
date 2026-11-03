@@ -20,6 +20,7 @@ pub mod preview;
 pub mod protocol;
 pub mod realtime;
 pub mod store;
+pub mod thumbnails;
 
 pub use config::CloudConfig;
 pub use store::CloudStore;

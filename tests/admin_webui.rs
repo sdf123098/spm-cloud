@@ -1479,6 +1479,289 @@ async fn public_default_private_owner_and_transfer_enforce_download_permissions(
         StatusCode::FORBIDDEN
     );
 }
+/// Minimal valid PNG: 1×1 transparent. Used as the thumbnail payload so the
+/// tests exercise the real byte path without a renderer.
+const PNG_1X1: [u8; 67] = [
+    0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D', b'R',
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0a, b'I', b'D', b'A', b'T', 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', 0xae,
+    0x42, 0x60, 0x82,
+];
+
+#[tokio::test]
+async fn thumbnails_are_queued_rendered_served_anonymously_and_hidden_when_private() {
+    let s = server().await;
+    let client = Client::new();
+    let public = upload(&client, &s, "thumb-public", r#"{"elements":[]}"#).await;
+    assert_eq!(public.status(), StatusCode::CREATED);
+    let private = client
+        .post(format!("{}/admin/api/assets", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .header("Idempotency-Key", uuid::Uuid::new_v4().to_string())
+        .header("X-Asset-Id", "thumb-private")
+        .header("X-Asset-Name", "model")
+        .header("X-Asset-Format", "bbmodel")
+        .header("X-Asset-Visibility", "PRIVATE")
+        .header(
+            "X-Asset-Owner-Account",
+            s.state.config.bootstrap_account_id.clone(),
+        )
+        .body(r#"{"elements":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(private.status(), StatusCode::CREATED);
+
+    // A fresh revision is queued, not failed, and advertises no URL yet.
+    let page: Value = client
+        .get(format!("{}/v1/assets?scope=accessible&limit=10", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["asset_id"] == "thumb-public")
+        .unwrap();
+    assert_eq!(entry["thumbnail_status"], "pending");
+    assert!(entry["thumbnail"].is_null());
+
+    let queue: Value = client
+        .get(format!("{}/admin/api/thumbnails/pending?limit=10", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        queue["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["asset_id"] == "thumb-public")
+    );
+
+    // Unrendered thumbnail: 404, not an error the client has to interpret.
+    let thumbnail_url = format!(
+        "{}/v1/public/assets/thumb-public/revisions/1/thumbnail",
+        s.url
+    );
+    assert_eq!(
+        client.get(&thumbnail_url).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    // Non-PNG bytes are rejected before they reach the object store.
+    assert_eq!(
+        client
+            .put(format!(
+                "{}/admin/api/assets/thumb-public/revisions/1/thumbnail",
+                s.url
+            ))
+            .bearer_auth(OWNER_TOKEN)
+            .body("not a png")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let stored = client
+        .put(format!(
+            "{}/admin/api/assets/thumb-public/revisions/1/thumbnail",
+            s.url
+        ))
+        .bearer_auth(OWNER_TOKEN)
+        .body(PNG_1X1.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stored.status(), StatusCode::OK);
+
+    // Anonymous, long-cacheable, honest content type, digest-based ETag.
+    let served = client.get(&thumbnail_url).send().await.unwrap();
+    assert_eq!(served.status(), StatusCode::OK);
+    assert_eq!(served.headers()["content-type"], "image/png");
+    assert_eq!(
+        served.headers()["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    let etag = served.headers()["etag"].to_str().unwrap().to_owned();
+    assert!(etag.trim_matches('"').len() == 64);
+    assert_eq!(served.bytes().await.unwrap().as_ref(), PNG_1X1.as_slice());
+    assert_eq!(
+        client
+            .get(&thumbnail_url)
+            .header("If-None-Match", &etag)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_MODIFIED
+    );
+
+    // The listing now carries the real URL.
+    let page: Value = client
+        .get(format!("{}/v1/assets?scope=accessible&limit=10", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["asset_id"] == "thumb-public")
+        .unwrap();
+    assert_eq!(entry["thumbnail_status"], "ready");
+    assert_eq!(
+        entry["thumbnail"],
+        "/v1/public/assets/thumb-public/revisions/1/thumbnail"
+    );
+
+    // A rendered thumbnail on a PRIVATE asset stays behind the authenticated route.
+    assert_eq!(
+        client
+            .put(format!(
+                "{}/admin/api/assets/thumb-private/revisions/1/thumbnail",
+                s.url
+            ))
+            .bearer_auth(OWNER_TOKEN)
+            .body(PNG_1X1.to_vec())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .get(format!(
+                "{}/v1/public/assets/thumb-private/revisions/1/thumbnail",
+                s.url
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND,
+        "anonymous thumbnail route must not confirm a private asset exists"
+    );
+    assert_eq!(
+        client
+            .put(format!(
+                "{}/admin/api/assets/thumb-private/revisions/1/thumbnail",
+                s.url
+            ))
+            .bearer_auth(OWNER_TOKEN)
+            .header("X-Asset-Visibility", "PUBLIC")
+            .body(PNG_1X1.to_vec())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+        "re-uploading the same bytes is idempotent"
+    );
+}
+
+#[tokio::test]
+async fn failed_thumbnails_leave_the_queue_and_stop_advertising_a_url() {
+    let s = server().await;
+    let client = Client::new();
+    assert_eq!(
+        upload(&client, &s, "thumb-broken", r#"{"elements":[]}"#)
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        client
+            .post(format!(
+                "{}/admin/api/assets/thumb-broken/revisions/1/thumbnail/failed",
+                s.url
+            ))
+            .bearer_auth(OWNER_TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let queue: Value = client
+        .get(format!("{}/admin/api/thumbnails/pending?limit=50", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !queue["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["asset_id"] == "thumb-broken"),
+        "a failed render must not be retried every night"
+    );
+    let page: Value = client
+        .get(format!("{}/v1/assets?scope=accessible&limit=10", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["asset_id"] == "thumb-broken")
+        .unwrap();
+    assert_eq!(entry["thumbnail_status"], "failed");
+    assert!(entry["thumbnail"].is_null());
+}
+
+#[tokio::test]
+async fn thumbnail_routes_require_an_administrator() {
+    let s = server().await;
+    let client = Client::new();
+    assert_eq!(
+        client
+            .get(format!("{}/admin/api/thumbnails/pending", s.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .put(format!(
+                "{}/admin/api/assets/whatever/revisions/1/thumbnail",
+                s.url
+            ))
+            .body(PNG_1X1.to_vec())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 #[tokio::test]
 async fn oauth_start_protects_binding_and_emits_pkce_browser_cookie() {
     let s = server().await;

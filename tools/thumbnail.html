@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>SPM Cloud thumbnail renderer</title>
+<style>
+  /* The canvas is the deliverable; the page renders it off-screen but visible to
+     layout so the WebGL drawing buffer is not zero-sized. */
+  html,body{margin:0;background:#141821;}
+  #stage{width:512px;height:512px}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<!-- preview.bundle.js is an IIFE that assigns window.SPMPreview — the same artefact
+     the admin UI loads. A classic script keeps the renderer honest: what Chromium
+     draws here comes from the shipped preview code, not a parallel build. -->
+<script src="/preview.bundle.js"></script>
+<script>
+(function () {
+const params = new URLSearchParams(location.search);
+const reporter = (state, detail) => {
+  window.__THUMBNAIL_STATE__ = state;
+  window.__THUMBNAIL_DETAIL__ = detail || '';
+};
+
+(async () => {
+  reporter('loading');
+  try {
+    if (!window.SPMPreview || typeof window.SPMPreview.renderThumbnail !== 'function') {
+      throw new Error('preview bundle is stale: rebuild web/preview.bundle.js (npm run build)');
+    }
+    const payloadUrl = params.get('payload');
+    if (!payloadUrl) throw new Error('missing payload URL');
+    // `payload` is a pre-fetched preview JSON (absolute path on disk, served by
+    // the runner) so this page needs no credentials of its own.
+    const response = await fetch(payloadUrl, {cache: 'no-store'});
+    if (!response.ok) throw new Error(`preview payload answered ${response.status}`);
+    const payload = await response.json();
+    const dataUrl = await window.SPMPreview.renderThumbnail(payload, Number(params.get('size')) || 512);
+    const stage = document.getElementById('stage');
+    const image = new Image();
+    image.src = dataUrl;
+    await image.decode();
+    stage.append(image);
+    reporter('ready', dataUrl.length);
+    window.__THUMBNAIL_DATA_URL__ = dataUrl;
+  } catch (error) {
+    reporter('failed', String((error && error.message) || error));
+  }
+})();
+})();
+</script>
+</body>
+</html>

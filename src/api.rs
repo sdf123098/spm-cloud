@@ -289,8 +289,16 @@ pub fn router(state: AppState) -> Router {
             get(download_asset),
         )
         .route(
+            "/v1/assets/{asset_id}/revisions/{revision}/thumbnail",
+            get(download_asset_thumbnail),
+        )
+        .route(
             "/v1/public/assets/{asset_id}/revisions/{revision}/content",
             get(download_public_asset),
+        )
+        .route(
+            "/v1/public/assets/{asset_id}/revisions/{revision}/thumbnail",
+            get(download_public_thumbnail),
         )
         .route("/v1/targets", post(create_target))
         .route("/v1/scopes/{scope_id}/targets", get(list_targets))
@@ -359,8 +367,12 @@ async fn api_headers(request: axum::extract::Request, next: axum::middleware::Ne
     let request_is_admin = request.uri().path().starts_with("/admin");
     let request_is_font = request.uri().path().starts_with("/admin/fonts/");
     // Anonymous, content-addressed downloads are safe to cache across users.
+    // Thumbnails ride the same contract: same host, same immutability, same
+    // anonymous visibility check, so they share the allowlist instead of
+    // growing a second cache-control branch that could drift.
     let request_is_public_asset = request.uri().path().starts_with("/v1/public/assets/")
-        && request.uri().path().ends_with("/content");
+        && (request.uri().path().ends_with("/content")
+            || request.uri().path().ends_with("/thumbnail"));
     let mut response = if request.method() == axum::http::Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -386,6 +398,21 @@ async fn api_headers(request: axum::extract::Request, next: axum::middleware::Ne
     );
     headers.insert("access-control-allow-headers", HeaderValue::from_static("Authorization, Content-Type, X-SPM-Offline-Session, Idempotency-Key, Range, If-None-Match, X-Asset-Id, X-Asset-Name, X-Asset-Format, X-Asset-Sha256, X-Asset-Visibility, X-Asset-Metadata-Encoding"));
     response
+}
+
+/// Percent-encode one URL path segment so an asset id containing spaces, `#`,
+/// `?` or CJK still forms a usable link. Unreserved characters are kept
+/// verbatim so ids stay readable in logs.
+pub(crate) fn path_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -1132,6 +1159,28 @@ async fn download_public_asset(
     asset_response(&headers, content).await
 }
 
+async fn download_asset_thumbnail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((asset_id, revision)): Path<(String, u64)>,
+) -> Result<Response, CloudError> {
+    let account = authenticate(&state, &headers)?;
+    let content = state.store.asset_thumbnail(&account, &asset_id, revision)?;
+    asset_response(&headers, content).await
+}
+
+/// Anonymous thumbnail route. Same visibility rule as the content route: a
+/// PRIVATE asset and a not-yet-rendered thumbnail both answer 404, so the
+/// caller learns nothing about either, and the client falls back to its icon.
+async fn download_public_thumbnail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((asset_id, revision)): Path<(String, u64)>,
+) -> Result<Response, CloudError> {
+    let content = state.store.public_asset_thumbnail(&asset_id, revision)?;
+    asset_response(&headers, content).await
+}
+
 async fn asset_response(
     headers: &HeaderMap,
     content: crate::store::AssetContent,
@@ -1164,7 +1213,7 @@ async fn asset_response(
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, length.to_string())
         .header("x-asset-format", content.format)
-        .header(header::CONTENT_TYPE, "application/octet-stream");
+        .header(header::CONTENT_TYPE, content.content_type);
     if partial {
         response = response.header(
             header::CONTENT_RANGE,

@@ -38,59 +38,79 @@ async fn preview(
     let path = state.store.object_path_for_sha(&sha);
     let settings = state.runtime_config().moderation;
     let limiter = state.processing_slots.clone();
-    // Keep worker and permit together when a browser disconnects mid-decode.
+    // Keep the permit inside the task so a browser disconnecting mid-decode
+    // releases the slot with the worker instead of leaking it.
     let result = tokio::spawn(async move {
-        let permit = limiter.acquire().await;
-        let owned = path.clone();
-        let first = tokio::task::spawn_blocking(move || collect(&owned))
-            .await
-            .map_err(|e| CloudError::Internal(e.into()))?;
-        if let Ok(result) = first {
-            return Ok(result);
-        }
-        let parser = settings.ysm_parser_path.ok_or_else(|| {
-            CloudError::invalid_metadata("模型无法直接预览；请在服务器配置中设置 YSMParser 路径")
-        })?;
-        let scratch = tempfile::tempdir()?;
-        let input = scratch.path().join("input");
-        let output = scratch.path().join("output");
-        tokio::fs::create_dir(&input).await?;
-        tokio::fs::create_dir(&output).await?;
-        tokio::fs::copy(&path, input.join("model.ysm")).await?;
-        let mut command = tokio::process::Command::new(parser);
-        command
-            .arg("-i")
-            .arg(&input)
-            .arg("-o")
-            .arg(&output)
-            .args(["-j", "1"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x08000000);
-        let mut child = command.spawn()?;
-        let status = tokio::time::timeout(
-            std::time::Duration::from_secs(settings.timeout_seconds),
-            child.wait(),
-        )
-        .await
-        .map_err(|_| CloudError::invalid_metadata("模型解码超时"))??;
-        if !status.success() {
-            return Err(CloudError::invalid_metadata("YSMParser 无法解码此模型"));
-        }
-        tokio::task::spawn_blocking(move || {
-            let _scratch = scratch;
-            let _permit = permit;
-            collect(&output)
-        })
-        .await
-        .map_err(|e| CloudError::Internal(e.into()))?
+        let _permit = limiter.acquire().await;
+        decode_model(&path, &settings).await
     })
     .await
     .map_err(|e| CloudError::Internal(e.into()))??;
     Ok(Json(result))
+}
+
+/// Decode a model path into the preview payload shared with the browser.
+///
+/// `collect` handles archives and plain JSON/GLB; anything it cannot read goes to
+/// the configured YSMParser. Returning the scratch directory alongside the
+/// payload keeps parser output alive for the caller's lifetime.
+pub(crate) async fn decode_model(
+    path: &FilePath,
+    settings: &crate::moderation::ModerationSettings,
+) -> Result<Value, CloudError> {
+    let owned = path.to_owned();
+    let first = tokio::task::spawn_blocking(move || collect(&owned))
+        .await
+        .map_err(|e| CloudError::Internal(e.into()))?;
+    match first {
+        Ok(result) => Ok(result),
+        Err(_) => decode_with_parser(path, settings)
+            .await
+            .map(|(result, _scratch)| result),
+    }
+}
+
+async fn decode_with_parser(
+    path: &FilePath,
+    settings: &crate::moderation::ModerationSettings,
+) -> Result<(Value, tempfile::TempDir), CloudError> {
+    let parser = settings.ysm_parser_path.clone().ok_or_else(|| {
+        CloudError::invalid_metadata("模型无法直接预览；请在服务器配置中设置 YSMParser 路径")
+    })?;
+    let scratch = tempfile::tempdir()?;
+    let input = scratch.path().join("input");
+    let output = scratch.path().join("output");
+    tokio::fs::create_dir(&input).await?;
+    tokio::fs::create_dir(&output).await?;
+    tokio::fs::copy(path, input.join("model.ysm")).await?;
+    let mut command = tokio::process::Command::new(parser);
+    command
+        .arg("-i")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .args(["-j", "1"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let mut child = command.spawn()?;
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(settings.timeout_seconds),
+        child.wait(),
+    )
+    .await
+    .map_err(|_| CloudError::invalid_metadata("模型解码超时"))??;
+    if !status.success() {
+        return Err(CloudError::invalid_metadata("YSMParser 无法解码此模型"));
+    }
+    let owned = output.clone();
+    let payload = tokio::task::spawn_blocking(move || collect(&owned))
+        .await
+        .map_err(|e| CloudError::Internal(e.into()))??;
+    Ok((payload, scratch))
 }
 fn collect(path: &FilePath) -> Result<Value, CloudError> {
     let mut documents = Vec::new();

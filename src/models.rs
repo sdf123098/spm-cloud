@@ -44,6 +44,53 @@ pub struct AssetSummary {
     pub byte_length: u64,
     #[serde(default = "private_asset_visibility")]
     pub visibility: String,
+    /// Relative URL of the cached 512×512 preview, present only when ready.
+    #[serde(default)]
+    pub thumbnail: Option<String>,
+    /// `ready`, `pending` or `failed`; absent rows predate thumbnail generation.
+    #[serde(default)]
+    pub thumbnail_status: Option<String>,
+}
+
+impl AssetSummary {
+    /// Fills the derived thumbnail fields from the row's raw columns.
+    ///
+    /// The wire contract has exactly three states (`ready`, `pending`, `failed`),
+    /// so a NULL status — every row that predates thumbnail generation, plus every
+    /// fresh upload — is reported as `pending`: it is queued work, not a failure.
+    /// A `ready` row whose bytes are missing degrades to `pending` rather than
+    /// advertising a URL that would 404.
+    ///
+    /// The URL mirrors visibility: PUBLIC assets are served by the anonymous
+    /// CDN-cacheable route, PRIVATE ones by the authenticated route so an owner
+    /// still sees previews of their own models.
+    pub fn with_thumbnail(
+        mut self,
+        thumbnail_sha256: Option<String>,
+        thumbnail_status: Option<String>,
+    ) -> Self {
+        let ready = thumbnail_status.as_deref() == Some("ready") && thumbnail_sha256.is_some();
+        self.thumbnail = ready.then(|| {
+            let prefix = if self.visibility == "PUBLIC" {
+                "/v1/public/assets"
+            } else {
+                "/v1/assets"
+            };
+            format!(
+                "{prefix}/{}/revisions/{}/thumbnail",
+                crate::api::path_segment(&self.asset_id),
+                self.revision
+            )
+        });
+        self.thumbnail_status = Some(if ready {
+            "ready".to_owned()
+        } else if thumbnail_status.as_deref() == Some("failed") {
+            "failed".to_owned()
+        } else {
+            "pending".to_owned()
+        });
+        self
+    }
 }
 
 fn private_asset_visibility() -> String {

@@ -43,6 +43,8 @@ pub struct AssetContent {
     pub raw_sha256: String,
     pub name: String,
     pub format: String,
+    /// Wire media type; model bytes are opaque, thumbnails are PNG.
+    pub content_type: &'static str,
 }
 
 #[derive(Clone, Debug)]
@@ -402,6 +404,27 @@ impl CloudStore {
                 ALTER TABLE asset_revisions_v6 RENAME TO asset_revisions;
                 CREATE INDEX idx_asset_revisions_sha ON asset_revisions(raw_sha256);
                 COMMIT;")?;
+        }
+        // Thumbnails are optional derived data: an asset whose render failed keeps
+        // working, so every column is nullable and no backfill is required here.
+        for column in [
+            "thumbnail_sha256 TEXT",
+            "thumbnail_bytes INTEGER",
+            "thumbnail_path TEXT",
+            "thumbnail_status TEXT",
+        ] {
+            let name = column.split(' ').next().expect("column name");
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('asset_revisions') WHERE name = ?1)",
+                [name],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                connection.execute(
+                    &format!("ALTER TABLE asset_revisions ADD COLUMN {column}"),
+                    [],
+                )?;
+            }
         }
         connection.execute_batch("CREATE TABLE IF NOT EXISTS player_canonical_names(identity_id TEXT PRIMARY KEY, name TEXT NOT NULL); CREATE TABLE IF NOT EXISTS player_appearances(identity_id TEXT PRIMARY KEY, entity_uuid TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, asset_id TEXT, asset_revision INTEGER, raw_sha256 TEXT, texture_id TEXT, updated_at INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS player_appearances_entity ON player_appearances(entity_uuid,updated_at); CREATE TABLE IF NOT EXISTS entity_model_shares(target_id TEXT PRIMARY KEY, shared_by_account_id TEXT NOT NULL, asset_id TEXT NOT NULL, asset_revision INTEGER NOT NULL, raw_sha256 TEXT NOT NULL); CREATE TABLE IF NOT EXISTS player_motion(identity_id TEXT PRIMARY KEY REFERENCES identities(identity_id) ON DELETE CASCADE, motion_json TEXT NOT NULL);")?;
         crate::game_auth::migrate(connection)?;
@@ -1969,7 +1992,7 @@ impl CloudStore {
             .connection
             .lock()
             .map_err(|_| CloudError::configuration("database lock poisoned"))?;
-        let mut stmt = conn.prepare("SELECT r.asset_id, r.revision, r.name, r.format, r.raw_sha256, r.byte_length, a.visibility FROM available_asset_revisions r JOIN assets a ON a.asset_id = r.asset_id LEFT JOIN asset_acl acl ON acl.asset_id = r.asset_id AND acl.account_id = ?1 WHERE a.visibility = 'PUBLIC' OR acl.permission IN ('manage', 'use', 'discover') ORDER BY r.asset_id, r.revision")?;
+        let mut stmt = conn.prepare("SELECT r.asset_id, r.revision, r.name, r.format, r.raw_sha256, r.byte_length, a.visibility, r.thumbnail_sha256, r.thumbnail_status FROM available_asset_revisions r JOIN assets a ON a.asset_id = r.asset_id LEFT JOIN asset_acl acl ON acl.asset_id = r.asset_id AND acl.account_id = ?1 WHERE a.visibility = 'PUBLIC' OR acl.permission IN ('manage', 'use', 'discover') ORDER BY r.asset_id, r.revision")?;
         let rows = stmt.query_map([account_id], |row| {
             Ok(AssetSummary {
                 asset_id: row.get(0)?,
@@ -1979,6 +2002,8 @@ impl CloudStore {
                 raw_sha256: row.get(4)?,
                 byte_length: row.get::<_, i64>(5)? as u64,
                 visibility: row.get(6)?,
+                thumbnail: row.get(7)?,
+                thumbnail_status: row.get(8)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -2156,6 +2181,10 @@ impl CloudStore {
             raw_sha256: sha256.to_owned(),
             byte_length,
             visibility: visibility.to_owned(),
+            // A new revision has never been rendered; the batch renderer picks it
+            // up from `thumbnail_status IS NULL`.
+            thumbnail: None,
+            thumbnail_status: None,
         };
         if let Some((request_id, request_hash)) = idempotency {
             let response_json = serde_json::to_string(&summary).map_err(|_| {
@@ -2233,7 +2262,50 @@ impl CloudStore {
             // caller must not learn that a private asset exists.
             return Err(CloudError::NotFound);
         }
-        conn.query_row("SELECT object_path, byte_length, raw_sha256, name, format FROM available_asset_revisions WHERE asset_id = ?1 AND revision = ?2", params![asset_id, revision as i64], |row| Ok(AssetContent { path: PathBuf::from(row.get::<_, String>(0)?), length: row.get::<_, i64>(1)? as u64, raw_sha256: row.get(2)?, name: row.get(3)?, format: row.get(4)? })).optional()?.ok_or(CloudError::NotFound)
+        conn.query_row("SELECT object_path, byte_length, raw_sha256, name, format FROM available_asset_revisions WHERE asset_id = ?1 AND revision = ?2", params![asset_id, revision as i64], |row| Ok(AssetContent { path: PathBuf::from(row.get::<_, String>(0)?), length: row.get::<_, i64>(1)? as u64, raw_sha256: row.get(2)?, name: row.get(3)?, format: row.get(4)?, content_type: "application/octet-stream" })).optional()?.ok_or(CloudError::NotFound)
+    }
+
+    /// Thumbnail bytes for a PUBLIC asset revision, or NotFound when the asset is
+    /// private, unrendered (`thumbnail_status` is not `ready`) or absent. One
+    /// undifferentiated 404 on purpose: the anonymous route must not reveal which
+    /// of those is true. `raw_sha256` on the returned content is the *thumbnail's*
+    /// digest, so the ETag a client pins names the image, not the model.
+    pub fn public_asset_thumbnail(
+        &self,
+        asset_id: &str,
+        revision: u64,
+    ) -> Result<AssetContent, CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let public: bool = conn
+            .query_row(
+                "SELECT visibility = 'PUBLIC' FROM assets WHERE asset_id = ?1",
+                [asset_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !public {
+            return Err(CloudError::NotFound);
+        }
+        conn.query_row(
+            "SELECT thumbnail_path, thumbnail_bytes, thumbnail_sha256, name FROM available_asset_revisions WHERE asset_id = ?1 AND revision = ?2 AND thumbnail_status = 'ready' AND thumbnail_path IS NOT NULL",
+            params![asset_id, revision as i64],
+            |row| {
+                Ok(AssetContent {
+                    path: PathBuf::from(row.get::<_, String>(0)?),
+                    length: row.get::<_, i64>(1)? as u64,
+                    raw_sha256: row.get(2)?,
+                    name: row.get(3)?,
+                    format: "png".to_owned(),
+                    content_type: "image/png",
+                })
+            },
+        )
+        .optional()?
+        .ok_or(CloudError::NotFound)
     }
 
     pub fn asset_content(
@@ -2260,7 +2332,114 @@ impl CloudStore {
         {
             return Err(CloudError::AccessDenied);
         }
-        conn.query_row("SELECT object_path, byte_length, raw_sha256, name, format FROM available_asset_revisions WHERE asset_id = ?1 AND revision = ?2", params![asset_id, revision as i64], |row| Ok(AssetContent { path: PathBuf::from(row.get::<_, String>(0)?), length: row.get::<_, i64>(1)? as u64, raw_sha256: row.get(2)?, name: row.get(3)?, format: row.get(4)? })).optional()?.ok_or(CloudError::NotFound)
+        conn.query_row("SELECT object_path, byte_length, raw_sha256, name, format FROM available_asset_revisions WHERE asset_id = ?1 AND revision = ?2", params![asset_id, revision as i64], |row| Ok(AssetContent { path: PathBuf::from(row.get::<_, String>(0)?), length: row.get::<_, i64>(1)? as u64, raw_sha256: row.get(2)?, name: row.get(3)?, format: row.get(4)?, content_type: "application/octet-stream" })).optional()?.ok_or(CloudError::NotFound)
+    }
+
+    /// Authenticated twin of `asset_content` for thumbnails: PUBLIC is open to
+    /// any caller, PRIVATE needs `manage`/`render_read` like the model bytes do.
+    /// A PRIVATE asset with no rendered thumbnail is NotFound, same as PUBLIC.
+    pub fn asset_thumbnail(
+        &self,
+        account_id: &str,
+        asset_id: &str,
+        revision: u64,
+    ) -> Result<AssetContent, CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let public: bool = conn
+            .query_row(
+                "SELECT visibility = 'PUBLIC' FROM assets WHERE asset_id = ?1",
+                [asset_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !public
+            && asset_permission(&conn, asset_id, account_id)?
+                .is_none_or(|permission| !matches!(permission.as_str(), "manage" | "render_read"))
+        {
+            return Err(CloudError::AccessDenied);
+        }
+        conn.query_row(
+            "SELECT thumbnail_path, thumbnail_bytes, thumbnail_sha256, name FROM available_asset_revisions WHERE asset_id = ?1 AND revision = ?2 AND thumbnail_status = 'ready' AND thumbnail_path IS NOT NULL",
+            params![asset_id, revision as i64],
+            |row| {
+                Ok(AssetContent {
+                    path: PathBuf::from(row.get::<_, String>(0)?),
+                    length: row.get::<_, i64>(1)? as u64,
+                    raw_sha256: row.get(2)?,
+                    name: row.get(3)?,
+                    format: "png".to_owned(),
+                    content_type: "image/png",
+                })
+            },
+        )
+        .optional()?
+        .ok_or(CloudError::NotFound)
+    }
+
+    /// Record a rendered thumbnail for one revision.
+    ///
+    /// Rejects the row when the revision is not the asset's current one: the queue
+    /// is keyed on `current_revision`, so a stale renderer result must not attach
+    /// an image of the previous model to the new revision.
+    pub fn record_thumbnail(
+        &self,
+        asset_id: &str,
+        revision: u64,
+        sha256: &str,
+        byte_length: u64,
+        path: &str,
+    ) -> Result<(), CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let changed = conn.execute(
+            "UPDATE asset_revisions SET thumbnail_sha256 = ?3, thumbnail_bytes = ?4, thumbnail_path = ?5, thumbnail_status = 'ready' WHERE asset_id = ?1 AND revision = ?2",
+            params![asset_id, revision as i64, sha256, byte_length as i64, path],
+        )?;
+        if changed == 0 {
+            return Err(CloudError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Mark a revision as unrenderable so the queue stops retrying it.
+    pub fn fail_thumbnail(&self, asset_id: &str, revision: u64) -> Result<(), CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let changed = conn.execute(
+            "UPDATE asset_revisions SET thumbnail_status = 'failed' WHERE asset_id = ?1 AND revision = ?2",
+            params![asset_id, revision as i64],
+        )?;
+        if changed == 0 {
+            return Err(CloudError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// Digest and on-disk path of an existing thumbnail, for the admin view.
+    pub fn thumbnail_record(
+        &self,
+        asset_id: &str,
+        revision: u64,
+    ) -> Result<(String, PathBuf), CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        conn.query_row(
+            "SELECT thumbnail_sha256, thumbnail_path FROM asset_revisions WHERE asset_id = ?1 AND revision = ?2 AND thumbnail_status = 'ready'",
+            params![asset_id, revision as i64],
+            |row| Ok((row.get::<_, String>(0)?, PathBuf::from(row.get::<_, String>(1)?))),
+        )
+        .optional()?
+        .ok_or(CloudError::NotFound)
     }
 
     pub fn set_asset_visibility(
@@ -2295,8 +2474,8 @@ impl CloudStore {
             params![visibility, asset_id],
         )?;
         let summary = tx.query_row(
-            "SELECT r.asset_id, r.revision, r.name, r.format, r.raw_sha256, r.byte_length, a.visibility FROM assets a JOIN asset_revisions r ON r.asset_id = a.asset_id AND r.revision = a.current_revision WHERE a.asset_id = ?1",
-            [asset_id], |row| Ok(AssetSummary { asset_id: row.get(0)?, revision: row.get::<_, i64>(1)? as u64, name: row.get(2)?, format: row.get(3)?, raw_sha256: row.get(4)?, byte_length: row.get::<_, i64>(5)? as u64, visibility: row.get(6)? }),
+            "SELECT r.asset_id, r.revision, r.name, r.format, r.raw_sha256, r.byte_length, a.visibility, r.thumbnail_sha256, r.thumbnail_status FROM assets a JOIN asset_revisions r ON r.asset_id = a.asset_id AND r.revision = a.current_revision WHERE a.asset_id = ?1",
+            [asset_id], |row| Ok(AssetSummary { asset_id: row.get(0)?, revision: row.get::<_, i64>(1)? as u64, name: row.get(2)?, format: row.get(3)?, raw_sha256: row.get(4)?, byte_length: row.get::<_, i64>(5)? as u64, visibility: row.get(6)?, thumbnail: None, thumbnail_status: None }.with_thumbnail(row.get(7)?, row.get(8)?)),
         ).optional()?.ok_or(CloudError::NotFound)?;
         tx.commit()?;
         Ok(summary)
@@ -3012,7 +3191,15 @@ mod tests {
                 .unwrap(),
             "PRIVATE"
         );
-        connection.execute("INSERT INTO asset_revisions SELECT asset_id, 2, name, format, raw_sha256, byte_length, object_path, created_at FROM asset_revisions WHERE revision = 1", []).unwrap();
+        // Column lists are explicit: the table gained nullable thumbnail columns,
+        // and a bare positional INSERT would break every time it grows.
+        connection.execute("INSERT INTO asset_revisions(asset_id, revision, name, format, raw_sha256, byte_length, object_path, created_at) SELECT asset_id, 2, name, format, raw_sha256, byte_length, object_path, created_at FROM asset_revisions WHERE revision = 1", []).unwrap();
+        // Derived thumbnail columns are additive and nullable: a revision written
+        // before the migration must read back as "queued", not break the row.
+        let thumbnails: (Option<String>, Option<i64>, Option<String>) = connection
+            .query_row("SELECT thumbnail_sha256, thumbnail_bytes, thumbnail_status FROM asset_revisions WHERE asset_id = 'old-model' AND revision = 2", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap();
+        assert_eq!(thumbnails, (None, None, None));
         assert!(
             connection
                 .execute(
@@ -3022,7 +3209,7 @@ mod tests {
                 .is_err(),
             "composite primary key remains unique"
         );
-        assert!(connection.execute("INSERT INTO asset_revisions SELECT 'missing-asset', 1, name, format, raw_sha256, byte_length, object_path, created_at FROM asset_revisions WHERE revision = 1", []).is_err(), "asset foreign key survives migration");
+        assert!(connection.execute("INSERT INTO asset_revisions(asset_id, revision, name, format, raw_sha256, byte_length, object_path, created_at) SELECT 'missing-asset', 1, name, format, raw_sha256, byte_length, object_path, created_at FROM asset_revisions WHERE revision = 1", []).is_err(), "asset foreign key survives migration");
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM pragma_index_list('asset_revisions') WHERE name = 'idx_asset_revisions_sha' AND \"unique\" = 0", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     }
 

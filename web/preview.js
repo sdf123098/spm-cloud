@@ -84,6 +84,36 @@ export async function buildModel(payload) {
   return document.value.elements?bbmodel(document.value,payload.images):bedrock(document.value,payload.images);
 }
 function dispose(root){root.traverse(item=>{item.geometry?.dispose();for(const mat of (Array.isArray(item.material)?item.material:[item.material])){mat?.map?.dispose();mat?.dispose();}});}
+
+// Square, off-screen render of one payload, used by tools/thumbnail.html and the
+// batch renderer. Deliberately shares buildModel/lighting/framing with mount()
+// so the stored thumbnail matches what the admin card eventually shows; a
+// separate code path would silently drift as the preview evolves.
+export async function renderThumbnail(payload, size = 512) {
+  const model = await buildModel(payload);
+  try {
+    const bounds = new THREE.Box3().setFromObject(model);
+    if (bounds.isEmpty()) throw new Error('模型几何数据为空');
+    const center = bounds.getCenter(new THREE.Vector3()), extent = bounds.getSize(new THREE.Vector3());
+    model.position.sub(center);
+    const scene = new THREE.Scene();
+    scene.add(model, new THREE.AmbientLight(0xffffff, 2));
+    const light = new THREE.DirectionalLight(0xffffff, 3);light.position.set(4, 8, 6);scene.add(light);
+    const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 10000);
+    const radius = Math.max(extent.length() / 2, 0.1);
+    const distance = radius / Math.sin(camera.fov * Math.PI / 360) * 1.12;
+    // Same three-quarter view as the card: faces -Z, camera slightly left and above.
+    camera.position.set(-distance * 0.25, distance * 0.12, -distance);
+    camera.lookAt(0, 0, 0);
+    const square = new THREE.WebGLRenderer({alpha: true, antialias: true, preserveDrawingBuffer: true});
+    square.setPixelRatio(1);
+    square.setSize(size, size, false);
+    square.render(scene, camera);
+    return square.domElement.toDataURL('image/png');
+  } finally {
+    dispose(model);
+  }
+}
 export function clear(){generation++;observer?.disconnect();paints.clear();for(const scene of scenes)dispose(scene);scenes.clear();}
 export function mount(items, request) {
   clear();const current=generation, queue=[];let active=0;

@@ -130,6 +130,7 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/api/audit", get(audit))
         .merge(crate::maintenance::routes())
         .merge(crate::preview::routes())
+        .merge(crate::thumbnails::routes())
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, guard))
 }

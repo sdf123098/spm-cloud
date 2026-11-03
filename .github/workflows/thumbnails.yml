@@ -1,0 +1,68 @@
+name: Thumbnail renderer
+
+# The Rust suite and `web/npm test` both stop at "the payload serialises". Only a
+# real browser proves that preview.bundle.js turns it into pixels, and only a real
+# server proves the cache headers and the 404 rules. This job runs both.
+
+on:
+  push:
+    paths:
+      - 'tools/**'
+      - 'web/preview.js'
+      - 'web/preview.bundle.js'
+      - 'src/thumbnails.rs'
+      - 'src/preview.rs'
+      - 'src/models.rs'
+      - 'src/catalog.rs'
+      - '.github/workflows/thumbnails.yml'
+  pull_request:
+    paths:
+      - 'tools/**'
+      - 'web/preview.js'
+      - 'web/preview.bundle.js'
+      - 'src/thumbnails.rs'
+      - 'src/preview.rs'
+      - 'src/models.rs'
+      - 'src/catalog.rs'
+      - '.github/workflows/thumbnails.yml'
+  workflow_dispatch:
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # preview.bundle.js is a committed build artefact: a stale one ships a
+      # renderer that silently lacks the newest code, and every thumbnail is then
+      # drawn by an older preview. Rebuild and require zero diff.
+      - name: Rebuild the preview bundle and fail if it was stale
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+          git diff --exit-code preview.bundle.js preview.bundle.js.LEGAL.txt
+
+      - name: Install chromium for Playwright
+        working-directory: tools
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      # Renders a synthetic model through headless chromium and inspects the PNG
+      # header, so a broken WebGL context or a stale bundle fails here.
+      - name: Render a model in headless chromium
+        working-directory: tools
+        run: npm test
+
+      # Full loop: live server, real upload, renderer writing bytes back, anonymous
+      # CDN route serving them with the immutable cache header the client pins.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the service
+        run: cargo build --release --locked
+      - name: Thumbnail round trip against a live instance
+        run: python3 tools/thumbnail_e2e.py --binary target/release/spm-cloud
