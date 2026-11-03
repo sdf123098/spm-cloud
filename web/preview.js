@@ -92,6 +92,12 @@ function dispose(root){root.traverse(item=>{item.geometry?.dispose();for(const m
 export async function renderThumbnail(payload, size = 512) {
   const model = await buildModel(payload);
   try {
+    // Textures load asynchronously. Materials are `transparent: !!map`, so a
+    // frame drawn before the maps decode renders the whole model fully
+    // transparent — a valid PNG of nothing, which is exactly what shipped as
+    // 51 identical 7 KB thumbnails. Wait for the manager's queue to drain and
+    // the images to decode before measuring or drawing.
+    await texturesReady(model);
     const bounds = new THREE.Box3().setFromObject(model);
     if (bounds.isEmpty()) throw new Error('模型几何数据为空');
     const center = bounds.getCenter(new THREE.Vector3()), extent = bounds.getSize(new THREE.Vector3());
@@ -108,11 +114,50 @@ export async function renderThumbnail(payload, size = 512) {
     const square = new THREE.WebGLRenderer({alpha: true, antialias: true, preserveDrawingBuffer: true});
     square.setPixelRatio(1);
     square.setSize(size, size, false);
+    // Draw once, then read: a second render() before toDataURL() would publish a
+    // half-presented buffer (blank in a headless swiftshader context).
     square.render(scene, camera);
-    return square.domElement.toDataURL('image/png');
+    const dataUrl = square.domElement.toDataURL('image/png');
+    if (isBlank(square.domElement)) throw new Error('渲染结果为空（贴图未加载或几何不可见）');
+    return dataUrl;
   } finally {
     dispose(model);
   }
+}
+
+/**
+ * Resolve once every texture in `root` actually has a decoded image, or after
+ * `timeout` ms so a broken image cannot hang a batch run forever.
+ *
+ * Neither `manager.onLoad` nor `image.decode()` is usable here: the manager's
+ * queue is drained before the browser decodes the ImageBitmap (measured ~2 s
+ * later on a 9-texture model), and a texture created without a source has no
+ * `image.decode()` to await. Poll the observable fact instead — every map has a
+ * non-zero-width image.
+ */
+async function texturesReady(root, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    let pending = 0;
+    root.traverse(item => {
+      for (const mat of (Array.isArray(item.material) ? item.material : [item.material])) {
+        if (mat?.map && !(mat.map.image && mat.map.image.width > 0)) pending++;
+      }
+    });
+    if (!pending) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error('贴图解码超时');
+}
+
+/** True when the canvas holds no visible pixel — a PNG of nothing. */
+function isBlank(canvas) {
+  const probe = document.createElement('canvas');
+  probe.width = canvas.width; probe.height = canvas.height;
+  probe.getContext('2d').drawImage(canvas, 0, 0);
+  const pixels = probe.getContext('2d').getImageData(0, 0, probe.width, probe.height).data;
+  for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 8) return false;
+  return true;
 }
 export function clear(){generation++;observer?.disconnect();paints.clear();for(const scene of scenes)dispose(scene);scenes.clear();}
 export function mount(items, request) {
