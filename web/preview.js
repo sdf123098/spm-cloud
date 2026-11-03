@@ -84,6 +84,28 @@ function bbmodel(value, images) {
   function add(items,parent,pivot=[0,0,0],depth=0){if(depth>128)throw new Error('骨骼层级过深');for(const item of items||[]){if(typeof item==='string'){const mesh=elements.get(item);if(mesh&&!used.has(item)){mesh.position.sub(new THREE.Vector3(...pivot));parent.add(mesh);used.add(item);}}else{const bone=new THREE.Group();const origin=vec(item.origin);bone.position.set(...origin.map((n,i)=>n-pivot[i]));rotate(bone,item.rotation);parent.add(bone);add(item.children,bone,origin,depth+1);}}}
   add(value.outliner,group);for(const [id,mesh]of elements)if(!used.has(id))group.add(mesh);return group;
 }
+/**
+ * The texture the pack itself declares, from ysm.json's
+ * `files.<section>.texture[].uv`. This is the author's choice; falling back to
+ * guessing by filename is what previously picked a 32 px `arrow.png` for a
+ * model whose geometry needs a 512 px atlas.
+ */
+function declaredTexture(payload, section) {
+  const pack = payload.pack || {};
+  for (const document of Object.values(pack)) {
+    const files = document?.files || {};
+    const order = [section, 'player', 'armor', 'main'].filter(Boolean);
+    for (const key of [...order, ...Object.keys(files)]) {
+      for (const entry of files?.[key]?.texture || []) {
+        const wanted = entry?.uv || entry?.path;
+        if (!wanted) continue;
+        const match = payload.images.find(image => image.path.endsWith(wanted) || image.path.endsWith(wanted.split('/').pop()));
+        if (match) return {data: match.data, path: match.path};
+      }
+    }
+  }
+  return null;
+}
 // Pick the Bedrock skin, not merely the first image whose path looks textual.
 //
 // The old `/texture|skin|player/i` test matched a path *segment*: a pack with
@@ -110,10 +132,11 @@ function primaryTexture(images) {
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
   return scored[0].image.data;
 }
-function bedrock(value, images) {
+function bedrock(value, images, declared) {
   const geometry=value['minecraft:geometry']?.[0]||value;const bones=geometry.bones||[];
   const description=geometry.description||{};const resolution=[description.texture_width||geometry.texturewidth||64,description.texture_height||geometry.textureheight||64];
-  const map=texture(primaryTexture(images));
+  // The pack's own declaration wins over any filename heuristic.
+  const map=texture(declared?.data || primaryTexture(images));
   const root=new THREE.Group(), groups=new Map();let count=0;
   for(const bone of bones){const group=new THREE.Group();group.position.set(...vec(bone.pivot));rotate(group,bone.rotation);groups.set(bone.name,{group,bone});}
   for(const {group,bone} of groups.values()){
@@ -134,7 +157,8 @@ export async function buildModel(payload) {
     const data=document.glb?Uint8Array.from(atob(document.glb),c=>c.charCodeAt(0)).buffer:JSON.stringify(document.value);
     return (await new GLTFLoader(manager).parseAsync(data,'')).scene;
   }
-  return document.value.elements?bbmodel(document.value,payload.images):bedrock(document.value,payload.images);
+  const declared=declaredTexture(payload, 'player');
+  return document.value.elements?bbmodel(document.value,payload.images):bedrock(document.value,payload.images,declared);
 }
 function dispose(root){root.traverse(item=>{item.geometry?.dispose();for(const mat of (Array.isArray(item.material)?item.material:[item.material])){mat?.map?.dispose();mat?.dispose();}});}
 
@@ -151,6 +175,15 @@ export async function renderThumbnail(payload, size = 512) {
     // 51 identical 7 KB thumbnails. Wait for the manager's queue to drain and
     // the images to decode before measuring or drawing.
     await texturesReady(model);
+    // Pose before measuring: the card pose changes the silhouette, so bounds
+    // taken from the bind pose would frame the wrong thing.
+    const pose = applyPreviewPose(model, payload);
+    if (pose.animation && pose.bones === 0) {
+      // Declared an animation but none of its bones matched the skeleton: the
+      // pack is inconsistent, and a silently bind-posed still would look wrong.
+      // Keep going (better than no thumbnail) but say so.
+      console.warn(`preview_animation ${pose.animation} matched no bones`);
+    }
     const {bounds} = isolateBody(model);
     if (bounds.isEmpty()) throw new Error('模型几何数据为空');
     const center = bounds.getCenter(new THREE.Vector3()), extent = bounds.getSize(new THREE.Vector3());
@@ -159,10 +192,31 @@ export async function renderThumbnail(payload, size = 512) {
     scene.add(model, new THREE.AmbientLight(0xffffff, 2));
     const light = new THREE.DirectionalLight(0xffffff, 3);light.position.set(4, 8, 6);scene.add(light);
     const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 10000);
-    const radius = Math.max(extent.length() / 2, 0.1);
-    const distance = radius / Math.sin(camera.fov * Math.PI / 360) * 1.12;
-    // Same three-quarter view as the card: faces -Z, camera slightly left and above.
-    camera.position.set(-distance * 0.25, distance * 0.12, -distance);
+    // Fit the frame, not a bounding sphere. `extent.length()/2` is the diagonal
+    // radius, which for a tall narrow character (36×50×45) is dominated by the
+    // largest axis and pushes the camera far enough that the body ends up at
+    // ~35% of the frame. Instead solve the distance that makes the projected
+    // height hit TARGET_FILL and the projected width stay inside the frame.
+    const TARGET_FILL = 0.78;
+    const halfFov = (camera.fov * Math.PI) / 360;
+    // The view is off-axis, so the silhouette is not extent.x by extent.y; use
+    // the horizontal span as seen from the camera's yaw.
+    const rotates = previewRotates(payload);
+    const yaw = rotates ? -0.25 : 0;
+    const viewWidth = Math.abs(extent.x * Math.cos(yaw)) + Math.abs(extent.z * Math.sin(yaw));
+    const viewHeight = extent.y;
+    const byHeight = viewHeight / 2 / TARGET_FILL / Math.tan(halfFov);
+    const byWidth = viewWidth / 2 / TARGET_FILL / Math.tan(halfFov);
+    const distance = Math.max(byHeight, byWidth, 0.5);
+    // Framing follows the pack, not a guess. ysm.json's
+    // `properties.disable_preview_rotation` is the author's switch for the
+    // client's turntable preview: when it is false the card rotates, and a
+    // three-quarter view is the angle that reads best while turning. When it is
+    // true the author wants a straight-on card, so the still is front-on.
+    if (rotates) camera.position.set(-distance * 0.25, distance * 0.12, -distance);
+    // -Z is the character's facing direction (Minecraft/Bedrock convention), so
+    // a non-rotating pack is viewed from straight behind that axis.
+    else camera.position.set(0, distance * 0.06, -distance);
     camera.lookAt(0, 0, 0);
     const square = new THREE.WebGLRenderer({alpha: true, antialias: true, preserveDrawingBuffer: true});
     square.setPixelRatio(1);
@@ -172,6 +226,7 @@ export async function renderThumbnail(payload, size = 512) {
     square.render(scene, camera);
     const dataUrl = square.domElement.toDataURL('image/png');
     if (isBlank(square.domElement)) throw new Error('渲染结果为空（贴图未加载或几何不可见）');
+    if (lacksMass(square.domElement)) throw new Error('渲染结果为无效几何（顶点尖刺，模型骨骼数据损坏）');
     return dataUrl;
   } finally {
     dispose(model);
@@ -211,6 +266,28 @@ function isBlank(canvas) {
   const pixels = probe.getContext('2d').getImageData(0, 0, probe.width, probe.height).data;
   for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 8) return false;
   return true;
+}
+
+/**
+ * Reject a frame that is only whiskers.
+ *
+ * A degenerate triangle — one vertex flung to infinity by a bad bone transform —
+ * paints a couple of hairlines across the whole canvas. `isBlank` passes, the
+ * bounding box spans the frame, and the result looks like a full-size model in
+ * any coarse check while being unusable. Require actual mass: sample a grid and
+ * demand that a reasonable share of cells carry opaque pixels.
+ */
+function lacksMass(canvas, minimum = 0.02) {
+  const probe = document.createElement('canvas');
+  const grid = 16;
+  probe.width = grid;
+  probe.height = grid;
+  const context = probe.getContext('2d');
+  context.drawImage(canvas, 0, 0, grid, grid);
+  const pixels = context.getImageData(0, 0, grid, grid).data;
+  let filled = 0;
+  for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 8) filled++;
+  return filled / (grid * grid) < minimum;
 }
 /**
  * Hide meshes parked far outside the body, and return {bounds, hidden}.
@@ -253,6 +330,70 @@ function isolateBody(root) {
     else bounds.union(entry.box);
   });
   return {bounds, hidden};
+}
+/**
+ * Apply the pack's own card pose.
+ *
+ * ysm.json declares `properties.preview_animation` — the animation YSM itself
+ * plays while showing the model in a GUI card (`gui` in most packs). That is the
+ * pose the client draws, so it is the pose the still must use; inventing framing
+ * or falling back to `idle` when the pack said otherwise is what made thumbnails
+ * disagree with the card. `idle` is only the fallback for packs that declare no
+ * preview animation at all.
+ *
+ * Channels may be a constant, an array, or `{time: value}` keyframes; the LAST
+ * keyframe is taken, i.e. the settled end of the loop.
+ */
+function applyPreviewPose(root, payload) {
+  const lastValue = value => {
+    if (value == null) return null;
+    if (typeof value === 'number' || Array.isArray(value)) return value;
+    const keys = Object.keys(value).sort((a, b) => Number(a) - Number(b));
+    return keys.length ? value[keys[keys.length - 1]] : null;
+  };
+  const wanted = previewAnimationName(payload);
+  const files = payload.animations || [];
+  const pick = (name) => files.find(file => file?.value?.animations?.[name]);
+  // Declared animation first, then idle, then whatever the pack ships.
+  const chosen = [wanted, 'idle', ...files.flatMap(file => Object.keys(file?.value?.animations || {}))]
+    .filter(Boolean)
+    .map(name => ({name, file: pick(name)}))
+    .find(entry => entry.file);
+  if (!chosen) return {animation: null, bones: 0};
+
+  const animation = chosen.file.value.animations[chosen.name];
+  let applied = 0;
+  root.traverse(node => {
+    const track = animation?.bones?.[node.name];
+    if (!track) return;
+    const rotation = lastValue(track.rotation);
+    if (rotation != null) rotate(node, rotation);
+    const position = lastValue(track.position);
+    if (Array.isArray(position) && position.length >= 3) node.position.add(new THREE.Vector3(...vec(position)));
+    applied++;
+  });
+  return {animation: chosen.name, bones: applied};
+}
+
+/** `properties.preview_animation` from ysm.json, if the pack declares one. */
+function previewAnimationName(payload) {
+  for (const document of Object.values(payload.pack || {})) {
+    const name = document?.properties?.preview_animation;
+    if (typeof name === 'string' && name) return name;
+  }
+  return null;
+}
+/**
+ * Whether the client's card turntable applies to this pack:
+ * ysm.json `properties.disable_preview_rotation`, defaulting to rotating
+ * (the YSM default is `false`, i.e. rotation enabled).
+ */
+function previewRotates(payload) {
+  for (const document of Object.values(payload.pack || {})) {
+    const flag = document?.properties?.disable_preview_rotation;
+    if (typeof flag === 'boolean') return !flag;
+  }
+  return true;
 }
 export function clear(){generation++;observer?.disconnect();paints.clear();for(const scene of scenes)dispose(scene);scenes.clear();}
 export function mount(items, request) {

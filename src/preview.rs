@@ -115,12 +115,21 @@ async fn decode_with_parser(
 fn collect(path: &FilePath) -> Result<Value, CloudError> {
     let mut documents = Vec::new();
     let mut images = Vec::new();
+    // ysm.json / animation files are not geometry, so they never enter
+    // `documents`. They carry what the client needs to reproduce the card the
+    // author designed: the texture the pack declares, whether the preview
+    // rotates, and the idle pose. Passing them separately keeps `documents`
+    // meaning "renderable geometry" for the existing consumers.
+    let mut pack = serde_json::Map::new();
+    let mut animations: Vec<Value> = Vec::new();
     let mut total = 0u64;
     fn add(
         name: &str,
         bytes: Vec<u8>,
         documents: &mut Vec<Value>,
         images: &mut Vec<Value>,
+        pack: &mut serde_json::Map<String, Value>,
+        animations: &mut Vec<Value>,
         total: &mut u64,
     ) -> Result<(), CloudError> {
         *total += bytes.len() as u64;
@@ -157,6 +166,13 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
                     || value.get("asset").is_some())
             {
                 documents.push(json!({"path":name,"value":value}));
+            } else if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                // Non-geometry JSON: ysm.json (pack metadata) or *.animation.json.
+                if value.get("animations").is_some() {
+                    animations.push(json!({"path":name,"value":value}));
+                } else if value.get("files").is_some() || value.get("properties").is_some() {
+                    pack.insert(name.to_owned(), value);
+                }
             }
         } else if lower.ends_with(".glb") {
             documents.push(json!({"path":name,"glb":STANDARD.encode(bytes)}));
@@ -203,6 +219,8 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
                             std::fs::read(entry.path())?,
                             &mut documents,
                             &mut images,
+                            &mut pack,
+                            &mut animations,
                             &mut total,
                         )?;
                     }
@@ -235,7 +253,15 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
                 if bytes.len() > 16 * 1024 * 1024 {
                     return Err(CloudError::AssetTooLarge);
                 }
-                add(&name, bytes, &mut documents, &mut images, &mut total)?;
+                add(
+                    &name,
+                    bytes,
+                    &mut documents,
+                    &mut images,
+                    &mut pack,
+                    &mut animations,
+                    &mut total,
+                )?;
             }
         } else {
             if std::fs::metadata(path)?.len() > 32 * 1024 * 1024 {
@@ -245,14 +271,22 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
             if magic == *b"glTF" {
                 documents.push(json!({"path":"model.glb","glb":STANDARD.encode(bytes)}));
             } else {
-                add("model.json", bytes, &mut documents, &mut images, &mut total)?;
+                add(
+                    "model.json",
+                    bytes,
+                    &mut documents,
+                    &mut images,
+                    &mut pack,
+                    &mut animations,
+                    &mut total,
+                )?;
             }
         }
     }
     if documents.is_empty() {
         return Err(CloudError::invalid_metadata("此模型没有可读取的几何数据"));
     }
-    Ok(json!({"documents":documents,"images":images}))
+    Ok(json!({"documents":documents,"images":images,"pack":pack,"animations":animations}))
 }
 
 #[cfg(test)]
