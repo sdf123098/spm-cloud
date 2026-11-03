@@ -29,7 +29,9 @@ on:
 
 jobs:
   render:
-    runs-on: ubuntu-latest
+    # Pinned, not `-latest`: the default image moved to 26.04 and Playwright
+    # refuses to install chromium on an OS it has no browser build for.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
