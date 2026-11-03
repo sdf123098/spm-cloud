@@ -156,7 +156,11 @@ async function main() {
   let work;
   if (args.model) {
     work = {entries: [{asset_id: args.model, revision: 0}], remaining: 1};
-    const listed = await api('GET', `/v1/assets?scope=accessible&limit=80`);
+    // Resolve through the ADMIN listing, not `/v1/assets`: the latter is the
+    // caller-visible catalog, so a PRIVATE asset the token has no ACL for is
+    // simply absent and the failure reads as "no such asset". Searching also
+    // beats paging the first 80 — with 1428 assets the target is rarely there.
+    const listed = await api('GET', `/admin/api/assets?page_size=80&q=${encodeURIComponent(args.model)}`);
     if (listed.status === 200) {
       const found = JSON.parse(listed.text).entries?.find(item => item.asset_id === args.model);
       if (found) Object.assign(work.entries[0], {revision: found.revision});
