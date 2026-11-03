@@ -227,7 +227,7 @@ async fn font_styles() -> impl IntoResponse {
 
 async fn font(Path(file): Path<String>) -> Response {
     match fonts::font(&file) {
-        Some(bytes) => ([("content-type", "font/ttf")], bytes).into_response(),
+        Some(bytes) => ([("content-type", "font/woff2")], bytes).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }

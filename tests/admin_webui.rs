@@ -620,14 +620,17 @@ async fn owner_distributes_admins_and_revocation_invalidates_sessions() {
         );
     }
     let font = client
-        .get(format!("{}/admin/fonts/HarmonyOS_Sans_Regular.ttf", s.url))
+        .get(format!(
+            "{}/admin/fonts/HarmonyOS_Sans_SC_Regular.woff2",
+            s.url
+        ))
         .send()
         .await
         .unwrap();
     assert_eq!(font.status(), StatusCode::OK);
-    assert_eq!(font.headers()["content-type"], "font/ttf");
+    assert_eq!(font.headers()["content-type"], "font/woff2");
     assert_eq!(font.headers()["cache-control"], "public, max-age=604800");
-    assert_eq!(&font.bytes().await.unwrap()[..4], &[0, 1, 0, 0]);
+    assert_eq!(&font.bytes().await.unwrap()[..4], b"wOF2");
     assert_eq!(
         client
             .get(format!("{}/admin/fonts/config.json", s.url))
@@ -1361,6 +1364,45 @@ async fn public_default_private_owner_and_transfer_enforce_download_permissions(
     assert_eq!(private.status(), StatusCode::CREATED);
     let asset: Value = private.json().await.unwrap();
     assert_eq!(asset["asset_id"], "private-model");
+    // Anonymous CDN route serves PUBLIC assets and hides PRIVATE ones.
+    let public_url = format!(
+        "{}/v1/public/assets/default-public/revisions/1/content",
+        s.url
+    );
+    let anon_public = client.get(&public_url).send().await.unwrap();
+    assert_eq!(anon_public.status(), StatusCode::OK);
+    assert_eq!(
+        anon_public.headers()["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    let anon_private = client
+        .get(format!(
+            "{}/v1/public/assets/private-model/revisions/1/content",
+            s.url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        anon_private.status(),
+        StatusCode::NOT_FOUND,
+        "anonymous route must not reveal private assets"
+    );
+    // A valid token does not widen the anonymous route either.
+    assert_eq!(
+        client
+            .get(format!(
+                "{}/v1/public/assets/private-model/revisions/1/content",
+                s.url
+            ))
+            .bearer_auth(&tokens[0])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
     let download = format!("{}/v1/assets/private-model/revisions/1/content", s.url);
     assert_eq!(
         client

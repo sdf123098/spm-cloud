@@ -2208,6 +2208,34 @@ impl CloudStore {
         }))
     }
 
+    /// Same as `asset_content`, but only ever serves PUBLIC assets.
+    /// Used by the unauthenticated CDN-cacheable download route, so a
+    /// caller without credentials can never reach PRIVATE content.
+    pub fn public_asset_content(
+        &self,
+        asset_id: &str,
+        revision: u64,
+    ) -> Result<AssetContent, CloudError> {
+        let conn = self
+            .connection
+            .lock()
+            .map_err(|_| CloudError::configuration("database lock poisoned"))?;
+        let public: bool = conn
+            .query_row(
+                "SELECT visibility = 'PUBLIC' FROM assets WHERE asset_id = ?1",
+                [asset_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !public {
+            // Deliberately NotFound rather than AccessDenied: an anonymous
+            // caller must not learn that a private asset exists.
+            return Err(CloudError::NotFound);
+        }
+        conn.query_row("SELECT object_path, byte_length, raw_sha256, name, format FROM available_asset_revisions WHERE asset_id = ?1 AND revision = ?2", params![asset_id, revision as i64], |row| Ok(AssetContent { path: PathBuf::from(row.get::<_, String>(0)?), length: row.get::<_, i64>(1)? as u64, raw_sha256: row.get(2)?, name: row.get(3)?, format: row.get(4)? })).optional()?.ok_or(CloudError::NotFound)
+    }
+
     pub fn asset_content(
         &self,
         account_id: &str,

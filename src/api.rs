@@ -288,6 +288,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/assets/{asset_id}/revisions/{revision}/content",
             get(download_asset),
         )
+        .route(
+            "/v1/public/assets/{asset_id}/revisions/{revision}/content",
+            get(download_public_asset),
+        )
         .route("/v1/targets", post(create_target))
         .route("/v1/scopes/{scope_id}/targets", get(list_targets))
         .route(
@@ -354,14 +358,23 @@ async fn dynamic_body_limit(
 async fn api_headers(request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let request_is_admin = request.uri().path().starts_with("/admin");
     let request_is_font = request.uri().path().starts_with("/admin/fonts/");
+    // Anonymous, content-addressed downloads are safe to cache across users.
+    let request_is_public_asset = request.uri().path().starts_with("/v1/public/assets/")
+        && request.uri().path().ends_with("/content");
     let mut response = if request.method() == axum::http::Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
     } else {
         next.run(request).await
     };
     let cache_font = request_is_font && response.status().is_success();
+    let cache_public_asset = request_is_public_asset && response.status().is_success();
     let headers = response.headers_mut();
-    if !cache_font {
+    if cache_public_asset {
+        headers.insert(
+            "cache-control",
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    } else if !cache_font {
         headers.insert("cache-control", HeaderValue::from_static("no-store"));
     }
     if !request_is_admin {
@@ -1104,6 +1117,25 @@ async fn download_asset(
 ) -> Result<Response, CloudError> {
     let account = authenticate(&state, &headers)?;
     let content = state.store.asset_content(&account, &asset_id, revision)?;
+    asset_response(&headers, content).await
+}
+
+/// Anonymous download for PUBLIC assets only.
+/// Safe to sit behind a shared CDN cache: no credentials, no per-user state,
+/// and the URL is content-addressed by (asset_id, revision).
+async fn download_public_asset(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((asset_id, revision)): Path<(String, u64)>,
+) -> Result<Response, CloudError> {
+    let content = state.store.public_asset_content(&asset_id, revision)?;
+    asset_response(&headers, content).await
+}
+
+async fn asset_response(
+    headers: &HeaderMap,
+    content: crate::store::AssetContent,
+) -> Result<Response, CloudError> {
     let etag = format!("\"{}\"", content.raw_sha256);
     if headers
         .get(header::IF_NONE_MATCH)
