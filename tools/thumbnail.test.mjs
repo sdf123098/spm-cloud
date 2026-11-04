@@ -41,7 +41,7 @@ test('a bbmodel payload renders to a portrait YSM card PNG', async (t) => {
     // size, not just a non-empty buffer.
     assert.deepEqual([...result.png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     assert.equal(result.png.readUInt32BE(16), Math.round(512*52/90));
-    assert.equal(result.png.readUInt32BE(20), 512);
+    assert.equal(result.png.readUInt32BE(20), Math.round(512*74/90));
     // A flat-colour 512×512 render is small; a blank/black frame would be even
     // smaller, so this also catches "rendered an empty scene".
     assert.ok(result.png.length > 1000, `suspiciously small PNG: ${result.png.length} bytes`);

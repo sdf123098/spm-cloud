@@ -3,7 +3,7 @@ const $ = (id) => document.getElementById(id);
 const accountPortal=location.pathname.startsWith('/account/');
 const offlinePanel=SPMOfflineIdentity.create(request,renderOfflineIdentities);
 let session = null, configResponse = null, formConfig = null, nextCursor = null, nextAccountCursor = null, noticeTimer;
-let models = [], modelView = 'grid', selectedModels = new Set(), bulkRunning = false;
+let models = [], modelView = 'grid', selectedModels = new Set(), bulkRunning = false, prerenderRunning = false;
 let staticImages = true;
 try { staticImages = localStorage.getItem('spm-cloud-static-images') !== 'false'; } catch {}
 let uploadQueue = [], uploadRunning = false;
@@ -102,6 +102,37 @@ $('search-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitt
 const staticToggle=node('input');staticToggle.type='checkbox';staticToggle.id='static-model-images';staticToggle.checked=staticImages;
 const staticLabel=node('label',undefined,'inline static-images-toggle');staticLabel.append(staticToggle,document.createTextNode('静态卡片'));document.querySelector('.library-toolbar').append(staticLabel);
 staticToggle.addEventListener('change',()=>{staticImages=staticToggle.checked;try{localStorage.setItem('spm-cloud-static-images',String(staticImages));}catch{}renderModels();});
+const prerenderButton=action('预渲染静态',prerenderStaticCards);prerenderButton.id='prerender-static';
+prerenderButton.title='生成并保存已选模型的静态卡片；未选择时处理本页，可重新生成已有图片';
+const prerenderStatus=node('span',undefined,'small muted');prerenderStatus.id='prerender-status';prerenderStatus.setAttribute('role','status');
+document.querySelector('.library-toolbar').append(prerenderButton);
+document.querySelector('.library-subbar').append(prerenderStatus);
+async function prerenderStaticCards(){
+  if(prerenderRunning||bulkRunning||uploadRunning)return;
+  const targets=models.filter(model=>!model.deleted&&(!selectedModels.size||selectedModels.has(model.asset_id))).map(model=>({...model}));
+  if(!targets.length){notice('没有可预渲染的模型，请选择未删除的模型。',true);return;}
+  prerenderRunning=true;syncSelection();SPMPreview.clear();
+  let succeeded=0,failed=0;const failures=[];
+  try{
+    for(const [index,model] of targets.entries()){
+      prerenderStatus.textContent=`预渲染 ${index+1}/${targets.length}：${model.name}`;
+      try{
+        const path=`/admin/api/assets/${encodeURIComponent(model.asset_id)}`;
+        const payload=await request(`${path}/preview`);payload.name ||= model.name;
+        const png=await SPMPreview.renderThumbnail(payload);
+        const blob=new Blob([Uint8Array.from(atob(png.slice(png.indexOf(',')+1)),char=>char.charCodeAt(0))],{type:'image/png'});
+        await request(`${path}/revisions/${model.revision}/thumbnail`,{method:'PUT',headers:{'Content-Type':'image/png'},body:blob});
+        const current=models.find(item=>item.asset_id===model.asset_id&&item.revision===model.revision);
+        if(current)current.thumbnail_status='ready';
+        succeeded++;
+      }catch(error){failed++;failures.push(`${model.name}：${error.message}`);if(error.status===401)break;}
+    }
+    prerenderStatus.textContent=`预渲染完成：${succeeded} 个成功，${failed} 个失败`;
+    prerenderStatus.title=failures.join('\n');
+    if(failures.length)notice(failures.join('；'),true);
+    if(succeeded){staticImages=true;staticToggle.checked=true;try{localStorage.setItem('spm-cloud-static-images','true');}catch{}setModelView('cards');}
+  }finally{prerenderRunning=false;renderModels();}
+}
 function setModelView(view){
   modelView=view==='cards'?'cards':'grid';
   $('model-cards').dataset.view=modelView;
@@ -153,16 +184,18 @@ async function loadModels(page=1){
 function syncSelection(){
   const visible=new Set(models.map(model=>model.asset_id));
   selectedModels=new Set([...selectedModels].filter(id=>visible.has(id)));
-  const count=selectedModels.size, all=$('select-all-models');
-  all.checked=models.length>0&&count===models.length;all.indeterminate=count>0&&count<models.length;all.disabled=bulkRunning||models.length===0;
+  const count=selectedModels.size, all=$('select-all-models'), mutationBusy=bulkRunning||prerenderRunning;
+  prerenderButton.disabled=prerenderRunning||bulkRunning||uploadRunning||!models.some(model=>!model.deleted&&(!count||selectedModels.has(model.asset_id)));
+  staticToggle.disabled=prerenderRunning||modelView!=='cards';
+  all.checked=models.length>0&&count===models.length;all.indeterminate=count>0&&count<models.length;all.disabled=mutationBusy||models.length===0;
   $('selection-toolbar').hidden=count===0;$('selection-count').textContent=`已选 ${count} 个`;
-  for(const el of document.querySelectorAll('#selection-toolbar button, #selection-toolbar select, #selection-toolbar input'))el.disabled=bulkRunning;
-  $('logout').disabled=bulkRunning||uploadRunning||settingsUI.saving;
-  for(const card of $('model-cards').querySelectorAll('.model-card')){const checked=selectedModels.has(card.dataset.asset);card.classList.toggle('selected',checked);const input=card.querySelector('input[type=checkbox]');input.checked=checked;input.disabled=bulkRunning;}
-  document.querySelectorAll('.model-name').forEach(button=>button.disabled=bulkRunning);
+  for(const el of document.querySelectorAll('#selection-toolbar button, #selection-toolbar select, #selection-toolbar input'))el.disabled=mutationBusy;
+  $('logout').disabled=prerenderRunning||bulkRunning||uploadRunning||settingsUI.saving;
+  for(const card of $('model-cards').querySelectorAll('.model-card')){const checked=selectedModels.has(card.dataset.asset);card.classList.toggle('selected',checked);const input=card.querySelector('input[type=checkbox]');input.checked=checked;input.disabled=mutationBusy;}
+  document.querySelectorAll('.model-name').forEach(button=>button.disabled=mutationBusy);
   const active=models.filter(model=>selectedModels.has(model.asset_id)&&!model.deleted).length;
-  for(const el of document.querySelectorAll('[data-bulk]'))el.disabled=bulkRunning||(el.dataset.bulk==='restore'?count===active:active===0);
-  $('bulk-mark').disabled=bulkRunning||active===0;
+  for(const el of document.querySelectorAll('[data-bulk]'))el.disabled=mutationBusy||(el.dataset.bulk==='restore'?count===active:active===0);
+  $('bulk-mark').disabled=mutationBusy||active===0;
 }
 $('select-all-models').addEventListener('change',event=>{selectedModels=event.target.checked?new Set(models.map(model=>model.asset_id)):new Set();syncSelection();});
 $('clear-selection').addEventListener('click',()=>{selectedModels.clear();syncSelection();});
@@ -182,7 +215,7 @@ function renderModels(){
     const meta=node('div',undefined,'model-meta'), owner=node('span',model.owner_account_id,'model-owner');owner.title=`所有者：${model.owner_account_id}`;const size=node('span',bytes(model.byte_length));size.title=`${model.byte_length} 字节（原始文件）`;meta.append(owner,size);body.append(status,meta);
     card.append(visual,body);slot.append(card);root.append(slot);
   }
-  $('model-empty').hidden=models.length>0;syncSelection();staticToggle.disabled=modelView!=='cards';if(modelView==='cards')SPMPreview.mount(models.map((model,i)=>({model,visual:root.children[i].querySelector('.model-visual')})),request,{staticImages});else SPMPreview.clear();
+  $('model-empty').hidden=models.length>0;syncSelection();if(prerenderRunning)return;if(modelView==='cards')SPMPreview.mount(models.map((model,i)=>({model,visual:root.children[i].querySelector('.model-visual')})),request,{staticImages});else SPMPreview.clear();
 }
 
 function showModelDetail(model){
@@ -204,7 +237,7 @@ function showModelDetail(model){
 }
 
 async function runBulk(kind,mark){
-  if(bulkRunning)return;
+  if(bulkRunning||prerenderRunning)return;
   const targets=models.filter(model=>selectedModels.has(model.asset_id)&&(kind==='restore'?model.deleted:!model.deleted));
   if(!targets.length)return;
   const owner=$('bulk-owner').value.trim();if(kind==='owner'&&!owner){notice('先填写目标 Cloud 账号。',true);return;}

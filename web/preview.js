@@ -26,12 +26,8 @@ const textureSizes = new Map();
 // asked the driver for 34k textures of 4 MB each. The upload silently fails and
 // the model renders as dark garbage. Sharing keeps it at one.
 const textureCache = new Map();
-// Per-pack V orientation. Bedrock counts v downward while GL's UV origin is
-// bottom-left, so the usual conversion is `1 - v/h`. A minority of packs ship
-// UVs already in GL order; for those the flip samples the mirrored half of the
-// sheet and the model comes out as loose fragments. `renderThumbnail` renders
-// with the default and retries the other way when the frame is nearly empty.
-let flipV = true;
+// Bedrock texture coordinates count V downward.
+const flipV = true;
 function texture(source) {
   if (!source || !/^data:image\/(png|jpeg|webp|gif);base64,/i.test(source)) return null;
   const cached = textureCache.get(source);
@@ -58,6 +54,9 @@ function dimensions(source) {
 }
 function vec(v, fallback = [0,0,0]) { return Array.isArray(v) && v.length >= 3 ? v.slice(0,3).map(n => Number.isFinite(Number(n)) ? Number(n) : 0) : fallback; }
 function rotate(object, value) { const [x,y,z] = vec(value); object.rotation.set(x*Math.PI/180,y*Math.PI/180,z*Math.PI/180,'ZYX'); }
+// Geometry stays in the JSON's coordinates beneath a reflected X root. In this
+// space, the mod's baked (-X,-Y,+Z) rotations become (-X,+Y,-Z).
+function rotateBedrock(object,value){const [x,y,z]=vec(value);rotate(object,[-x,y,-z]);}
 // Always alpha-cutout, never blended.
 //
 // YSM skins are binary-alpha: a typical atlas is ~89% fully transparent with
@@ -80,7 +79,7 @@ function cube(data, maps, resolution, bedrock = false, allCutout = false) {
   const from=vec(data.from||data.origin), to=data.to?vec(data.to):from.map((n,i)=>n+vec(data.size)[i]);
   const inflate=Number(data.inflate)||0, dimensions=from.map((n,i)=>Math.max(.001,to[i]-n+inflate*2));
   const geometry=new THREE.BoxGeometry(...dimensions), uv=geometry.attributes.uv;
-  const names=['east','west','up','down','south','north'], [w,h,d]=dimensions;
+  const names=bedrock?['west','east','up','down','south','north']:['east','west','up','down','south','north'], [w,h,d]=dimensions;
   const net={west:[0,d,d,h],north:[d,d,w,h],east:[d+w,d,d,h],south:[2*d+w,d,w,h],up:[d,0,w,d],down:[d+w,0,w,d]};
   const materials=names.map((name,index)=>{
     const face=data.faces?.[name] || (bedrock && !Array.isArray(data.uv) ? data.uv?.[name] : null);
@@ -108,7 +107,7 @@ function cube(data, maps, resolution, bedrock = false, allCutout = false) {
   });
   const mesh=new THREE.Mesh(geometry,materials);
   mesh.position.set(...from.map((n,i)=>(n+to[i])/2));
-  const pivot=new THREE.Group();const origin=vec(bedrock?(data.pivot||from.map((n,i)=>(n+to[i])/2)):(data.rotation?.origin||data.origin));pivot.position.set(...origin);mesh.position.sub(pivot.position);rotate(pivot,data.rotation?.angle!==undefined?vec([0,0,0]).map((n,i)=>['x','y','z'][i]===data.rotation.axis?data.rotation.angle:0):data.rotation);pivot.add(mesh);return pivot;
+  const pivot=new THREE.Group();const origin=vec(bedrock?(data.pivot||from.map((n,i)=>(n+to[i])/2)):(data.rotation?.origin||data.origin));pivot.position.set(...origin);mesh.position.sub(pivot.position);(bedrock?rotateBedrock:rotate)(pivot,data.rotation?.angle!==undefined?vec([0,0,0]).map((n,i)=>['x','y','z'][i]===data.rotation.axis?data.rotation.angle:0):data.rotation);pivot.add(mesh);return pivot;
 }
 function bbmodel(value, images) {
   const group=new THREE.Group();const resolution=[value.resolution?.width||64,value.resolution?.height||64];
@@ -174,52 +173,17 @@ function primaryTexture(images) {
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
   return scored[0].image.data;
 }
-/**
- * An effect slab: a large, thin quad that belongs to a `ysmGlow*` bone.
- *
- * Judging by absolute size alone removes real geometry from packs modelled at a
- * large unit scale, so the test is relative to the body and also requires the
- * cube to be a sheet (one axis far thinner than the others). Blade flashes and
- * aura planes match; a glowing eye or core does not.
- */
-function isEffectSlab(data, bodySpan) {
-  const size = vec(data.size).map(Math.abs);
-  const longest = Math.max(...size), shortest = Math.min(...size);
-  if (!(bodySpan > 0)) return false;
-  return longest > bodySpan * 0.25 && shortest < longest * 0.15;
-}
-
 function bedrock(value, images, declared, allCutout = false) {
   const geometry=value['minecraft:geometry']?.[0]||value;const bones=geometry.bones||[];
   const description=geometry.description||{};const resolution=[description.texture_width||geometry.texturewidth||64,description.texture_height||geometry.textureheight||64];
-  // Extent of the whole model, so effect slabs can be judged against the body
-  // rather than against a fixed unit count (packs disagree on unit scale).
-  let bodySpan=0;
-  {
-    const lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
-    for(const b of bones) for(const c of b.cubes||[]){
-      const o=vec(c.from||c.origin),s=vec(c.size);
-      for(let i=0;i<3;i++){const a=Math.min(o[i],o[i]+s[i]),z=Math.max(o[i],o[i]+s[i]);if(a<lo[i])lo[i]=a;if(z>hi[i])hi[i]=z;}
-    }
-    if(Number.isFinite(lo[0])) bodySpan=Math.max(hi[0]-lo[0],hi[1]-lo[1],hi[2]-lo[2]);
-  }
   // The pack's own declaration wins over any filename heuristic.
   const map=texture(declared?.data || primaryTexture(images));
-  const root=new THREE.Group(), groups=new Map();let count=0;
-  for(const bone of bones){const group=new THREE.Group();group.name=bone.name;group.position.set(...vec(bone.pivot));rotate(group,bone.rotation);groups.set(bone.name,{group,bone});}
+  const root=new THREE.Group(), groups=new Map();root.scale.x=-1;let count=0;
+  for(const bone of bones){const group=new THREE.Group();group.name=bone.name;group.position.set(...vec(bone.pivot));rotateBedrock(group,bone.rotation);group.userData.bedrockRotation=vec(bone.rotation);groups.set(bone.name,{group,bone});}
   for(const {group,bone} of groups.values()){
     const parent=groups.get(bone.parent);let ancestor=parent;const visited=new Set([bone.name]);while(ancestor){if(visited.has(ancestor.bone.name))throw new Error('骨骼层级循环');visited.add(ancestor.bone.name);ancestor=groups.get(ancestor.bone.parent);}
     if(parent){group.position.sub(new THREE.Vector3(...vec(parent.bone.pivot)));parent.group.add(group);}else root.add(group);
-    // YSM prefixes effect geometry with `ysmGlow` (blade flashes, auras, FX
-    // sheets). The mod drives those from animation and composites them
-    // additively, so in a static bind pose they are giant flat slabs parked over
-    // the character: one pack has a 162x2x38 unit quad across a 176-unit body.
-    // Rendered opaque they hide the model entirely and inflate the framing box
-    // until the character is a speck. Drop the large ones; small glow pieces are
-    // real detail (eyes, cores) and stay.
-    const glow = /^ysmGlow/i.test(bone.name||'');
     for(const data of bone.cubes||[]){
-      if(glow && isEffectSlab(data, bodySpan)) continue;
       if(++count>50000)throw new Error('预览几何数据过大');
       const mesh=cube(data,[map],resolution,true,allCutout);mesh.position.sub(new THREE.Vector3(...vec(bone.pivot)));group.add(mesh);
     }
@@ -257,45 +221,11 @@ function dispose(root){
   textureSizes.clear();
 }
 
-// Square, off-screen render of one payload, used by tools/thumbnail.html and the
-// batch renderer. Deliberately shares buildModel/lighting/framing with mount()
-// so the stored thumbnail matches what the admin card eventually shows; a
-// separate code path would silently drift as the preview evolves.
-/** Share of a 16x16 grid whose cells contain opaque pixels. */
-function massScore(canvas) {
-  const grid = 16, probe = document.createElement('canvas');
-  probe.width = grid; probe.height = grid;
-  const context = probe.getContext('2d');
-  context.drawImage(canvas, 0, 0, grid, grid);
-  const pixels = context.getImageData(0, 0, grid, grid).data;
-  let filled = 0;
-  for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 8) filled++;
-  return filled / (grid * grid);
-}
-
-async function renderOnce(payload, size, flip) {
-  flipV = flip;
-  const card = await prepareCard(payload, size);
-  try {
-    const canvas = card.draw();
-    return {url: canvas.toDataURL('image/png'), mass: massScore(canvas)};
-  } finally { card.dispose(); }
-}
-
-/**
- * Render the card, trying both V orientations when the first comes out hollow.
- *
- * The flip is right for the vast majority of packs, but not all of them, and a
- * wrong guess is not subtle: the model samples the mirrored half of the atlas
- * and loses most of its surface. Measuring the finished frame is the only
- * reliable discriminator — alpha coverage of the atlas itself is not, because a
- * sparse effects atlas scores well while rendering nothing.
- */
+// The same cover renderer feeds the WebUI and stored Cloud thumbnails.
 export async function renderThumbnail(payload, size = 512) {
-  const primary = await renderOnce(payload, size, true);
-  if (primary.mass >= 0.25) return primary.url;
-  const alternate = await renderOnce(payload, size, false);
-  return alternate.mass > primary.mass ? alternate.url : primary.url;
+  const card = await prepareCard(payload, size);
+  try { return card.draw().toDataURL('image/png'); }
+  finally { card.dispose(); }
 }
 
 // The authored GUI layers use one complete 52:90 canvas, exactly as in the mod.
@@ -378,46 +308,38 @@ async function prepareCard(payload, size = 512) {
     // Pose before measuring: the card pose changes the silhouette, so bounds
     // taken from the bind pose would frame the wrong thing.
     const pose = applyPreviewPose(model, payload);
+    const properties = Object.values(payload.pack || {}).find(document => document?.properties)?.properties;
+    if(properties){
+      // IGeoRenderer.renderEarly uses heightScale for X/Z and widthScale for Y;
+      // CustomPlayerRenderer then applies the vanilla player scale of 0.9375.
+      const horizontal=Number(properties.height_scale ?? .7)*.9375;
+      const vertical=Number(properties.width_scale ?? .7)*.9375;
+      model.scale.multiply(new THREE.Vector3(horizontal,vertical,horizontal));
+    }
     if (pose.animation && pose.bones === 0) {
       // Declared an animation but none of its bones matched the skeleton: the
       // pack is inconsistent, and a silently bind-posed still would look wrong.
       // Keep going (better than no thumbnail) but say so.
       console.warn(`preview_animation ${pose.animation} matched no bones`);
     }
-    const {bounds} = isolateBody(model);
-    if (bounds.isEmpty()) throw new Error('模型几何数据为空');
-    const center = bounds.getCenter(new THREE.Vector3()), extent = bounds.getSize(new THREE.Vector3());
-    model.position.sub(center);
+    if (new THREE.Box3().setFromObject(model).isEmpty()) throw new Error('模型几何数据为空');
     const scene = new THREE.Scene();
     scene.add(model, new THREE.AmbientLight(0xffffff, assets.noLighting?3:2));
     if(!assets.noLighting){const light = new THREE.DirectionalLight(0xffffff, 3);light.position.set(4, 8, 6);scene.add(light);}
-    const camera = new THREE.PerspectiveCamera(35, width/figureHeight, 0.01, 10000);
-    // Fit the frame, not a bounding sphere. `extent.length()/2` is the diagonal
-    // radius, which for a tall narrow character (36×50×45) is dominated by the
-    // largest axis and pushes the camera far enough that the body ends up at
-    // ~35% of the frame. Instead solve the distance that makes the projected
-    // height hit TARGET_FILL and the projected width stay inside the frame.
-    const TARGET_FILL = 0.78;
-    const halfFov = (camera.fov * Math.PI) / 360;
-    // The view is off-axis, so the silhouette is not extent.x by extent.y; use
-    // the horizontal span as seen from the camera's yaw.
+    // Match the mod's GUI projection, origin and scale (ModelPickerLayout and
+    // renderCardFigure). Author animation translations/scales are composition:
+    // auto-centering and fitting the posed bounds would erase them completely.
+    const referenceHeight = figureHeight / height * 90;
+    const guiScale = Math.min(referenceHeight, Math.max(16, Math.min(64, Math.round(referenceHeight * .43))));
+    const pixelsPerUnit = guiScale / 16 * height / 90;
+    const viewHeight = figureHeight / pixelsPerUnit;
+    const centerY = (figureHeight / 2 - 3 * height / 90) / pixelsPerUnit;
+    const camera = new THREE.OrthographicCamera(-width/pixelsPerUnit/2,width/pixelsPerUnit/2,viewHeight/2,-viewHeight/2,.01,10000);
     const rotates = previewRotates(payload);
     const yaw = rotates ? -4*Math.PI/180 : 0;
-    const viewWidth = Math.abs(extent.x * Math.cos(yaw)) + Math.abs(extent.z * Math.sin(yaw));
-    const viewHeight = extent.y;
-    const byHeight = viewHeight / 2 / TARGET_FILL / Math.tan(halfFov);
-    const byWidth = viewWidth / 2 / TARGET_FILL / Math.tan(halfFov) / camera.aspect;
-    const distance = Math.max(byHeight, byWidth, 0.5);
-    // Framing follows the pack, not a guess. ysm.json's
-    // `properties.disable_preview_rotation` is the author's switch for the
-    // client's turntable preview: when it is false the card rotates, and a
-    // three-quarter view is the angle that reads best while turning. When it is
-    // true the author wants a straight-on card, so the still is front-on.
-    if (rotates) camera.position.set(Math.sin(yaw)*distance, 0, -Math.cos(yaw)*distance);
-    // -Z is the character's facing direction (Minecraft/Bedrock convention), so
-    // a non-rotating pack is viewed from straight behind that axis.
-    else camera.position.set(0, 0, -distance);
-    camera.lookAt(0, 0, 0);
+    const pitch = rotates ? 10*Math.PI/180 : 0;
+    camera.position.set(Math.sin(yaw)*Math.cos(pitch)*1000,centerY+Math.sin(pitch)*1000,-Math.cos(yaw)*Math.cos(pitch)*1000);
+    camera.lookAt(0,centerY,0);
     renderer ||= new THREE.WebGLRenderer({alpha: true, antialias: true, preserveDrawingBuffer: true});
     square = renderer;
     square.setPixelRatio(1);
@@ -426,8 +348,9 @@ async function prepareCard(payload, size = 512) {
     // half-presented buffer (blank in a headless swiftshader context).
     square.render(scene, camera);
     if (isBlank(square.domElement)) throw new Error('渲染结果为空（贴图未加载或几何不可见）');
-    if (lacksMass(square.domElement)) throw new Error('渲染结果为无效几何（顶点尖刺，模型骨骼数据损坏）');
-    const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;canvas.className='model-preview';
+    // Only the cover is published. SPM's Cloud list and the WebUI both own the
+    // name row; baking it into the PNG duplicates it and changes cover cropping.
+    const canvas=document.createElement('canvas');canvas.width=width;canvas.height=cover;canvas.className='model-preview';
     const context=canvas.getContext('2d');
     const draw=(rotation=0)=>{
       model.rotation.y=rotation;square.setSize(width,figureHeight,false);square.render(scene,camera);
@@ -436,10 +359,6 @@ async function prepareCard(payload, size = 512) {
       if(background)context.drawImage(background,0,0,width,height);
       context.drawImage(square.domElement,0,0,width,figureHeight);
       if(foreground)context.drawImage(foreground,0,0,width,height);
-      if(!art?.nameTop){context.fillStyle='#242424';context.fillRect(0,cover,width,height-cover);}
-      context.fillStyle=art?.dark?'#161616':'#f0f0f0';context.font=`${Math.max(10,Math.round(height/90*7))}px sans-serif`;context.textBaseline='middle';
-      let title=assets.name;while(title.length&&context.measureText(title).width>width-width/8)title=title.slice(0,-1);
-      context.fillText(title,width/16,(cover+height)/2);
       return canvas;
     };
     return {draw,dispose(){dispose(model);}};
@@ -484,88 +403,6 @@ function isBlank(canvas) {
 }
 
 /**
- * Reject a frame that is only whiskers.
- *
- * A degenerate triangle — one vertex flung to infinity by a bad bone transform —
- * paints a couple of hairlines across the whole canvas. `isBlank` passes, the
- * bounding box spans the frame, and the result looks like a full-size model in
- * any coarse check while being unusable. Require actual mass: sample a grid and
- * demand that a reasonable share of cells carry opaque pixels.
- */
-function lacksMass(canvas, minimum = 0.02) {
-  const probe = document.createElement('canvas');
-  const grid = 16;
-  probe.width = grid;
-  probe.height = grid;
-  const context = probe.getContext('2d');
-  context.drawImage(canvas, 0, 0, grid, grid);
-  const pixels = context.getImageData(0, 0, grid, grid).data;
-  let filled = 0;
-  for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 8) filled++;
-  return filled / (grid * grid) < minimum;
-}
-/**
- * Hide meshes parked far outside the body, and return {bounds, hidden}.
- *
- * Two distinct causes produce the same symptom: a genuine helper cube placed
- * far away, and a broken export whose cube origins were written in the wrong
- * space (one pack has 47 cubes at y=-8450 next to a skeleton at y=25). Either
- * way a single stray mesh inflates Box3.setFromObject() to thousands of units
- * and the camera backs off until the character is a sub-pixel dot. Measuring
- * per-mesh and dropping the far tail keeps the model that IS drawable.
- */
-function isolateBody(root) {
-  const THREE_Box3 = THREE.Box3;
-  const boxes = [];
-  root.updateMatrixWorld(true);
-  root.traverse(item => {
-    if (!item.isMesh || !item.geometry?.attributes?.position) return;
-    item.geometry.computeBoundingBox();
-    const box = item.geometry.boundingBox.clone().applyMatrix4(item.matrixWorld);
-    if (!Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) return;
-    boxes.push({mesh: item, box, center: box.getCenter(new THREE.Vector3())});
-  });
-  const bounds = new THREE_Box3();
-  if (!boxes.length) return {bounds, hidden: 0};
-
-  const median = axis => {
-    const values = boxes.map(b => b.center.getComponent(axis)).sort((a, b) => a - b);
-    return values[Math.floor(values.length / 2)];
-  };
-  const mid = [median(0), median(1), median(2)];
-  const distances = boxes.map(b => Math.hypot(b.center.x - mid[0], b.center.y - mid[1], b.center.z - mid[2]));
-  const sorted = [...distances].sort((a, b) => a - b);
-  const spread = sorted[Math.floor(sorted.length / 2)] || 1;
-  // Generous: covers a limb swung far out, excludes a cube thousands of units off.
-  const limit = Math.max(spread * 8, 2);
-  // Framing ignores the tail of the distribution. Props and rideable furniture sit
-  // hundreds of units from the body (one pack has a merry-go-round at |x|=106 for
-  // a 89-unit-tall character); unioning them into the bounds shrinks the character
-  // to a speck, which the mass guard then rejects as a "vertex spike". Trimming the
-  // farthest 3% keeps the body — and its limbs — and drops the outliers.
-  const framingLimit = Math.max(sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.97))] || 2, 2);
-
-  // `ysmGlow*` geometry is animation-driven effects: blade flashes, auras, big flat
-  // sheets parked around the body. It renders, but it never defines the frame.
-  const inGlow = mesh => {
-    for (let node = mesh; node; node = node.parent) {
-      if (/^ysmGlow/i.test(node.name || '')) return true;
-    }
-    return false;
-  };
-
-  let hidden = 0;
-  boxes.forEach((entry, index) => {
-    if (distances[index] > limit) { entry.mesh.visible = false; hidden++; return; }
-    if (inGlow(entry.mesh)) return;
-    if (distances[index] > framingLimit) return;
-    bounds.union(entry.box);
-  });
-  // A model whose every mesh is glow would frame nothing; fall back to all of it.
-  if (bounds.isEmpty()) boxes.forEach(entry => bounds.union(entry.box));
-  return {bounds, hidden};
-}
-/**
  * Apply the pack's own card pose.
  *
  * ysm.json declares `properties.preview_animation` — the animation YSM itself
@@ -575,16 +412,10 @@ function isolateBody(root) {
  * disagree with the card. `idle` is only the fallback for packs that declare no
  * preview animation at all.
  *
- * Channels may be a constant, an array, or `{time: value}` keyframes; the LAST
- * keyframe is taken, i.e. the settled end of the loop.
+ * All channels are sampled at the same instant. Bedrock keyframes can wrap
+ * their values in pre/post objects, including a discontinuity at one timestamp.
  */
-export function applyPreviewPose(root, payload) {
-  const lastValue = value => {
-    if (value == null) return null;
-    if (typeof value === 'number' || Array.isArray(value)) return value;
-    const keys = Object.keys(value).sort((a, b) => Number(a) - Number(b));
-    return keys.length ? value[keys[keys.length - 1]] : null;
-  };
+export function applyPreviewPose(root, payload, time = 1) {
   const wanted = previewAnimationName(payload);
   const files = payload.animations || [];
   const pick = (name) => files.find(file => file?.value?.animations?.[name]);
@@ -611,6 +442,8 @@ export function applyPreviewPose(root, payload) {
     return null;
   };
   const triple = value => {
+    const uniform = scalar(value);
+    if (uniform !== null) return [uniform, uniform, uniform];
     if (!Array.isArray(value) || value.length < 3) return null;
     const out = [];
     for (let i = 0; i < 3; i++) {
@@ -620,23 +453,41 @@ export function applyPreviewPose(root, payload) {
     }
     return out;
   };
+  const length = Number(animation.animation_length) || 0;
+  time = Math.max(0, time);
+  if (length > 0) time = animation.loop === true ? time % length : Math.min(time, length);
+  const vector = (value, side = 'post') => triple(value?.[side] ?? value?.post ?? value?.pre ?? value);
+  const sample = channel => {
+    if (channel == null) return null;
+    if (typeof channel !== 'object' || Array.isArray(channel) || 'post' in channel || 'pre' in channel) return vector(channel);
+    const keys = Object.keys(channel).filter(key => Number.isFinite(Number(key))).sort((a,b) => Number(a)-Number(b));
+    if (!keys.length) return null;
+    const next = keys.findIndex(key => Number(key) > time);
+    if (next === 0) return vector(channel[keys[0]], 'pre');
+    if (next < 0) return vector(channel[keys.at(-1)]);
+    const left = channel[keys[next-1]], right = channel[keys[next]];
+    const a = vector(left), b = vector(right, 'pre');
+    if (!a || !b) return null;
+    const t = (time-Number(keys[next-1]))/(Number(keys[next])-Number(keys[next-1]));
+    if (left.lerp_mode !== 'catmullrom' && right.lerp_mode !== 'catmullrom') return a.map((v,i) => v+(b[i]-v)*t);
+    const before = vector(channel[keys[Math.max(0,next-2)]]) || a;
+    const after = vector(channel[keys[Math.min(keys.length-1,next+1)]], 'pre') || b;
+    return a.map((v,i) => .5*((2*v)+(-before[i]+b[i])*t+(2*before[i]-5*v+4*b[i]-after[i])*t*t+(-before[i]+3*v-3*b[i]+after[i])*t*t*t));
+  };
   let applied = 0;
   root.traverse(node => {
     const track = animation?.bones?.[node.name];
     if (!track) return;
-    const rotation = triple(lastValue(track.rotation));
-    if (rotation) rotate(node, rotation);
-    const position = triple(lastValue(track.position));
+    const rotation = sample(track.rotation);
+    if (rotation) {
+      const base=node.userData.bedrockRotation;
+      if(base)rotateBedrock(node,rotation.map((v,i)=>v+base[i]));else rotate(node,rotation);
+    }
+    const position = sample(track.position);
     if (position) node.position.add(new THREE.Vector3(...position));
-    const raw = lastValue(track.scale);
-    const flat = scalar(raw);
-    const scale = flat !== null ? [flat, flat, flat] : triple(raw);
+    const scale = sample(track.scale);
     if (scale) {
-      // An authored 0 is a "hide this part" idiom, but a zeroed root erases the
-      // model. Clamp instead of hiding: a tiny part stays invisible in practice,
-      // and framing measures the posed model, so a uniformly scaled-down root
-      // still comes out at full size.
-      node.scale.set(...scale.map(v => Math.max(Math.abs(v), 0.01)));
+      node.scale.set(...scale);
     }
     applied++;
   });
@@ -674,8 +525,8 @@ export function mount(items, request, {staticImages=true}={}) {
           if(current!==generation)return;
           const url=URL.createObjectURL(blob);imageUrls.add(url);const image=new Image();image.src=url;await image.decode();
           if(current!==generation)return;
-          // Old square screenshots predate authored cards; regenerate those locally.
-          if(Math.abs(image.width/image.height-52/90)<.02){image.className='model-preview';image.alt=`${item.model.name} 的静态卡片`;item.visual.prepend(image);item.visual.querySelector('.preview-status')?.remove();item.visual.dataset.preview='ready';return;}
+          // Old complete cards contain a baked name row. Regenerate their cover.
+          if(image.width/image.height>52/90+.02){image.className='model-preview';image.alt=`${item.model.name} 的静态卡片`;item.visual.prepend(image);item.visual.querySelector('.preview-status')?.remove();item.visual.dataset.preview='ready';return;}
         }catch(error){if(current!==generation)return;if(error.status===401)throw error;}
       }
       const payload=await request(`/admin/api/assets/${encodeURIComponent(item.model.asset_id)}/preview`);if(current!==generation)return;

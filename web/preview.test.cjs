@@ -21,14 +21,12 @@ test('declared missing card artwork is reported rather than silently replaced', 
   assert.throws(()=>context.SPMPreview.cardAssets({pack:{'ysm.json':{properties:{gui_foreground:'missing.png'}}},images:[]}),/卡片素材缺失/);
 });
 
-test('authored preview animation binds named bones and collapses zero-scale accessories', async()=>{
+test('authored preview animation keeps zero-scale accessories exactly hidden', async()=>{
   const payload={documents:[{path:'main.json',value:{bones:[{name:'accessory',cubes:[{origin:[0,0,0],size:[1,1,1]}]}]}}],images:[],pack:{'ysm.json':{properties:{preview_animation:'gui'}}},animations:[{value:{animations:{gui:{bones:{accessory:{scale:0}}}}}}]};
   const model=await context.SPMPreview.buildModel(payload);
   const applied=context.SPMPreview.applyPreviewPose(model,payload);
   const accessory=model.getObjectByName('accessory');
-  // Collapsed to a hair's width rather than hidden: a zero scale written on the
-  // root bone must not erase the model, and a near-zero part is invisible anyway.
-  assert.equal(applied.bones,1);assert.equal(accessory.visible,true);assert.equal(accessory.scale.x,0.01);
+  assert.equal(applied.bones,1);assert.equal(accessory.scale.x,0);
 });
 test('Molang scale expressions leave the channel alone instead of collapsing the model', async()=>{
   const payload={documents:[{path:'main.json',value:{bones:[{name:'Root',cubes:[{origin:[0,0,0],size:[1,1,1]}]}]}}],images:[],pack:{'ysm.json':{properties:{preview_animation:'gui'}}},animations:[{value:{animations:{gui:{bones:{Root:{scale:['1-math.sin(-60+q.anim_time*180)*0.0025',1,1]}}}}}}]};
@@ -42,4 +40,28 @@ test('Bedrock cubes with per-face UVs leave omitted faces invisible', async()=>{
   const model=await context.SPMPreview.buildModel({documents:[{path:'main.json',value:{bones:[{name:'body',cubes:[{origin:[0,0,0],size:[1,1,1],uv:{north:{uv:[0,0],uv_size:[1,1]}}}]}]}}],images:[]});
   const mesh=model.children[0].children[0].children[0];
   assert.equal(mesh.material.filter(material=>material.visible).length,1);
+});
+
+test('card snapshot samples keyframe post values at one shared time', async()=>{
+  const track={rotation:{'0':{post:[0,0,0]},'2':{pre:[0,90,0],post:[0,180,0]}},position:{'0':[0,0,0],'4':[0,8,0]},scale:{'0':{post:[1,1,1]},'2':{post:[2,2,2]}}};
+  const payload={
+    documents:[{path:'main.json',value:{bones:[{name:'body',pivot:[0,2,0],cubes:[{origin:[0,0,0],size:[1,1,1]}]}]}}],
+    images:[],pack:{'ysm.json':{properties:{preview_animation:'gui'}}},
+    animations:[{value:{animations:{gui:{animation_length:4,bones:{body:track}}}}}],
+  };
+  const model=await context.SPMPreview.buildModel(payload),bone=model.getObjectByName('body');
+  context.SPMPreview.applyPreviewPose(model,payload,1);
+  assert.ok(Math.abs(bone.rotation.y-Math.PI/4)<1e-9);
+  assert.equal(bone.position.y,4);
+  assert.equal(bone.scale.y,1.5);
+});
+
+test('YSM card coordinates follow the mods mirrored X and rotation conventions',async()=>{
+  const payload={documents:[{path:'main.json',value:{bones:[{name:'body',pivot:[2,0,0],cubes:[{origin:[0,0,0],size:[1,1,1]}]}]}}],images:[],pack:{'ysm.json':{properties:{preview_animation:'gui'}}},animations:[{value:{animations:{gui:{bones:{body:{position:[5,0,0],rotation:[30,40,50]}}}}}}]};
+  const model=await context.SPMPreview.buildModel(payload),bone=model.getObjectByName('body');
+  context.SPMPreview.applyPreviewPose(model,payload);
+  model.updateMatrixWorld(true);
+  assert.equal(bone.getWorldPosition(bone.position.clone()).x,-7);
+  assert.ok(Math.abs(bone.rotation.x+Math.PI/6)<1e-9);
+  assert.ok(Math.abs(bone.rotation.z+50*Math.PI/180)<1e-9);
 });
