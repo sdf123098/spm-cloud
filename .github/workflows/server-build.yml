@@ -1,0 +1,57 @@
+name: Server priority build
+
+on:
+  push:
+    branches: [main]
+    paths: ['Cargo.toml', '.github/workflows/server-build.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-server:
+    # Keep the glibc baseline suitable for Ubuntu 22.04 and newer servers.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify shipped WebUI
+        working-directory: web
+        run: |
+          npm ci
+          npm test
+          npm run build
+          git diff --exit-code preview.bundle.js preview.bundle.js.LEGAL.txt
+      - name: Build and test server
+        run: |
+          cargo fmt --all -- --check
+          cargo test --all-targets --all-features --locked
+          cargo build --release --locked
+          python3 tools/service_contract.py --binary target/release/spm-cloud --output service-contract.json
+      - name: Package server installation bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          test "$(target/release/spm-cloud --version)" = "spm-cloud $version"
+          package="spm-cloud-${version}-x86_64-unknown-linux-gnu"
+          mkdir -p "server-package/$package/tools" "server-package/$package/web" "server-package/$package/deploy" server-artifacts
+          install -m 755 target/release/spm-cloud "server-package/$package/spm-cloud"
+          cp config.example.json config.schema.json README.md README_zh.md LICENSE service-contract.json "server-package/$package/"
+          cp tools/render-thumbnails.mjs tools/thumbnail.html tools/package.json tools/package-lock.json "server-package/$package/tools/"
+          cp web/preview.bundle.js web/preview.bundle.js.LEGAL.txt "server-package/$package/web/"
+          cp deploy/spm-cloud-json.service deploy/native-auto-update.sh "server-package/$package/deploy/"
+          printf 'version=%s\ncommit=%s\nbuild_os=ubuntu-22.04\narchitecture=x86_64\n' "$version" "$GITHUB_SHA" > "server-package/$package/BUILD_INFO.txt"
+          tar -C server-package -cJf "server-artifacts/$package.tar.xz" "$package"
+          cd server-artifacts
+          sha256sum "$package.tar.xz" > "$package.tar.xz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spm-cloud-linux-server
+          path: server-artifacts/*
+          if-no-files-found: error
