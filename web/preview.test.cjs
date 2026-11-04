@@ -28,12 +28,46 @@ test('authored preview animation keeps zero-scale accessories exactly hidden', a
   const accessory=model.getObjectByName('accessory');
   assert.equal(applied.bones,1);assert.equal(accessory.scale.x,0);
 });
-test('Molang scale expressions leave the channel alone instead of collapsing the model', async()=>{
+test('Molang scale expressions evaluate in degrees at the card snapshot time', async()=>{
   const payload={documents:[{path:'main.json',value:{bones:[{name:'Root',cubes:[{origin:[0,0,0],size:[1,1,1]}]}]}}],images:[],pack:{'ysm.json':{properties:{preview_animation:'gui'}}},animations:[{value:{animations:{gui:{bones:{Root:{scale:['1-math.sin(-60+q.anim_time*180)*0.0025',1,1]}}}}}}]};
   const model=await context.SPMPreview.buildModel(payload);
   context.SPMPreview.applyPreviewPose(model,payload);
   const root=model.getObjectByName('Root');
-  assert.equal(root.scale.x,1);assert.equal(root.scale.y,1);assert.equal(root.visible,true);
+  assert.ok(Math.abs(root.scale.x-(1-Math.sin(120*Math.PI/180)*.0025))<1e-9);assert.equal(root.scale.y,1);assert.equal(root.visible,true);
+});
+
+test('Furina scrolling backgrounds and Mingfeng root offsets evaluate authored Molang',async()=>{
+  const tracks={ysmGlowbackground:{position:['-200+math.mod(q.anim_time*40,400)',0,0]},ysmGlowbackground2:{position:['-200+math.mod(200+query.anim_time*40,400)',0,0]},Root:{position:[-2,'-36+math.sin(q.anim_time*360/3)*0.5',0],scale:2.2}};
+  const payload={documents:[{path:'main.json',value:{bones:Object.keys(tracks).map(name=>({name}))}}],images:[],pack:{'ysm.json':{properties:{preview_animation:'gui'}}},animations:[{value:{animations:{gui:{animation_length:1000,bones:tracks}}}}]};
+  for(const time of [1,2]){
+    const model=await context.SPMPreview.buildModel(payload);context.SPMPreview.applyPreviewPose(model,payload,time);
+    assert.equal(model.getObjectByName('ysmGlowbackground').position.x,-200+time*40);
+    assert.equal(model.getObjectByName('ysmGlowbackground2').position.x,time*40);
+    assert.equal(model.getObjectByName('Root').position.x,-2);
+    assert.ok(Math.abs(model.getObjectByName('Root').position.y-(-36+Math.sin(time*120*Math.PI/180)*.5))<1e-9);
+  }
+});
+
+test('SPM parallel initialization hides effects and initializes variables around the GUI pose',async()=>{
+  const animations={
+    pre_parallel2:{bones:{effect:{scale:'!(0||!0)',position:[0,9,0]},Root:{position:[0,5,0]}}},
+    gui:{bones:{effect:{position:['0/0',0,0]},Root:{position:[0,2,0],rotation:[0,20,0]}}},
+    parallel1:{timeline:{'0':['[;',"'comment containing ysm.bone_rot(\'Root\').x';",'v.roaming.player_size=v.roaming.player_size?v.roaming.player_size:1;','];']},bones:{Root:{scale:'v.roaming.player_size',rotation:[0,10,0]}}},
+  };
+  const payload={documents:[{path:'main.json',value:{bones:[{name:'Root'},{name:'effect',parent:'Root'}]}}],images:[],pack:{'ysm.json':{properties:{preview_animation:'gui'}}},animations:[{value:{animations}}]};
+  const model=await context.SPMPreview.buildModel(payload);context.SPMPreview.applyPreviewPose(model,payload,1);
+  assert.equal(model.getObjectByName('effect').scale.x,0);
+  assert.equal(model.getObjectByName('effect').position.y,9);
+  assert.equal(model.getObjectByName('Root').scale.x,1);
+  assert.equal(model.getObjectByName('Root').position.y,2);
+  assert.ok(Math.abs(model.getObjectByName('Root').rotation.y-Math.PI/6)<1e-9);
+});
+
+test('unset model size uses its authored null-coalescing default while explicit zero stays hidden',async()=>{
+  const payload={documents:[{path:'main.json',value:{bones:[{name:'Root'},{name:'accessory'}]}}],images:[],pack:{'ysm.json':{properties:{preview_animation:'gui'}}},animations:[{value:{animations:{parallel1:{timeline:{'0':['v.explicit_zero=0;']},bones:{Root:{scale:'v.player_size??1'},accessory:{scale:'v.explicit_zero??1'}}}}}}]};
+  const model=await context.SPMPreview.buildModel(payload);context.SPMPreview.applyPreviewPose(model,payload);
+  assert.equal(model.getObjectByName('Root').scale.x,1);
+  assert.equal(model.getObjectByName('accessory').scale.x,0);
 });
 
 test('Bedrock cubes with per-face UVs leave omitted faces invisible', async()=>{

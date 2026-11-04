@@ -6,6 +6,7 @@
     "build": "esbuild preview.js --bundle --format=iife --global-name=SPMPreview --minify --legal-comments=linked --outfile=preview.bundle.js"
   },
   "dependencies": {
+    "@bridge-editor/molang": "2.0.2",
     "three": "0.180.0"
   },
   "devDependencies": {

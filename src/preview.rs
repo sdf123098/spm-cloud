@@ -19,7 +19,11 @@ pub fn routes() -> Router<AppState> {
 async fn license() -> impl axum::response::IntoResponse {
     (
         [("content-type", "text/plain; charset=utf-8")],
-        include_str!("../web/THREE-LICENSE.txt"),
+        concat!(
+            include_str!("../web/THREE-LICENSE.txt"),
+            "\n\n",
+            include_str!("../web/preview.bundle.js.LEGAL.txt")
+        ),
     )
 }
 async fn script() -> impl axum::response::IntoResponse {
@@ -185,7 +189,7 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
                 // Kept verbatim for now; which animation matters is only known
                 // once ysm.json has been read, and archive order is not fixed.
                 if value.get("animations").is_some() {
-                    animation_files.push(value);
+                    animation_files.push(json!({"path":name,"value":value}));
                 } else if value.get("files").is_some() || value.get("properties").is_some() {
                     pack.insert(name.to_owned(), value);
                 }
@@ -318,39 +322,55 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
     if documents.is_empty() {
         return Err(CloudError::invalid_metadata("此模型没有可读取的几何数据"));
     }
-    // Only the clip the card actually plays is forwarded.
-    //
-    // A large pack ships eighteen animation files (one here is 19 MB); sending
-    // them all pushed the payload to 30 MB, well past the 48 MB byte budget in
-    // `add`, so `collect` returned AssetTooLarge and those models got neither a
-    // preview nor a thumbnail. The renderer needs one clip, named by the pack.
+    // SPM runs the main model's parallel initialization around the GUI clip.
+    // Keep those channels (they hide unused effects/variants), without forwarding
+    // entire multi-megabyte movement, arm, projectile and compatibility files.
     let wanted = pack.values().find_map(|doc| {
         doc.pointer("/properties/preview_animation")
             .and_then(Value::as_str)
     });
-    let animations: Vec<Value> = match wanted {
-        Some(name) => animation_files
+    let main_path = pack.iter().find_map(|(path, doc)| {
+        let main = doc.pointer("/files/player/animation/main")?.as_str()?;
+        let prefix = path.rsplit_once('/').map_or("", |(prefix, _)| prefix);
+        Some(if prefix.is_empty() {
+            main.to_owned()
+        } else {
+            format!("{prefix}/{main}")
+        })
+    });
+    let main = main_path.as_ref().and_then(|path| {
+        animation_files
             .iter()
-            .filter_map(|file| {
-                let clip = file.pointer(&format!("/animations/{}", json_pointer_escape(name)))?;
-                Some(json!({
-                    "path": name,
-                    "value": {"animations": {name: clip.clone()}},
-                }))
-            })
-            .take(1)
-            .collect(),
-        None => animation_files
-            .into_iter()
-            .map(|file| {
-                let names = file.get("animations").and_then(Value::as_object);
-                let idle = names
-                    .filter(|map| map.contains_key("idle"))
-                    .map(|map| json!({"animations": {"idle": map["idle"].clone()}}));
-                json!({"path": "idle", "value": idle.unwrap_or(file)})
-            })
-            .take(1)
-            .collect(),
+            .find(|file| file["path"].as_str() == Some(path.as_str()))
+    });
+    let mut selected = serde_json::Map::new();
+    if let Some(main) = main
+        && let Some(clips) = main.pointer("/value/animations").and_then(Value::as_object)
+    {
+        for (name, clip) in clips {
+            let parallel = name
+                .strip_prefix("pre_parallel")
+                .or_else(|| name.strip_prefix("parallel"))
+                .is_some_and(|suffix| {
+                    suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'0'..=b'7')
+                });
+            if parallel || Some(name.as_str()) == wanted {
+                selected.insert(name.clone(), clip.clone());
+            }
+        }
+    }
+    if let Some(name) = wanted
+        && !selected.contains_key(name)
+        && let Some(clip) = animation_files.iter().find_map(|file| {
+            file.pointer(&format!("/value/animations/{}", json_pointer_escape(name)))
+        })
+    {
+        selected.insert(name.to_owned(), clip.clone());
+    }
+    let animations: Vec<Value> = if selected.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({"path":main_path.unwrap_or_default(),"value":{"animations":selected}})]
     };
     Ok(json!({"documents":documents,"images":images,"pack":pack,"animations":animations}))
 }
@@ -359,6 +379,28 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
 mod tests {
     use super::*;
     use std::io::Write;
+    #[test]
+    fn preview_retains_main_parallel_initialization_without_other_animation_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("main.json"),
+            r#"{"bones":[{"name":"Root"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("ysm.json"), r#"{"properties":{"preview_animation":"gui"},"files":{"player":{"animation":{"main":"main.animation.json","arm":"arm.animation.json"}}}}"#).unwrap();
+        std::fs::write(
+            dir.path().join("arm.animation.json"),
+            r#"{"animations":{"parallel1":{"bones":{"armOnly":{"scale":0}}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("main.animation.json"), r#"{"animations":{"gui":{"bones":{"Root":{"scale":2}}},"pre_parallel2":{"bones":{"effect":{"scale":0}}},"parallel1":{"bones":{"Root":{"scale":1}}},"walk":{"bones":{"Root":{"scale":99}}}}}"#).unwrap();
+        let payload = collect(dir.path()).unwrap();
+        let clips = &payload["animations"][0]["value"]["animations"];
+        assert!(clips.get("pre_parallel2").is_some());
+        assert_eq!(clips["parallel1"]["bones"]["Root"]["scale"], 1);
+        assert!(clips.get("gui").is_some());
+        assert!(clips.get("walk").is_none());
+    }
     #[test]
     fn zip_paths_are_data_and_missing_geometry_is_an_error() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,6 +1,30 @@
+/*! @license @bridge-editor/molang 2.0.2
+MIT License
+
+Copyright (c) 2020 solvedDev
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
 // Bundled locally with Three.js; no CDN or model-supplied network requests.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { Molang } from '@bridge-editor/molang';
 
 let renderer, observer, generation = 0;
 const scenes = new Set();
@@ -408,9 +432,8 @@ function isBlank(canvas) {
  * ysm.json declares `properties.preview_animation` — the animation YSM itself
  * plays while showing the model in a GUI card (`gui` in most packs). That is the
  * pose the client draws, so it is the pose the still must use; inventing framing
- * or falling back to `idle` when the pack said otherwise is what made thumbnails
- * disagree with the card. `idle` is only the fallback for packs that declare no
- * preview animation at all.
+ * made thumbnails disagree with the card. Standard pre_parallel/parallel slots
+ * initialize variables and hide props around this pose, just as SPM does.
  *
  * All channels are sampled at the same instant. Bedrock keyframes can wrap
  * their values in pre/post objects, including a discontinuity at one timestamp.
@@ -419,79 +442,123 @@ export function applyPreviewPose(root, payload, time = 1) {
   const wanted = previewAnimationName(payload);
   const files = payload.animations || [];
   const pick = (name) => files.find(file => file?.value?.animations?.[name]);
-  // The mod queues only the author's configured preview animation.
-  const chosen = [wanted]
+  // Match PlayerAnimationController / ParallelProcessor's standard slots.
+  const chosen = [...Array.from({length:8},(_,i)=>`pre_parallel${i}`),wanted,...Array.from({length:8},(_,i)=>`parallel${i}`)]
     .filter(Boolean)
     .map(name => ({name, file: pick(name)}))
-    .find(entry => entry.file);
-  if (!chosen) return {animation: null, bones: 0};
-
-  const animation = chosen.file.value.animations[chosen.name];
-  // YSM animations are Molang: `"1+math.sin(30+q.anim_time*180)*0.01"`. There is
-  // no evaluator here, and treating an unevaluable component as 0 is destructive:
-  // a Root scale of `[1, "1+math.sin(...)", 1]` became [1, 0, 1] and flattened the
-  // whole model to nothing, while an all-Molang Root scale became [0,0,0] and
-  // hid it. Skip the channel instead — the bind pose is correct, a zeroed one is
-  // not.
-  const scalar = value => {
-    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-    if (typeof value === 'string' && value.trim() !== '') {
-      const n = Number(value.trim());
-      return Number.isFinite(n) ? n : null;
-    }
-    return null;
-  };
-  const triple = value => {
-    const uniform = scalar(value);
-    if (uniform !== null) return [uniform, uniform, uniform];
-    if (!Array.isArray(value) || value.length < 3) return null;
-    const out = [];
-    for (let i = 0; i < 3; i++) {
-      const n = scalar(value[i]);
-      if (n === null) return null;
-      out.push(n);
-    }
-    return out;
-  };
-  const length = Number(animation.animation_length) || 0;
-  time = Math.max(0, time);
-  if (length > 0) time = animation.loop === true ? time % length : Math.min(time, length);
-  const vector = (value, side = 'post') => triple(value?.[side] ?? value?.post ?? value?.pre ?? value);
-  const sample = channel => {
-    if (channel == null) return null;
-    if (typeof channel !== 'object' || Array.isArray(channel) || 'post' in channel || 'pre' in channel) return vector(channel);
-    const keys = Object.keys(channel).filter(key => Number.isFinite(Number(key))).sort((a,b) => Number(a)-Number(b));
-    if (!keys.length) return null;
-    const next = keys.findIndex(key => Number(key) > time);
-    if (next === 0) return vector(channel[keys[0]], 'pre');
-    if (next < 0) return vector(channel[keys.at(-1)]);
-    const left = channel[keys[next-1]], right = channel[keys[next]];
-    const a = vector(left), b = vector(right, 'pre');
-    if (!a || !b) return null;
-    const t = (time-Number(keys[next-1]))/(Number(keys[next])-Number(keys[next-1]));
-    if (left.lerp_mode !== 'catmullrom' && right.lerp_mode !== 'catmullrom') return a.map((v,i) => v+(b[i]-v)*t);
-    const before = vector(channel[keys[Math.max(0,next-2)]]) || a;
-    const after = vector(channel[keys[Math.min(keys.length-1,next+1)]], 'pre') || b;
-    return a.map((v,i) => .5*((2*v)+(-before[i]+b[i])*t+(2*before[i]-5*v+4*b[i]-after[i])*t*t+(-before[i]+3*v-3*b[i]+after[i])*t*t*t));
+    .filter(entry => entry.file);
+  if (!chosen.length) return {animation: null, bones: 0};
+  const snapshotTime=Math.max(0,time);
+  const ysm={equipped_enchantment_level:()=>0,effect_level:()=>0,relative_block_name:()=>'minecraft:air',particle:()=>0,play_sound:()=>0,first_order:(_id,target)=>target,second_order:(_id,target)=>target};
+  for(const [axis,index] of ['x','y','z'].map((axis,i)=>[axis,i])){
+    ysm[`bone_rot_${axis}`]=name=>{const bone=root.getObjectByName(name);return bone?bone.rotation[['x','y','z'][index]]*180/Math.PI:0;};
+    ysm[`bone_pivot_abs_${axis}`]=name=>{const bone=root.getObjectByName(name);return bone?bone.getWorldPosition(bone.position.clone()).getComponent(index):0;};
+  }
+  // Use the Molang interpreter, with degree-based math and the same animation
+  // time for every channel. Skipping an expression drops the author's entire
+  // offset/scale (e.g. Mingfeng's Root and Furina's scrolling background bones).
+  const molang = new Molang({query:{life_time:snapshotTime,position:()=>0,position_delta:()=>0,max_durability:()=>0,remaining_durability:()=>0},ctrl:{hold:()=>0},ysm},{useOptimizer:false,convertUndefined:false,variableHandler:name=>name==='query.anim_time'?time:undefined});
+  const expression=value=>value.replace(/ysm\.(bone_rot|bone_pivot_abs)\(([^)]*)\)\.([xyz])/g,'ysm.$1_$3($2)');
+  const evaluate=value=>{
+    try{
+      const tree=molang.parse(expression(value));
+      tree.walk(node=>{
+        // Undefined variables act as zero in arithmetic, but stay undefined on
+        // the left of ?? (Suise's authored v.player_size??1 must remain one).
+        if(node.type==='NameExpression'&&!node.cardRawEval){
+          node.cardRawEval=node.eval.bind(node);node.eval=()=>node.cardRawEval()??0;
+        }
+        if(node.type==='GenericOperatorExpression'&&node.operator==='??'){
+          node.eval=()=>{const [left,right]=node.allExpressions;return (left.cardRawEval?left.cardRawEval():left.eval())??right.eval();};
+        }
+        // Bedrock boolean values are numbers, including nested negation. The
+        // library otherwise rejects !(a || !b) when its operand is boolean.
+        if(node.type==='PrefixExpression'){
+          const negate=node.toString().startsWith('!');
+          node.eval=()=>negate?Number(!Number(node.allExpressions[0].eval())):-Number(node.allExpressions[0].eval());
+          node.type='CardPrefixExpression';
+        }
+      });
+      return tree.eval();
+    }catch(error){throw new Error(`卡片表达式 ${value.slice(0,120)}：${error.message}`);}
   };
   let applied = 0;
-  root.traverse(node => {
-    const track = animation?.bones?.[node.name];
-    if (!track) return;
-    const rotation = sample(track.rotation);
-    if (rotation) {
-      const base=node.userData.bedrockRotation;
-      if(base)rotateBedrock(node,rotation.map((v,i)=>v+base[i]));else rotate(node,rotation);
+  root.traverse(node=>{node.userData.cardBindPosition ||= node.position.clone();});
+  for(const entry of chosen){
+    const animation=entry.file.value.animations[entry.name];
+    const length = Number(animation.animation_length) || 0;
+    time = length > 0 ? (animation.loop === true ? snapshotTime % length : Math.min(snapshotTime,length)) : snapshotTime;
+    for(const [timestamp,scripts] of Object.entries(animation.timeline||{})){
+      if(Number(timestamp)>time)continue;
+      // JsonMolangUtils evaluates timeline array entries independently by default.
+      // Author comment/section lines carry no animation state (some contain
+      // unescaped quote marks around bone names, so they are not string literals).
+      for(const script of Array.isArray(scripts)?scripts:[scripts]){
+        if(typeof script!=='string'||/^\s*[\[\]]\s*;?\s*$/.test(script)||/^\s*\[?\s*'.*'\s*;?\s*$/.test(script))continue;
+        evaluate(script);
+      }
     }
-    const position = sample(track.position);
-    if (position) node.position.add(new THREE.Vector3(...position));
-    const scale = sample(track.scale);
-    if (scale) {
-      node.scale.set(...scale);
-    }
-    applied++;
-  });
-  return {animation: chosen.name, bones: applied};
+    const scalar = value => {
+      if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+      if (typeof value === 'string' && value.trim() !== '') {
+        const result = evaluate(value),n=typeof result==='boolean'?Number(result):result;
+        // AnimationProcessor keeps the last valid channel for NaN/Inf. A freshly
+        // initialized, hidden accessory can divide by its not-yet-set size.
+        return typeof n==='number'&&Number.isFinite(n)?n:null;
+      }
+      return null;
+    };
+    const triple = value => {
+      const uniform = scalar(value);
+      if (uniform !== null) return [uniform, uniform, uniform];
+      if (!Array.isArray(value) || value.length < 3) return null;
+      const out = [];
+      for (let i = 0; i < 3; i++) {
+        const n = scalar(value[i]);
+        if (n === null) return null;
+        out.push(n);
+      }
+      return out;
+    };
+    const vector = (value, side = 'post') => triple(value?.[side] ?? value?.post ?? value?.pre ?? value);
+    const sample = channel => {
+      if (channel == null) return null;
+      if (typeof channel !== 'object' || Array.isArray(channel) || 'post' in channel || 'pre' in channel) return vector(channel);
+      const keys = Object.keys(channel).filter(key => Number.isFinite(Number(key))).sort((a,b) => Number(a)-Number(b));
+      if (!keys.length) return null;
+      const next = keys.findIndex(key => Number(key) > time);
+      if (next === 0) return vector(channel[keys[0]], 'pre');
+      if (next < 0) return vector(channel[keys.at(-1)]);
+      const left = channel[keys[next-1]], right = channel[keys[next]];
+      const a = vector(left), b = vector(right, 'pre');
+      if (!a || !b) return null;
+      const t = (time-Number(keys[next-1]))/(Number(keys[next])-Number(keys[next-1]));
+      if (left.lerp_mode !== 'catmullrom' && right.lerp_mode !== 'catmullrom') return a.map((v,i) => v+(b[i]-v)*t);
+      const before = vector(channel[keys[Math.max(0,next-2)]]) || a;
+      const after = vector(channel[keys[Math.min(keys.length-1,next+1)]], 'pre') || b;
+      return a.map((v,i) => .5*((2*v)+(-before[i]+b[i])*t+(2*before[i]-5*v+4*b[i]-after[i])*t*t+(-before[i]+3*v-3*b[i]+after[i])*t*t*t));
+    };
+    root.traverse(node => {
+      const track = animation?.bones?.[node.name];
+      if (!track) return;
+      const rotation = sample(track.rotation);
+      if (rotation) {
+        const base=node.userData.bedrockRotation;
+        if(base){
+          const previous=entry.name.startsWith('parallel')?[-node.rotation.x*180/Math.PI,node.rotation.y*180/Math.PI,-node.rotation.z*180/Math.PI]:base;
+          rotateBedrock(node,rotation.map((v,i)=>v+previous[i]));
+        }else rotate(node,rotation);
+      }
+      const position = sample(track.position);
+      if (position) node.position.copy(node.userData.cardBindPosition).add(new THREE.Vector3(...position));
+      const scale = sample(track.scale);
+      if (scale) {
+        node.scale.set(...scale);
+      }
+      applied++;
+    });
+  }
+  return {animation: wanted, bones: applied};
 }
 
 /** `properties.preview_animation` from ysm.json, if the pack declares one. */
