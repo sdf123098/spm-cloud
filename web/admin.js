@@ -4,6 +4,8 @@ const accountPortal=location.pathname.startsWith('/account/');
 const offlinePanel=SPMOfflineIdentity.create(request,renderOfflineIdentities);
 let session = null, configResponse = null, formConfig = null, nextCursor = null, nextAccountCursor = null, noticeTimer;
 let models = [], modelView = 'grid', selectedModels = new Set(), bulkRunning = false;
+let staticImages = true;
+try { staticImages = localStorage.getItem('spm-cloud-static-images') !== 'false'; } catch {}
 let uploadQueue = [], uploadRunning = false;
 try { if (localStorage.getItem('spm-cloud-model-view') === 'cards') modelView = 'cards'; } catch {}
 const roleNames = { owner: '服主', admin: '管理员', member: '普通账号' };
@@ -24,7 +26,7 @@ async function request(path,options={},retry=true){
     const messages={OFFLINE_IDENTITY_DISABLED:'实例尚未启用实验性离线身份。',OFFLINE_KEY_INVALID:'离线 key 不属于当前 Cloud 账号或实例。',OFFLINE_KEY_REVOKED:'离线 key 已撤销。',OFFLINE_BINDING_STALE:'绑定已更新，请刷新后重试。',OFFLINE_IDENTITY_QUOTA:'该账号已达到离线身份上限，可轮换已有身份。',OFFLINE_SESSION_EXPIRED:'离线发布会话已过期。',R18_MODEL_BLOCKED:'该模型被识别或标记为 R18，已按内容策略阻止上传。',MODEL_UNCLASSIFIED:'该模型未能完成内容识别，已按“拒绝未能完成识别的模型”策略阻止上传。',ASSET_TOO_LARGE:'文件超过服务器允许的模型大小，请调整大小上限或选择较小文件。',IDENTITY_NOT_LINKED:'该游戏身份尚未绑定 Cloud 账号，请先用 Cloud 账号登录并完成绑定。',IDENTITY_ALREADY_LINKED:'该身份或账号已有不同的关联，请检查当前绑定，不能覆盖他人的关联。',IDENTITY_PROFILE_MISMATCH:'身份验证失败，请检查账号、令牌或微软应用授权。',IDENTITY_PROVIDER_UNAVAILABLE:'身份服务暂时无法访问，请稍后重试。',IDENTITY_PROVIDER_UNTRUSTED:'该身份服务尚未启用，或服务地址不符合要求。',ASSET_ACCESS_DENIED:'当前账号没有执行此操作的权限。',UNAUTHENTICATED:'账号或密码不正确，或当前登录已失效。',IDENTITY_CHALLENGE_EXPIRED:'验证已过期，请重新开始。',RATE_LIMITED:'操作过于频繁，请稍后再试。'};
     const error=new Error(messages[detail.code]||detail.message||detail.code||`HTTP ${response.status}`);error.status=response.status;error.code=detail.code;error.errors=detail.errors;throw error;
   }
-  if(response.status===204)return null;return response.json();
+  if(response.status===204)return null;return options.responseType==='blob'?response.blob():response.json();
 }
 async function busy(button,fn){button.disabled=true;try{return await fn();}catch(e){notice(e.message,true);}finally{button.disabled=false;}}
 function node(tag,text,className){const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(className)el.className=className;return el;}
@@ -97,6 +99,9 @@ $('upload-form').addEventListener('submit',async e=>{
   }finally{uploadRunning=false;$('logout').disabled=bulkRunning||settingsUI.saving;for(const control of form.querySelectorAll('input,select,button'))control.disabled=false;renderUploads();}
 });
 $('search-form').addEventListener('submit',e=>{e.preventDefault();busy(e.submitter,()=>loadModels());});$('include-deleted').addEventListener('change',()=>loadModels().catch(e=>notice(e.message,true)));$('refresh-models').addEventListener('click',()=>busy($('refresh-models'),()=>loadModels()));
+const staticToggle=node('input');staticToggle.type='checkbox';staticToggle.id='static-model-images';staticToggle.checked=staticImages;
+const staticLabel=node('label',undefined,'inline static-images-toggle');staticLabel.append(staticToggle,document.createTextNode('静态卡片'));document.querySelector('.library-toolbar').append(staticLabel);
+staticToggle.addEventListener('change',()=>{staticImages=staticToggle.checked;try{localStorage.setItem('spm-cloud-static-images',String(staticImages));}catch{}renderModels();});
 function setModelView(view){
   modelView=view==='cards'?'cards':'grid';
   $('model-cards').dataset.view=modelView;
@@ -106,6 +111,7 @@ function setModelView(view){
   if(models.length)renderModels();
 }
 document.querySelectorAll('button[data-view]').forEach(button=>button.addEventListener('click',()=>setModelView(button.dataset.view)));
+document.querySelector('button[data-view="cards"]').lastChild.textContent='模型卡片';
 setModelView(modelView);
 const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)'), finePointer=matchMedia('(hover: hover) and (pointer: fine)');
 $('model-cards').addEventListener('pointermove',event=>{
@@ -176,7 +182,7 @@ function renderModels(){
     const meta=node('div',undefined,'model-meta'), owner=node('span',model.owner_account_id,'model-owner');owner.title=`所有者：${model.owner_account_id}`;const size=node('span',bytes(model.byte_length));size.title=`${model.byte_length} 字节（原始文件）`;meta.append(owner,size);body.append(status,meta);
     card.append(visual,body);slot.append(card);root.append(slot);
   }
-  $('model-empty').hidden=models.length>0;syncSelection();if(modelView==='cards')SPMPreview.mount(models.map((model,i)=>({model,visual:root.children[i].querySelector('.model-visual')})),request);else SPMPreview.clear();
+  $('model-empty').hidden=models.length>0;syncSelection();staticToggle.disabled=modelView!=='cards';if(modelView==='cards')SPMPreview.mount(models.map((model,i)=>({model,visual:root.children[i].querySelector('.model-visual')})),request,{staticImages});else SPMPreview.clear();
 }
 
 function showModelDetail(model){

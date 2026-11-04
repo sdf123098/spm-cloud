@@ -116,3 +116,10 @@
 }
 
 .offline-identity-row{padding:16px 0;border-top:1px solid var(--line,#ddd)}.offline-identity-row button{margin-right:8px}#offline-once{margin:16px 0;padding:16px;background:var(--panel,#f5f5f5);border-radius:8px}
+/* Authored YSM cards keep their full portrait canvas in both preview modes. */
+.model-grid[data-view=cards]{grid-template-columns:repeat(auto-fill,minmax(min(180px,100%),1fr));align-items:start}
+.model-grid[data-view=cards] .model-visual{height:auto;aspect-ratio:52/90;padding:0;position:relative;background:#323232}
+.model-grid[data-view=cards] .model-preview{width:100%;height:100%;object-fit:contain;cursor:default}
+.model-grid[data-view=cards] .preview-status{position:absolute;inset:0;max-height:none;display:grid;place-content:center;padding:28px 12px;color:#d1dbea;overflow-wrap:anywhere}
+.static-images-toggle{font-size:12px;white-space:nowrap;gap:6px}
+.model-slot,.model-card{min-width:0}

@@ -1585,6 +1585,18 @@ async fn thumbnails_are_queued_rendered_served_anonymously_and_hidden_when_priva
         .unwrap();
     assert_eq!(stored.status(), StatusCode::OK);
 
+    let admin_page: Value = client
+        .get(format!("{}/admin/api/assets?q=thumb-public", s.url))
+        .bearer_auth(OWNER_TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(admin_page["entries"][0]["thumbnail_status"], "ready");
+    assert_eq!(admin_page["entries"][0]["revision"], 1);
+
     // Anonymous, long-cacheable, honest content type, digest-based ETag.
     let served = client.get(&thumbnail_url).send().await.unwrap();
     assert_eq!(served.status(), StatusCode::OK);
