@@ -538,12 +538,31 @@ function isolateBody(root) {
   const spread = sorted[Math.floor(sorted.length / 2)] || 1;
   // Generous: covers a limb swung far out, excludes a cube thousands of units off.
   const limit = Math.max(spread * 8, 2);
+  // Framing ignores the tail of the distribution. Props and rideable furniture sit
+  // hundreds of units from the body (one pack has a merry-go-round at |x|=106 for
+  // a 89-unit-tall character); unioning them into the bounds shrinks the character
+  // to a speck, which the mass guard then rejects as a "vertex spike". Trimming the
+  // farthest 3% keeps the body — and its limbs — and drops the outliers.
+  const framingLimit = Math.max(sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.97))] || 2, 2);
+
+  // `ysmGlow*` geometry is animation-driven effects: blade flashes, auras, big flat
+  // sheets parked around the body. It renders, but it never defines the frame.
+  const inGlow = mesh => {
+    for (let node = mesh; node; node = node.parent) {
+      if (/^ysmGlow/i.test(node.name || '')) return true;
+    }
+    return false;
+  };
 
   let hidden = 0;
   boxes.forEach((entry, index) => {
-    if (distances[index] > limit) { entry.mesh.visible = false; hidden++; }
-    else bounds.union(entry.box);
+    if (distances[index] > limit) { entry.mesh.visible = false; hidden++; return; }
+    if (inGlow(entry.mesh)) return;
+    if (distances[index] > framingLimit) return;
+    bounds.union(entry.box);
   });
+  // A model whose every mesh is glow would frame nothing; fall back to all of it.
+  if (bounds.isEmpty()) boxes.forEach(entry => bounds.union(entry.box));
   return {bounds, hidden};
 }
 /**
@@ -577,18 +596,48 @@ export function applyPreviewPose(root, payload) {
   if (!chosen) return {animation: null, bones: 0};
 
   const animation = chosen.file.value.animations[chosen.name];
+  // YSM animations are Molang: `"1+math.sin(30+q.anim_time*180)*0.01"`. There is
+  // no evaluator here, and treating an unevaluable component as 0 is destructive:
+  // a Root scale of `[1, "1+math.sin(...)", 1]` became [1, 0, 1] and flattened the
+  // whole model to nothing, while an all-Molang Root scale became [0,0,0] and
+  // hid it. Skip the channel instead — the bind pose is correct, a zeroed one is
+  // not.
+  const scalar = value => {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value === 'string' && value.trim() !== '') {
+      const n = Number(value.trim());
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  };
+  const triple = value => {
+    if (!Array.isArray(value) || value.length < 3) return null;
+    const out = [];
+    for (let i = 0; i < 3; i++) {
+      const n = scalar(value[i]);
+      if (n === null) return null;
+      out.push(n);
+    }
+    return out;
+  };
   let applied = 0;
   root.traverse(node => {
     const track = animation?.bones?.[node.name];
     if (!track) return;
-    const rotation = lastValue(track.rotation);
-    if (rotation != null) rotate(node, rotation);
-    const position = lastValue(track.position);
-    if (Array.isArray(position) && position.length >= 3) node.position.add(new THREE.Vector3(...vec(position)));
-    const scale=lastValue(track.scale);
-    if(typeof scale==='number'&&Number.isFinite(scale))node.scale.setScalar(scale);
-    else if(Array.isArray(scale))node.scale.set(...vec(scale,[1,1,1]));
-    if(scale!=null&&(node.scale.x===0||node.scale.y===0||node.scale.z===0))node.visible=false;
+    const rotation = triple(lastValue(track.rotation));
+    if (rotation) rotate(node, rotation);
+    const position = triple(lastValue(track.position));
+    if (position) node.position.add(new THREE.Vector3(...position));
+    const raw = lastValue(track.scale);
+    const flat = scalar(raw);
+    const scale = flat !== null ? [flat, flat, flat] : triple(raw);
+    if (scale) {
+      // An authored 0 is a "hide this part" idiom, but a zeroed root erases the
+      // model. Clamp instead of hiding: a tiny part stays invisible in practice,
+      // and framing measures the posed model, so a uniformly scaled-down root
+      // still comes out at full size.
+      node.scale.set(...scale.map(v => Math.max(Math.abs(v), 0.01)));
+    }
     applied++;
   });
   return {animation: chosen.name, bones: applied};

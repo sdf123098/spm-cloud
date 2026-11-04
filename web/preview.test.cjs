@@ -21,11 +21,21 @@ test('declared missing card artwork is reported rather than silently replaced', 
   assert.throws(()=>context.SPMPreview.cardAssets({pack:{'ysm.json':{properties:{gui_foreground:'missing.png'}}},images:[]}),/卡片素材缺失/);
 });
 
-test('authored preview animation binds named bones and hides zero-scale accessories', async()=>{
+test('authored preview animation binds named bones and collapses zero-scale accessories', async()=>{
   const payload={documents:[{path:'main.json',value:{bones:[{name:'accessory',cubes:[{origin:[0,0,0],size:[1,1,1]}]}]}}],images:[],pack:{'ysm.json':{properties:{preview_animation:'gui'}}},animations:[{value:{animations:{gui:{bones:{accessory:{scale:0}}}}}}]};
   const model=await context.SPMPreview.buildModel(payload);
   const applied=context.SPMPreview.applyPreviewPose(model,payload);
-  assert.equal(applied.bones,1);assert.equal(model.getObjectByName('accessory').visible,false);
+  const accessory=model.getObjectByName('accessory');
+  // Collapsed to a hair's width rather than hidden: a zero scale written on the
+  // root bone must not erase the model, and a near-zero part is invisible anyway.
+  assert.equal(applied.bones,1);assert.equal(accessory.visible,true);assert.equal(accessory.scale.x,0.01);
+});
+test('Molang scale expressions leave the channel alone instead of collapsing the model', async()=>{
+  const payload={documents:[{path:'main.json',value:{bones:[{name:'Root',cubes:[{origin:[0,0,0],size:[1,1,1]}]}]}}],images:[],pack:{'ysm.json':{properties:{preview_animation:'gui'}}},animations:[{value:{animations:{gui:{bones:{Root:{scale:['1-math.sin(-60+q.anim_time*180)*0.0025',1,1]}}}}}}]};
+  const model=await context.SPMPreview.buildModel(payload);
+  context.SPMPreview.applyPreviewPose(model,payload);
+  const root=model.getObjectByName('Root');
+  assert.equal(root.scale.x,1);assert.equal(root.scale.y,1);assert.equal(root.visible,true);
 });
 
 test('Bedrock cubes with per-face UVs leave omitted faces invisible', async()=>{
