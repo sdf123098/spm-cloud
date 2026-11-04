@@ -112,6 +112,12 @@ async fn decode_with_parser(
         .map_err(|e| CloudError::Internal(e.into()))??;
     Ok((payload, scratch))
 }
+/// RFC 6901 escaping for a JSON Pointer segment. Animation names can contain
+/// `/` or `~` (e.g. `tac:aim:fire:pistol` is fine, but custom names may not be).
+fn json_pointer_escape(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+
 fn collect(path: &FilePath) -> Result<Value, CloudError> {
     let mut documents = Vec::new();
     let mut images = Vec::new();
@@ -121,7 +127,7 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
     // rotates, and the idle pose. Passing them separately keeps `documents`
     // meaning "renderable geometry" for the existing consumers.
     let mut pack = serde_json::Map::new();
-    let mut animations: Vec<Value> = Vec::new();
+    let mut animation_files: Vec<Value> = Vec::new();
     let mut total = 0u64;
     fn add(
         name: &str,
@@ -129,14 +135,22 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
         documents: &mut Vec<Value>,
         images: &mut Vec<Value>,
         pack: &mut serde_json::Map<String, Value>,
-        animations: &mut Vec<Value>,
+        animation_files: &mut Vec<Value>,
         total: &mut u64,
     ) -> Result<(), CloudError> {
-        *total += bytes.len() as u64;
-        if *total > 48 * 1024 * 1024 {
-            return Err(CloudError::AssetTooLarge);
-        }
+        // The budget bounds what is *forwarded*, not what is merely parsed.
+        // Charging every JSON byte up front made a pack with an 18-file animation
+        // set (one 19 MB file) fail with AssetTooLarge before the preview-animation
+        // filter ever ran, costing those models both their preview and thumbnail.
+        // Only payload-carrying bytes count.
         let lower = name.to_lowercase();
+        let charges_budget = !lower.ends_with(".json");
+        if charges_budget {
+            *total += bytes.len() as u64;
+            if *total > 48 * 1024 * 1024 {
+                return Err(CloudError::AssetTooLarge);
+            }
+        }
         if lower.ends_with(".png")
             || lower.ends_with(".jpg")
             || lower.ends_with(".jpeg")
@@ -168,8 +182,10 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
                 documents.push(json!({"path":name,"value":value}));
             } else if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
                 // Non-geometry JSON: ysm.json (pack metadata) or *.animation.json.
+                // Kept verbatim for now; which animation matters is only known
+                // once ysm.json has been read, and archive order is not fixed.
                 if value.get("animations").is_some() {
-                    animations.push(json!({"path":name,"value":value}));
+                    animation_files.push(value);
                 } else if value.get("files").is_some() || value.get("properties").is_some() {
                     pack.insert(name.to_owned(), value);
                 }
@@ -211,7 +227,14 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
                         .to_string_lossy()
                         .replace('\\', "/");
                     if accepted(&name) {
-                        if entry.metadata()?.len() > 16 * 1024 * 1024 {
+                        // Same rule as the archive branch: one animation JSON may
+                        // legitimately exceed 16 MB; geometry and textures may not.
+                        let entry_limit = if name.to_lowercase().ends_with(".json") {
+                            48 * 1024 * 1024
+                        } else {
+                            16 * 1024 * 1024
+                        };
+                        if entry.metadata()?.len() > entry_limit {
                             return Err(CloudError::AssetTooLarge);
                         }
                         add(
@@ -220,7 +243,7 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
                             &mut documents,
                             &mut images,
                             &mut pack,
-                            &mut animations,
+                            &mut animation_files,
                             &mut total,
                         )?;
                     }
@@ -245,12 +268,21 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
                 if !accepted(&name) {
                     continue;
                 }
-                if entry.size() > 16 * 1024 * 1024 {
+                // A per-entry cap protects against a zip bomb in geometry or
+                // textures, but animation JSON is legitimately large: one pack
+                // ships a 19 MB `extra.animation.json`. Allow JSON to reach the
+                // total budget; the payload filter keeps only the clip in use.
+                let entry_limit = if name.to_lowercase().ends_with(".json") {
+                    48 * 1024 * 1024
+                } else {
+                    16 * 1024 * 1024
+                };
+                if entry.size() > entry_limit {
                     return Err(CloudError::AssetTooLarge);
                 }
                 let mut bytes = Vec::new();
-                entry.take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
-                if bytes.len() > 16 * 1024 * 1024 {
+                entry.take(entry_limit + 1).read_to_end(&mut bytes)?;
+                if bytes.len() as u64 > entry_limit {
                     return Err(CloudError::AssetTooLarge);
                 }
                 add(
@@ -259,7 +291,7 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
                     &mut documents,
                     &mut images,
                     &mut pack,
-                    &mut animations,
+                    &mut animation_files,
                     &mut total,
                 )?;
             }
@@ -277,7 +309,7 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
                     &mut documents,
                     &mut images,
                     &mut pack,
-                    &mut animations,
+                    &mut animation_files,
                     &mut total,
                 )?;
             }
@@ -286,6 +318,40 @@ fn collect(path: &FilePath) -> Result<Value, CloudError> {
     if documents.is_empty() {
         return Err(CloudError::invalid_metadata("此模型没有可读取的几何数据"));
     }
+    // Only the clip the card actually plays is forwarded.
+    //
+    // A large pack ships eighteen animation files (one here is 19 MB); sending
+    // them all pushed the payload to 30 MB, well past the 48 MB byte budget in
+    // `add`, so `collect` returned AssetTooLarge and those models got neither a
+    // preview nor a thumbnail. The renderer needs one clip, named by the pack.
+    let wanted = pack.values().find_map(|doc| {
+        doc.pointer("/properties/preview_animation")
+            .and_then(Value::as_str)
+    });
+    let animations: Vec<Value> = match wanted {
+        Some(name) => animation_files
+            .iter()
+            .filter_map(|file| {
+                let clip = file.pointer(&format!("/animations/{}", json_pointer_escape(name)))?;
+                Some(json!({
+                    "path": name,
+                    "value": {"animations": {name: clip.clone()}},
+                }))
+            })
+            .take(1)
+            .collect(),
+        None => animation_files
+            .into_iter()
+            .map(|file| {
+                let names = file.get("animations").and_then(Value::as_object);
+                let idle = names
+                    .filter(|map| map.contains_key("idle"))
+                    .map(|map| json!({"animations": {"idle": map["idle"].clone()}}));
+                json!({"path": "idle", "value": idle.unwrap_or(file)})
+            })
+            .take(1)
+            .collect(),
+    };
     Ok(json!({"documents":documents,"images":images,"pack":pack,"animations":animations}))
 }
 

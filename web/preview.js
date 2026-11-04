@@ -18,10 +18,27 @@ const textureLoader = new THREE.TextureLoader(manager);
 // that declares 512 UVs but ships a 1024 skin otherwise samples the wrong
 // quadrant and renders fully transparent.
 const textureSizes = new Map();
+// One GPU texture per distinct image, shared by every material that uses it.
+//
+// `TextureLoader.load` never caches: each call decodes the image again and
+// allocates a fresh GPU texture. A detailed pack has ~5700 cubes x 6 faces =
+// 34k materials, all bound to the same 1024x1024 skin, so the uncached path
+// asked the driver for 34k textures of 4 MB each. The upload silently fails and
+// the model renders as dark garbage. Sharing keeps it at one.
+const textureCache = new Map();
+// Per-pack V orientation. Bedrock counts v downward while GL's UV origin is
+// bottom-left, so the usual conversion is `1 - v/h`. A minority of packs ship
+// UVs already in GL order; for those the flip samples the mirrored half of the
+// sheet and the model comes out as loose fragments. `renderThumbnail` renders
+// with the default and retries the other way when the frame is nearly empty.
+let flipV = true;
 function texture(source) {
   if (!source || !/^data:image\/(png|jpeg|webp|gif);base64,/i.test(source)) return null;
+  const cached = textureCache.get(source);
+  if (cached) return cached;
   const map = textureLoader.load(source, () => { for (const paint of paints) paint(); }); map.colorSpace = THREE.SRGBColorSpace; map.magFilter = THREE.NearestFilter; map.minFilter = THREE.NearestFilter;
   textureSizes.set(map, dimensions(source));
+  textureCache.set(source, map);
   return map;
 }
 /** Decode a data URL's intrinsic size without touching the GPU. */
@@ -41,8 +58,25 @@ function dimensions(source) {
 }
 function vec(v, fallback = [0,0,0]) { return Array.isArray(v) && v.length >= 3 ? v.slice(0,3).map(n => Number.isFinite(Number(n)) ? Number(n) : 0) : fallback; }
 function rotate(object, value) { const [x,y,z] = vec(value); object.rotation.set(x*Math.PI/180,y*Math.PI/180,z*Math.PI/180,'ZYX'); }
-function material(map) { return new THREE.MeshLambertMaterial({map, color:map?0xffffff:0x719de0, transparent:!!map, alphaTest:.05, side:THREE.DoubleSide}); }
-function cube(data, maps, resolution, bedrock = false) {
+// Always alpha-cutout, never blended.
+//
+// YSM skins are binary-alpha: a typical atlas is ~89% fully transparent with
+// essentially nothing in the 1..13 range. Rendering them as `transparent` with
+// `depthWrite: false` makes every cube rely on draw order, and a model with
+// thousands of overlapping cubes then tears into floating fragments. Cutout
+// matches what the mod does: discard texels below the threshold and keep the
+// depth buffer authoritative.
+function material(map) {
+  return new THREE.MeshLambertMaterial({
+    map,
+    color: map ? 0xffffff : 0x719de0,
+    transparent: false,
+    alphaTest: map ? .5 : 0,
+    depthWrite: true,
+    side: THREE.DoubleSide,
+  });
+}
+function cube(data, maps, resolution, bedrock = false, allCutout = false) {
   const from=vec(data.from||data.origin), to=data.to?vec(data.to):from.map((n,i)=>n+vec(data.size)[i]);
   const inflate=Number(data.inflate)||0, dimensions=from.map((n,i)=>Math.max(.001,to[i]-n+inflate*2));
   const geometry=new THREE.BoxGeometry(...dimensions), uv=geometry.attributes.uv;
@@ -59,12 +93,18 @@ function cube(data, maps, resolution, bedrock = false) {
       // declared size. Packs routinely ship UVs in a 512 grid alongside a
       // 1024-wide skin; dividing by the declaration then samples the top-left
       // quadrant, which is transparent for most characters.
-      const image=map?.image,known=textureSizes.get(map),width=image?.width||known?.width||resolution[0]||64,height=image?.height||known?.height||resolution[1]||64;
+      // Divide by the geometry's declared UV grid, not the atlas pixel size.
+      //
+      // The two differ whenever a pack ships a hi-res sheet for a coarse grid:
+      // 512px atlas with a 256 grid, 2048 with 512, 1024 with 512. Normalising
+      // by the atlas then maps every UV into the top-left quadrant, so the model
+      // samples a quarter of the sheet and renders as loose fragments.
+      const width=resolution[0]||64,height=resolution[1]||64;
       const points=[[u,v],[u+du,v],[u,v+dv],[u+du,v+dv]];
       const turns=((face?.rotation||0)/90)%4;
-      for(let j=0;j<4;j++){const p=points[turns? [0,1,3,2][([0,1,3,2].indexOf(j)+turns)%4]:j];uv.setXY(index*4+j,p[0]/width,1-p[1]/height);}
+      for(let j=0;j<4;j++){const p=points[turns? [0,1,3,2][([0,1,3,2].indexOf(j)+turns)%4]:j];uv.setXY(index*4+j,p[0]/width,flipV?1-p[1]/height:p[1]/height);}
     }
-    const mat=material(map);if((!bedrock && data.faces && (!face || face.texture===null)) || (bedrock && data.uv && !Array.isArray(data.uv) && !face)){mat.visible=false;}return mat;
+    const mat=material(map, allCutout);if((!bedrock && data.faces && (!face || face.texture===null)) || (bedrock && data.uv && !Array.isArray(data.uv) && !face)){mat.visible=false;}return mat;
   });
   const mesh=new THREE.Mesh(geometry,materials);
   mesh.position.set(...from.map((n,i)=>(n+to[i])/2));
@@ -134,9 +174,35 @@ function primaryTexture(images) {
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
   return scored[0].image.data;
 }
-function bedrock(value, images, declared) {
+/**
+ * An effect slab: a large, thin quad that belongs to a `ysmGlow*` bone.
+ *
+ * Judging by absolute size alone removes real geometry from packs modelled at a
+ * large unit scale, so the test is relative to the body and also requires the
+ * cube to be a sheet (one axis far thinner than the others). Blade flashes and
+ * aura planes match; a glowing eye or core does not.
+ */
+function isEffectSlab(data, bodySpan) {
+  const size = vec(data.size).map(Math.abs);
+  const longest = Math.max(...size), shortest = Math.min(...size);
+  if (!(bodySpan > 0)) return false;
+  return longest > bodySpan * 0.25 && shortest < longest * 0.15;
+}
+
+function bedrock(value, images, declared, allCutout = false) {
   const geometry=value['minecraft:geometry']?.[0]||value;const bones=geometry.bones||[];
   const description=geometry.description||{};const resolution=[description.texture_width||geometry.texturewidth||64,description.texture_height||geometry.textureheight||64];
+  // Extent of the whole model, so effect slabs can be judged against the body
+  // rather than against a fixed unit count (packs disagree on unit scale).
+  let bodySpan=0;
+  {
+    const lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
+    for(const b of bones) for(const c of b.cubes||[]){
+      const o=vec(c.from||c.origin),s=vec(c.size);
+      for(let i=0;i<3;i++){const a=Math.min(o[i],o[i]+s[i]),z=Math.max(o[i],o[i]+s[i]);if(a<lo[i])lo[i]=a;if(z>hi[i])hi[i]=z;}
+    }
+    if(Number.isFinite(lo[0])) bodySpan=Math.max(hi[0]-lo[0],hi[1]-lo[1],hi[2]-lo[2]);
+  }
   // The pack's own declaration wins over any filename heuristic.
   const map=texture(declared?.data || primaryTexture(images));
   const root=new THREE.Group(), groups=new Map();let count=0;
@@ -144,7 +210,19 @@ function bedrock(value, images, declared) {
   for(const {group,bone} of groups.values()){
     const parent=groups.get(bone.parent);let ancestor=parent;const visited=new Set([bone.name]);while(ancestor){if(visited.has(ancestor.bone.name))throw new Error('骨骼层级循环');visited.add(ancestor.bone.name);ancestor=groups.get(ancestor.bone.parent);}
     if(parent){group.position.sub(new THREE.Vector3(...vec(parent.bone.pivot)));parent.group.add(group);}else root.add(group);
-    for(const data of bone.cubes||[]){if(++count>50000)throw new Error('预览几何数据过大');const mesh=cube(data,[map],resolution,true);mesh.position.sub(new THREE.Vector3(...vec(bone.pivot)));group.add(mesh);}
+    // YSM prefixes effect geometry with `ysmGlow` (blade flashes, auras, FX
+    // sheets). The mod drives those from animation and composites them
+    // additively, so in a static bind pose they are giant flat slabs parked over
+    // the character: one pack has a 162x2x38 unit quad across a 176-unit body.
+    // Rendered opaque they hide the model entirely and inflate the framing box
+    // until the character is a speck. Drop the large ones; small glow pieces are
+    // real detail (eyes, cores) and stay.
+    const glow = /^ysmGlow/i.test(bone.name||'');
+    for(const data of bone.cubes||[]){
+      if(glow && isEffectSlab(data, bodySpan)) continue;
+      if(++count>50000)throw new Error('预览几何数据过大');
+      const mesh=cube(data,[map],resolution,true,allCutout);mesh.position.sub(new THREE.Vector3(...vec(bone.pivot)));group.add(mesh);
+    }
   }
   return root;
 }
@@ -160,18 +238,64 @@ export async function buildModel(payload) {
     return (await new GLTFLoader(manager).parseAsync(data,'')).scene;
   }
   const declared=declaredTexture(payload, 'player');
-  return document.value.elements?bbmodel(document.value,payload.images):bedrock(document.value,payload.images,declared);
+  // `properties.all_cutout` decides blend vs cutout for the whole pack.
+  const pack = Object.values(payload.pack || {})[0] || {};
+  const allCutout = pack.properties?.all_cutout === true;
+  return document.value.elements
+    ? bbmodel(document.value, payload.images)
+    : bedrock(document.value, payload.images, declared, allCutout);
 }
-function dispose(root){root.traverse(item=>{item.geometry?.dispose();for(const mat of (Array.isArray(item.material)?item.material:[item.material])){if(mat?.map)textureSizes.delete(mat.map);mat?.map?.dispose();mat?.dispose();}});}
+function dispose(root){
+  root.traverse(item=>{
+    item.geometry?.dispose();
+    for(const mat of (Array.isArray(item.material)?item.material:[item.material])) mat?.dispose();
+  });
+  // Textures are shared across materials, so they are released once from the
+  // cache rather than per material.
+  for(const map of new Set(textureCache.values())) map.dispose();
+  textureCache.clear();
+  textureSizes.clear();
+}
 
 // Square, off-screen render of one payload, used by tools/thumbnail.html and the
 // batch renderer. Deliberately shares buildModel/lighting/framing with mount()
 // so the stored thumbnail matches what the admin card eventually shows; a
 // separate code path would silently drift as the preview evolves.
-export async function renderThumbnail(payload, size = 512) {
+/** Share of a 16x16 grid whose cells contain opaque pixels. */
+function massScore(canvas) {
+  const grid = 16, probe = document.createElement('canvas');
+  probe.width = grid; probe.height = grid;
+  const context = probe.getContext('2d');
+  context.drawImage(canvas, 0, 0, grid, grid);
+  const pixels = context.getImageData(0, 0, grid, grid).data;
+  let filled = 0;
+  for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 8) filled++;
+  return filled / (grid * grid);
+}
+
+async function renderOnce(payload, size, flip) {
+  flipV = flip;
   const card = await prepareCard(payload, size);
-  try { return card.draw().toDataURL('image/png'); }
-  finally { card.dispose(); }
+  try {
+    const canvas = card.draw();
+    return {url: canvas.toDataURL('image/png'), mass: massScore(canvas)};
+  } finally { card.dispose(); }
+}
+
+/**
+ * Render the card, trying both V orientations when the first comes out hollow.
+ *
+ * The flip is right for the vast majority of packs, but not all of them, and a
+ * wrong guess is not subtle: the model samples the mirrored half of the atlas
+ * and loses most of its surface. Measuring the finished frame is the only
+ * reliable discriminator — alpha coverage of the atlas itself is not, because a
+ * sparse effects atlas scores well while rendering nothing.
+ */
+export async function renderThumbnail(payload, size = 512) {
+  const primary = await renderOnce(payload, size, true);
+  if (primary.mass >= 0.25) return primary.url;
+  const alternate = await renderOnce(payload, size, false);
+  return alternate.mass > primary.mass ? alternate.url : primary.url;
 }
 
 // The authored GUI layers use one complete 52:90 canvas, exactly as in the mod.
