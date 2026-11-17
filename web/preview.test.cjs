@@ -99,3 +99,18 @@ test('YSM card coordinates follow the mods mirrored X and rotation conventions',
   assert.ok(Math.abs(bone.rotation.x+Math.PI/6)<1e-9);
   assert.ok(Math.abs(bone.rotation.z+50*Math.PI/180)<1e-9);
 });
+
+test('Figura avatar archives build preview geometry from .bbmodel while ignoring avatar.json metadata',async()=>{
+  const payload={
+    documents:[
+      {path:'avatar.json',value:{name:'FiguraModel'}},
+      {path:'avatar.bbmodel',value:{elements:[{from:[0,0,0],to:[2,2,2]}],textures:[]}}
+    ],
+    images:[],
+    pack:{},
+    animations:[]
+  };
+  const model=await context.SPMPreview.buildModel(payload);
+  assert.ok(model);
+  assert.equal(model.children.length,1);
+});

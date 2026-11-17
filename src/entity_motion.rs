@@ -448,10 +448,13 @@ pub async fn query(
         return Err(CloudError::NotFound);
     }
     let account = authenticate(&state, &headers)?;
+    let supports_figura = crate::protocol::request_supports_figura(&headers);
     let crate::visual_json::VisualJson(body) = payload?;
-    Ok(Json(
-        serde_json::json!({"entries":state.store.query_entity_motion(&account,&scope,&body,visual::now_ms())?}),
-    ))
+    let mut response = serde_json::json!({"entries":state.store.query_entity_motion(&account,&scope,&body,visual::now_ms())?});
+    if let Some(entries) = response["entries"].as_array_mut() {
+        crate::protocol::adapt_entries_resource_format(entries, supports_figura);
+    }
+    Ok(Json(response))
 }
 pub async fn revisions(
     State(state): State<AppState>,

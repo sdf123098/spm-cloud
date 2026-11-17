@@ -171,7 +171,7 @@ pub(crate) fn archive(
         for (index, entry) in entries.iter().enumerate() {
             let sha = entry["raw_sha256"].as_str().ok_or(CloudError::NotFound)?;
             let format = entry["format"].as_str().unwrap_or("bin");
-            let ext = if ["ysm", "zip", "bbmodel", "gltf", "glb"].contains(&format) {
+            let ext = if crate::protocol::is_supported_model_format(format) {
                 format
             } else {
                 "bin"
@@ -273,7 +273,7 @@ async fn model(
     let (_, sha, _) = state.store.admin_asset(&asset)?;
     let reader = tokio::fs::File::open(state.store.object_path_for_sha(&sha)).await?;
     let format:String=state.store.connection.lock().unwrap().query_row("SELECT format FROM asset_revisions r JOIN assets a ON a.asset_id=r.asset_id AND a.current_revision=r.revision WHERE a.asset_id=?1",[&asset],|r|r.get(0))?;
-    let ext = if ["ysm", "zip", "bbmodel", "gltf", "glb"].contains(&format.as_str()) {
+    let ext = if crate::protocol::is_supported_model_format(&format) {
         format.as_str()
     } else {
         "bin"

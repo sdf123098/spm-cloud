@@ -108,15 +108,34 @@ pub async fn put(
         serde_json::json!({"revision": state.store.publish_player_with_name(&account, &body, name.as_deref())?}),
     ))
 }
+pub fn adapt_player_appearances(entries: &mut [PlayerAppearance], supports_figura: bool) {
+    if supports_figura {
+        return;
+    }
+    for entry in entries {
+        if let Some(selection) = entry.selection.as_mut() {
+            selection.format =
+                crate::protocol::adapt_wire_format(&selection.format, false).to_owned();
+        }
+    }
+}
+
 pub async fn query(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<PlayerQuery>,
 ) -> Result<Json<serde_json::Value>, CloudError> {
     let account = authenticate(&state, &headers)?;
-    Ok(Json(
-        serde_json::json!({"entries": if body.include_offline { state.store.query_offline_players(&account, &body.entity_uuids)? } else { state.store.query_players(&account, &body.entity_uuids)? }}),
-    ))
+    let supports_figura = crate::protocol::request_supports_figura(&headers);
+    let mut entries = if body.include_offline {
+        state
+            .store
+            .query_offline_players(&account, &body.entity_uuids)?
+    } else {
+        state.store.query_players(&account, &body.entity_uuids)?
+    };
+    adapt_player_appearances(&mut entries, supports_figura);
+    Ok(Json(serde_json::json!({"entries": entries})))
 }
 
 fn identity(
@@ -536,10 +555,7 @@ pub(crate) fn validate_asset(
         if sha != Some(expected.as_str()) {
             return Err(CloudError::AccessDenied);
         }
-        if !matches!(
-            format.to_ascii_lowercase().as_str(),
-            "ysm" | "zip" | "bbmodel" | "gltf" | "glb"
-        ) {
+        if !crate::protocol::is_supported_model_format(&format) {
             return Err(CloudError::invalid_metadata(
                 "appearance asset format is unsupported",
             ));
@@ -1023,5 +1039,69 @@ mod tests {
                 .selection
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn figura_player_appearance_adapts_format_by_client_version() {
+        let (state, _dir) = crate::api::tests::test_state(false);
+        let token = state
+            .store
+            .issue_session_token("account_local", "dev", 3600)
+            .unwrap();
+        let profile = uuid::Uuid::new_v4();
+        {
+            let conn = state.store.connection.lock().unwrap();
+            conn.execute("INSERT INTO identities(identity_id,account_id,identity_kind,profile_uuid,display_name,verified) VALUES ('figura-player','account_local','official',?1,'Player',1)", [profile.to_string()]).unwrap();
+            conn.execute("INSERT INTO assets(asset_id,owner_account_id,current_revision,visibility) VALUES ('figura-model','account_local',1,'PUBLIC')", []).unwrap();
+            conn.execute("INSERT INTO asset_revisions(asset_id,revision,name,format,raw_sha256,byte_length,object_path,created_at) VALUES ('figura-model',1,'avatar.figura','figura','sha',5,'object','now')", []).unwrap();
+        }
+        let body: PlayerAppearanceUpdate = serde_json::from_value(serde_json::json!({
+            "identity_id":"figura-player","entity_uuid":profile,"expected_revision":0,
+            "asset_id":"figura-model","asset_revision":1,"raw_sha256":"sha","texture_id":"default"
+        }))
+        .unwrap();
+        assert_eq!(state.store.publish_player("account_local", &body).unwrap(), 1);
+
+        let mut legacy_headers = axum::http::HeaderMap::new();
+        legacy_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        legacy_headers.insert(
+            "x-spm-client-version",
+            axum::http::HeaderValue::from_static("2.3.1"),
+        );
+        let Json(legacy_resp) = query(
+            axum::extract::State(state.clone()),
+            legacy_headers,
+            axum::Json(PlayerQuery {
+                entity_uuids: vec![profile],
+                include_offline: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(legacy_resp["entries"][0]["selection"]["format"], "zip");
+
+        let mut modern_headers = axum::http::HeaderMap::new();
+        modern_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        modern_headers.insert(
+            "x-spm-client-version",
+            axum::http::HeaderValue::from_static("2.4.0"),
+        );
+        let Json(modern_resp) = query(
+            axum::extract::State(state),
+            modern_headers,
+            axum::Json(PlayerQuery {
+                entity_uuids: vec![profile],
+                include_offline: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(modern_resp["entries"][0]["selection"]["format"], "figura");
     }
 }

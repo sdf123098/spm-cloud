@@ -181,10 +181,7 @@ pub(crate) fn resource(
         || value.texture_id.is_empty()
         || value.texture_id.encode_utf16().count() > 256
         || value.texture_id.chars().any(char::is_control)
-        || !matches!(
-            value.format.as_str(),
-            "ysm" | "zip" | "bbmodel" | "gltf" | "glb"
-        )
+        || !crate::protocol::is_supported_model_format(&value.format)
     {
         return Err(CloudError::invalid_metadata(
             "invalid exact resource reference",
@@ -538,10 +535,13 @@ pub async fn query(
 ) -> Result<Json<serde_json::Value>, CloudError> {
     enabled(&state)?;
     let account = authenticate(&state, &headers)?;
+    let supports_figura = crate::protocol::request_supports_figura(&headers);
     let crate::visual_json::VisualJson(body) = payload?;
-    Ok(Json(
-        serde_json::json!({"entries":state.store.query_projectiles(&account,&scope,&body,&state.runtime_config().visual,now_ms())?}),
-    ))
+    let mut response = serde_json::json!({"entries":state.store.query_projectiles(&account,&scope,&body,&state.runtime_config().visual,now_ms())?});
+    if let Some(entries) = response["entries"].as_array_mut() {
+        crate::protocol::adapt_entries_resource_format(entries, supports_figura);
+    }
+    Ok(Json(response))
 }
 pub async fn renew(
     State(state): State<AppState>,

@@ -67,13 +67,14 @@ pub async fn list(
         let external = conn.external_version()?;
         (conn.total_changes(), external)
     };
-    let key = cache.key(&json!([account, scope, query, after, limit, epoch]));
+    let supports_figura = crate::protocol::request_supports_figura(&headers);
+    let key = cache.key(&json!([account, scope, query, after, limit, epoch, supports_figura]));
     if let Some(page) = cache.get(&key).await
-        && cached_page_is_current(&state, &account, &scope, &page)?
+        && cached_page_is_current(&state, &account, &scope, &page, supports_figura)?
     {
         return Ok(Json(page));
     }
-    let page = load_page(&state, &account, &scope, &query, &after, limit)?;
+    let page = load_page(&state, &account, &scope, &query, &after, limit, supports_figura)?;
     cache.put(key, page.clone()).await;
     Ok(Json(page))
 }
@@ -85,6 +86,7 @@ fn load_page(
     query: &str,
     after: &str,
     limit: i64,
+    supports_figura: bool,
 ) -> Result<Value, CloudError> {
     let needle = format!("%{}%", query.to_lowercase());
     let conn = state
@@ -106,12 +108,14 @@ fn load_page(
             params![account, scope, query, needle, after, limit + 1],
             |r| {
                 let owner: String = r.get(7)?;
+                let raw_format: String = r.get(3)?;
+                let format = crate::protocol::adapt_wire_format(&raw_format, supports_figura).to_owned();
                 let mut entry = serde_json::to_value(
                     AssetSummary {
                         asset_id: r.get(0)?,
                         revision: r.get::<_, i64>(1)? as u64,
                         name: r.get(2)?,
-                        format: r.get(3)?,
+                        format,
                         raw_sha256: r.get(4)?,
                         byte_length: r.get::<_, i64>(5)? as u64,
                         visibility: r.get(6)?,
@@ -146,6 +150,7 @@ fn cached_page_is_current(
     account: &str,
     scope: &str,
     page: &Value,
+    supports_figura: bool,
 ) -> Result<bool, CloudError> {
     let Some(entries) = page["entries"].as_array() else {
         return Ok(false);
@@ -192,12 +197,14 @@ fn cached_page_is_current(
                 .find(|entry| entry["asset_id"].as_str() == Some(id.as_str()))
                 .is_some_and(|entry| {
                     let built: rusqlite::Result<Value> = (|| {
+                        let raw_format: String = r.get(3)?;
+                        let format = crate::protocol::adapt_wire_format(&raw_format, supports_figura).to_owned();
                         let mut actual = serde_json::to_value(
                             AssetSummary {
                                 asset_id: id,
                                 revision: r.get::<_, i64>(1)? as u64,
                                 name: r.get(2)?,
-                                format: r.get(3)?,
+                                format,
                                 raw_sha256: r.get(4)?,
                                 byte_length: r.get::<_, i64>(5)? as u64,
                                 visibility: r.get(6)?,
@@ -217,4 +224,71 @@ fn cached_page_is_current(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows.len() == entries.len() && rows.iter().all(|v| *v))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderValue, header};
+
+    #[tokio::test]
+    async fn catalog_list_adapts_figura_format_for_legacy_and_240_without_cache_poisoning() {
+        let (state, _dir) = crate::api::tests::test_state(false);
+        let token = state
+            .store
+            .issue_session_token("account_local", "dev", 3600)
+            .unwrap();
+        let path = state.store.object_path_for_sha("sha-figura");
+        state
+            .store
+            .register_asset(
+                "account_local",
+                "fig-cat-1",
+                "FiguraCat",
+                "figura",
+                "sha-figura",
+                12,
+                &path,
+            )
+            .unwrap();
+
+        let mut modern_headers = HeaderMap::new();
+        modern_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        modern_headers.insert("x-spm-client-version", HeaderValue::from_static("2.4.0"));
+        let Json(modern_page) = list(
+            State(state.clone()),
+            modern_headers.clone(),
+            Query(CatalogQuery::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(modern_page["entries"][0]["format"], "figura");
+
+        let mut legacy_headers = HeaderMap::new();
+        legacy_headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        legacy_headers.insert("x-spm-client-version", HeaderValue::from_static("2.0.0"));
+        let Json(legacy_page) = list(
+            State(state.clone()),
+            legacy_headers.clone(),
+            Query(CatalogQuery::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(legacy_page["entries"][0]["format"], "zip");
+
+        let Json(modern_cached) = list(
+            State(state),
+            modern_headers,
+            Query(CatalogQuery::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(modern_cached["entries"][0]["format"], "figura");
+    }
 }

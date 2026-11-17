@@ -331,9 +331,12 @@ pub async fn query(
     Json(input): Json<EntityQuery>,
 ) -> Result<Json<Value>, CloudError> {
     let account = authenticate(&state, &headers)?;
-    Ok(Json(
-        json!({"entries":state.store.entity_entries(&account,&key,&input.entity_uuids)?}),
-    ))
+    let supports_figura = crate::protocol::request_supports_figura(&headers);
+    let mut entries = state
+        .store
+        .entity_entries(&account, &key, &input.entity_uuids)?;
+    crate::protocol::adapt_entries_resource_format(&mut entries, supports_figura);
+    Ok(Json(json!({"entries": entries})))
 }
 pub async fn get(
     State(state): State<AppState>,
@@ -341,7 +344,18 @@ pub async fn get(
     Path((key, id)): Path<(String, uuid::Uuid)>,
 ) -> Result<Json<Value>, CloudError> {
     let account = authenticate(&state, &headers)?;
-    Ok(Json(state.store.entity_entries(&account,&key,&[id])?.into_iter().next().unwrap_or_else(||json!({"entity_uuid":id,"entity_kind":null,"target_id":null,"binding_revision":0,"revision":0,"selection":null}))))
+    let supports_figura = crate::protocol::request_supports_figura(&headers);
+    let mut entry = state
+        .store
+        .entity_entries(&account, &key, &[id])?
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| json!({"entity_uuid":id,"entity_kind":null,"target_id":null,"binding_revision":0,"revision":0,"selection":null}));
+    crate::protocol::adapt_entries_resource_format(
+        std::slice::from_mut(&mut entry),
+        supports_figura,
+    );
+    Ok(Json(entry))
 }
 pub async fn put(
     State(state): State<AppState>,
@@ -581,10 +595,7 @@ impl CloudStore {
             {
                 return Err(CloudError::AccessDenied);
             }
-            if !matches!(
-                r.1.to_lowercase().as_str(),
-                "ysm" | "zip" | "bbmodel" | "gltf" | "glb"
-            ) {
+            if !crate::protocol::is_supported_model_format(&r.1) {
                 return Err(CloudError::invalid_metadata("unsupported model format"));
             }
             if input.share_model

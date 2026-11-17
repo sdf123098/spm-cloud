@@ -84,7 +84,7 @@ $('upload-form').addEventListener('submit',async e=>{
       try{
         const file=item.file,format=file.name.split('.').pop().toLowerCase();
         if(!file.size)throw new Error('文件为空，请重新选择');
-        if(!['ysm','zip','bbmodel','gltf','glb'].includes(format))throw new Error('不支持此格式，请选择 YSM、ZIP、BBModel、GLTF 或 GLB');
+        if(!['ysm','zip','bbmodel','gltf','glb','figura'].includes(format))throw new Error('不支持此格式，请选择 YSM、ZIP、BBModel、GLTF、GLB 或 FIGURA');
         const name=prefix?(uploadQueue.length>1?`${prefix} · ${file.name}`:prefix):file.name;
         const metadata=JSON.stringify({name,visibility,owner});if(item.metadata!==null&&item.metadata!==metadata)item.key=crypto.randomUUID();item.metadata=metadata;
         const headers={'Content-Type':'application/octet-stream','Idempotency-Key':item.key,'X-Asset-Name':encodeURIComponent(name),'X-Asset-Format':format,'X-Asset-Visibility':visibility,'X-Asset-Metadata-Encoding':'utf-8-percent'};if(owner)headers['X-Asset-Owner-Account']=owner;

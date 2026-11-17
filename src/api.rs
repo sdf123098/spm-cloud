@@ -396,7 +396,7 @@ async fn api_headers(request: axum::extract::Request, next: axum::middleware::Ne
         "access-control-allow-methods",
         HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
     );
-    headers.insert("access-control-allow-headers", HeaderValue::from_static("Authorization, Content-Type, X-SPM-Offline-Session, Idempotency-Key, Range, If-None-Match, X-Asset-Id, X-Asset-Name, X-Asset-Format, X-Asset-Sha256, X-Asset-Visibility, X-Asset-Metadata-Encoding"));
+    headers.insert("access-control-allow-headers", HeaderValue::from_static("Authorization, Content-Type, X-SPM-Client-Version, X-SPM-Offline-Session, Idempotency-Key, Range, If-None-Match, X-Asset-Id, X-Asset-Name, X-Asset-Format, X-Asset-Sha256, X-Asset-Visibility, X-Asset-Metadata-Encoding"));
     response
 }
 
@@ -440,6 +440,7 @@ async fn instance(State(state): State<AppState>) -> Json<InstanceResponse> {
             let mut capabilities = vec![
                 PLAYER_MOTION_CAPABILITY.to_owned(),
                 GAME_IDENTITY_AUTH_CAPABILITY.to_owned(),
+                crate::protocol::FIGURA_ASSETS_CAPABILITY.to_owned(),
             ];
             if runtime.offline_identity.is_enabled() {
                 capabilities.push(crate::protocol::CLOUD_OFFLINE_IDENTITY_CAPABILITY.to_owned());
@@ -977,6 +978,7 @@ pub(crate) async fn upload_asset_as(
     let name = asset_metadata_header(&headers, "x-asset-name")?
         .unwrap_or_else(|| requested_asset_id.clone());
     let format = header_string(&headers, "x-asset-format")?
+        .map(|value| crate::protocol::normalize_upload_format(&value))
         .unwrap_or_else(|| "application/octet-stream".to_owned());
     let expected_sha = header_string(&headers, "x-asset-sha256")?;
     let requested_visibility = header_string(&headers, "x-asset-visibility")?
@@ -1212,7 +1214,13 @@ async fn asset_response(
         .header(header::ETAG, etag)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, length.to_string())
-        .header("x-asset-format", content.format)
+        .header(
+            "x-asset-format",
+            crate::protocol::adapt_wire_format(
+                &content.format,
+                crate::protocol::request_supports_figura(headers),
+            ),
+        )
         .header(header::CONTENT_TYPE, content.content_type);
     if partial {
         response = response.header(
@@ -2472,5 +2480,81 @@ pub(crate) mod tests {
                 .unwrap();
         assert_eq!(public_created.0, StatusCode::CREATED);
         assert_eq!(public_created.1.account_id, "player_one");
+    }
+
+    #[tokio::test]
+    async fn figura_upload_download_and_instance_capability_adapt_for_legacy_and_240() {
+        let (state, _directory) = test_state(false);
+        let token = state
+            .store
+            .issue_session_token("account_local", "test-device", 3600)
+            .unwrap();
+
+        let Json(instance) = instance(State(state.clone())).await;
+        assert_eq!(instance.protocol, PROTOCOL_V1);
+        assert!(
+            instance
+                .capabilities
+                .iter()
+                .any(|cap| cap == crate::protocol::FIGURA_ASSETS_CAPABILITY)
+        );
+
+        let mut buffer = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buffer));
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("avatar.json", options).unwrap();
+            std::io::Write::write_all(&mut zip, br#"{"name":"FiguraDemo"}"#).unwrap();
+            zip.start_file("script.lua", options).unwrap();
+            std::io::Write::write_all(&mut zip, b"function events.tick() end").unwrap();
+            zip.finish().unwrap();
+        }
+        let sha = hex::encode(Sha256::digest(&buffer));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers.insert("idempotency-key", HeaderValue::from_static("figura-upload-1"));
+        headers.insert("x-asset-id", HeaderValue::from_static("figura-demo"));
+        headers.insert("x-asset-name", HeaderValue::from_static("demo.figura"));
+        headers.insert("x-asset-format", HeaderValue::from_static("FIGURA"));
+        headers.insert("x-asset-sha256", HeaderValue::from_str(&sha).unwrap());
+        let uploaded = upload_asset(
+            State(state.clone()),
+            headers.clone(),
+            Body::from(buffer.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(uploaded.status(), StatusCode::CREATED);
+        let summary: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(uploaded.into_body(), 16 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(summary["format"], "figura");
+
+        headers.insert("x-spm-client-version", HeaderValue::from_static("2.0.0"));
+        let legacy_download = download_asset(
+            State(state.clone()),
+            headers.clone(),
+            Path(("figura-demo".to_owned(), 1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(legacy_download.headers()["x-asset-format"], "zip");
+
+        headers.insert("x-spm-client-version", HeaderValue::from_static("2.4.0"));
+        let modern_download = download_asset(
+            State(state),
+            headers,
+            Path(("figura-demo".to_owned(), 1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(modern_download.headers()["x-asset-format"], "figura");
     }
 }

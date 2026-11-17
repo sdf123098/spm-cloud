@@ -312,7 +312,7 @@ async fn send_envelope(socket: &mut SocketSink, envelope: Envelope) -> Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::clear_joined_scope;
+    use super::*;
 
     #[test]
     fn leave_scope_only_clears_the_matching_scope() {
@@ -321,5 +321,19 @@ mod tests {
         assert_eq!(joined.as_deref(), Some("scope-a"));
         assert!(clear_joined_scope(&mut joined, "scope-a"));
         assert_eq!(joined, None);
+    }
+
+    #[test]
+    fn hello_supports_both_legacy_and_240_clients_on_protocol_v1() {
+        for client_version in ["2.0.0", "2.3.1", "2.4.0"] {
+            let hello = Hello {
+                instance_id: "inst-1".to_owned(),
+                protocol_versions: vec![PROTOCOL_V1.to_owned()],
+                client_version: client_version.to_owned(),
+            };
+            let decoded = Hello::decode(hello.encode_to_vec().as_slice()).unwrap();
+            assert_eq!(decoded.client_version, client_version);
+            assert!(decoded.protocol_versions.iter().any(|p| p == PROTOCOL_V1));
+        }
     }
 }
