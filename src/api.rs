@@ -2516,7 +2516,10 @@ pub(crate) mod tests {
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
         );
-        headers.insert("idempotency-key", HeaderValue::from_static("figura-upload-1"));
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_static("figura-upload-1"),
+        );
         headers.insert("x-asset-id", HeaderValue::from_static("figura-demo"));
         headers.insert("x-asset-name", HeaderValue::from_static("demo.figura"));
         headers.insert("x-asset-format", HeaderValue::from_static("FIGURA"));
@@ -2548,13 +2551,10 @@ pub(crate) mod tests {
         assert_eq!(legacy_download.headers()["x-asset-format"], "zip");
 
         headers.insert("x-spm-client-version", HeaderValue::from_static("2.4.0"));
-        let modern_download = download_asset(
-            State(state),
-            headers,
-            Path(("figura-demo".to_owned(), 1)),
-        )
-        .await
-        .unwrap();
+        let modern_download =
+            download_asset(State(state), headers, Path(("figura-demo".to_owned(), 1)))
+                .await
+                .unwrap();
         assert_eq!(modern_download.headers()["x-asset-format"], "figura");
     }
 }

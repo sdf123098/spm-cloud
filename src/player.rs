@@ -1060,7 +1060,10 @@ mod tests {
             "asset_id":"figura-model","asset_revision":1,"raw_sha256":"sha","texture_id":"default"
         }))
         .unwrap();
-        assert_eq!(state.store.publish_player("account_local", &body).unwrap(), 1);
+        assert_eq!(
+            state.store.publish_player("account_local", &body).unwrap(),
+            1
+        );
 
         let mut legacy_headers = axum::http::HeaderMap::new();
         legacy_headers.insert(

@@ -68,13 +68,29 @@ pub async fn list(
         (conn.total_changes(), external)
     };
     let supports_figura = crate::protocol::request_supports_figura(&headers);
-    let key = cache.key(&json!([account, scope, query, after, limit, epoch, supports_figura]));
+    let key = cache.key(&json!([
+        account,
+        scope,
+        query,
+        after,
+        limit,
+        epoch,
+        supports_figura
+    ]));
     if let Some(page) = cache.get(&key).await
         && cached_page_is_current(&state, &account, &scope, &page, supports_figura)?
     {
         return Ok(Json(page));
     }
-    let page = load_page(&state, &account, &scope, &query, &after, limit, supports_figura)?;
+    let page = load_page(
+        &state,
+        &account,
+        &scope,
+        &query,
+        &after,
+        limit,
+        supports_figura,
+    )?;
     cache.put(key, page.clone()).await;
     Ok(Json(page))
 }
@@ -109,7 +125,8 @@ fn load_page(
             |r| {
                 let owner: String = r.get(7)?;
                 let raw_format: String = r.get(3)?;
-                let format = crate::protocol::adapt_wire_format(&raw_format, supports_figura).to_owned();
+                let format =
+                    crate::protocol::adapt_wire_format(&raw_format, supports_figura).to_owned();
                 let mut entry = serde_json::to_value(
                     AssetSummary {
                         asset_id: r.get(0)?,
@@ -198,7 +215,9 @@ fn cached_page_is_current(
                 .is_some_and(|entry| {
                     let built: rusqlite::Result<Value> = (|| {
                         let raw_format: String = r.get(3)?;
-                        let format = crate::protocol::adapt_wire_format(&raw_format, supports_figura).to_owned();
+                        let format =
+                            crate::protocol::adapt_wire_format(&raw_format, supports_figura)
+                                .to_owned();
                         let mut actual = serde_json::to_value(
                             AssetSummary {
                                 asset_id: id,
@@ -282,13 +301,10 @@ mod tests {
         .unwrap();
         assert_eq!(legacy_page["entries"][0]["format"], "zip");
 
-        let Json(modern_cached) = list(
-            State(state),
-            modern_headers,
-            Query(CatalogQuery::default()),
-        )
-        .await
-        .unwrap();
+        let Json(modern_cached) =
+            list(State(state), modern_headers, Query(CatalogQuery::default()))
+                .await
+                .unwrap();
         assert_eq!(modern_cached["entries"][0]["format"], "figura");
     }
 }
