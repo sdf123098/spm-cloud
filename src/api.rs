@@ -2485,10 +2485,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn figura_upload_download_and_instance_capability_adapt_for_legacy_and_240() {
         let (state, _directory) = test_state(false);
-        let token = state
-            .store
-            .issue_session_token("account_local", "test-device", 3600)
-            .unwrap();
 
         let Json(instance) = instance(State(state.clone())).await;
         assert_eq!(instance.protocol, PROTOCOL_V1);
@@ -2514,7 +2510,7 @@ pub(crate) mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            HeaderValue::from_static("Bearer bootstrap-secret"),
         );
         headers.insert(
             "idempotency-key",

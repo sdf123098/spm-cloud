@@ -1044,10 +1044,6 @@ mod tests {
     #[tokio::test]
     async fn figura_player_appearance_adapts_format_by_client_version() {
         let (state, _dir) = crate::api::tests::test_state(false);
-        let token = state
-            .store
-            .issue_session_token("account_local", "dev", 3600)
-            .unwrap();
         let profile = uuid::Uuid::new_v4();
         {
             let conn = state.store.connection.lock().unwrap();
@@ -1068,7 +1064,7 @@ mod tests {
         let mut legacy_headers = axum::http::HeaderMap::new();
         legacy_headers.insert(
             axum::http::header::AUTHORIZATION,
-            axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            axum::http::HeaderValue::from_static("Bearer bootstrap-secret"),
         );
         legacy_headers.insert(
             "x-spm-client-version",
@@ -1089,7 +1085,7 @@ mod tests {
         let mut modern_headers = axum::http::HeaderMap::new();
         modern_headers.insert(
             axum::http::header::AUTHORIZATION,
-            axum::http::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            axum::http::HeaderValue::from_static("Bearer bootstrap-secret"),
         );
         modern_headers.insert(
             "x-spm-client-version",

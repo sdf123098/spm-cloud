@@ -253,10 +253,6 @@ mod tests {
     #[tokio::test]
     async fn catalog_list_adapts_figura_format_for_legacy_and_240_without_cache_poisoning() {
         let (state, _dir) = crate::api::tests::test_state(false);
-        let token = state
-            .store
-            .issue_session_token("account_local", "dev", 3600)
-            .unwrap();
         let path = state.store.object_path_for_sha("sha-figura");
         state
             .store
@@ -274,7 +270,7 @@ mod tests {
         let mut modern_headers = HeaderMap::new();
         modern_headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            HeaderValue::from_static("Bearer bootstrap-secret"),
         );
         modern_headers.insert("x-spm-client-version", HeaderValue::from_static("2.4.0"));
         let Json(modern_page) = list(
@@ -289,7 +285,7 @@ mod tests {
         let mut legacy_headers = HeaderMap::new();
         legacy_headers.insert(
             header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            HeaderValue::from_static("Bearer bootstrap-secret"),
         );
         legacy_headers.insert("x-spm-client-version", HeaderValue::from_static("2.0.0"));
         let Json(legacy_page) = list(
