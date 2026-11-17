@@ -62,7 +62,7 @@ pub fn request_supports_figura(headers: &axum::http::HeaderMap) -> bool {
     client_supports_figura(header_value)
 }
 
-pub fn adapt_wire_format<'a>(format: &'a str, supports_figura: bool) -> &'a str {
+pub fn adapt_wire_format(format: &str, supports_figura: bool) -> &str {
     if !supports_figura && format.eq_ignore_ascii_case("figura") {
         // Pre-2.4.0 clients reject "figura" in CloudPlayerSelection/CloudAssetClient; ".figura" is a valid ZIP archive they can still parse via ZipModelSniffer.
         "zip"
